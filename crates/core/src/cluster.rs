@@ -1,36 +1,60 @@
 //! Discovery and one-shot reads.
 
+use std::collections::HashSet;
+
 use k8s_openapi::api::core::v1::Namespace;
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::discovery::{ApiResource, Discovery, Scope, verbs};
 use kube::{Client, ResourceExt};
 
-use crate::Result;
+use crate::{Result, catalog};
 use crate::types::{KindInfo, KindRef};
 
-/// All resource types the server lets us list, sorted by group then kind.
-/// Uses the preferred version of each group.
+/// All resource types the server lets us list, in sidebar order: by section,
+/// then catalog position, then group and kind. Uses each group's preferred version.
 pub async fn discover_kinds(client: &Client) -> Result<Vec<KindInfo>> {
     let discovery = Discovery::new(client.clone()).run().await?;
-    let mut kinds: Vec<KindInfo> = discovery
+    let crd_names = crd_names(client).await;
+    let mut kinds: Vec<(usize, KindInfo)> = discovery
         .groups()
         .flat_map(|group| group.recommended_resources())
         .filter(|(_, caps)| caps.supports_operation(verbs::LIST))
-        .map(|(ar, caps)| KindInfo {
-            kind: KindRef {
+        .map(|(ar, caps)| {
+            let kind = KindRef {
                 group: ar.group,
                 version: ar.version,
                 kind: ar.kind,
                 plural: ar.plural,
                 namespaced: caps.scope == Scope::Namespaced,
-            },
-            verbs: caps.operations,
+            };
+            let (category, position) = catalog::classify(&kind, &crd_names);
+            let info = KindInfo {
+                kind,
+                verbs: caps.operations,
+                category,
+            };
+            (position, info)
         })
         .collect();
-    kinds.sort_by(|a, b| {
-        (a.kind.group.as_str(), a.kind.kind.as_str()).cmp(&(b.kind.group.as_str(), b.kind.kind.as_str()))
+    kinds.sort_by(|(pa, a), (pb, b)| {
+        (a.category, pa, &a.kind.group, &a.kind.kind).cmp(&(b.category, pb, &b.kind.group, &b.kind.kind))
     });
-    Ok(kinds)
+    Ok(kinds.into_iter().map(|(_, info)| info).collect())
+}
+
+/// Names (`<plural>.<group>`) of installed CRDs, fetched as metadata only since
+/// full CRDs carry large schemas. Empty if CRDs can't be listed; the catalog
+/// then falls back to treating non-built-in groups as custom.
+async fn crd_names(client: &Client) -> HashSet<String> {
+    let api: Api<CustomResourceDefinition> = Api::all(client.clone());
+    match api.list_metadata(&ListParams::default()).await {
+        Ok(list) => list.items.iter().map(|crd| crd.name_any()).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list CRDs");
+            HashSet::new()
+        }
+    }
 }
 
 pub async fn list_namespaces(client: &Client) -> Result<Vec<String>> {

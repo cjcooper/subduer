@@ -51,11 +51,54 @@ impl KindRef {
     }
 }
 
+/// Sidebar section a kind belongs to, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Category {
+    Workloads,
+    Config,
+    Network,
+    Storage,
+    Namespaces,
+    AccessControl,
+    /// Kinds added to the cluster (CRDs and aggregated APIs).
+    CustomResources,
+    /// Built-in kinds that don't fit a section above.
+    Other,
+}
+
+impl Category {
+    /// Default sidebar order.
+    pub const ALL: [Category; 8] = [
+        Self::Workloads,
+        Self::Config,
+        Self::Network,
+        Self::Storage,
+        Self::Namespaces,
+        Self::AccessControl,
+        Self::CustomResources,
+        Self::Other,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Workloads => "Workloads",
+            Self::Config => "Config",
+            Self::Network => "Network",
+            Self::Storage => "Storage",
+            Self::Namespaces => "Namespaces",
+            Self::AccessControl => "Access Control",
+            Self::CustomResources => "Custom Resources",
+            Self::Other => "Other",
+        }
+    }
+}
+
 /// A listable resource type discovered on the cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindInfo {
     pub kind: KindRef,
     pub verbs: Vec<String>,
+    pub category: Category,
 }
 
 /// Result of connecting to a context.

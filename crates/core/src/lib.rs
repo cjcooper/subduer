@@ -1,5 +1,6 @@
 //! Cluster access for k8s-subduer, independent of any UI.
 
+pub mod catalog;
 pub mod cluster;
 pub mod contexts;
 pub mod safety;

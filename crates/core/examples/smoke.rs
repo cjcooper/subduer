@@ -18,6 +18,9 @@ async fn main() -> subduer_core::Result<()> {
     let client = contexts::client_for(&kubeconfig, &context).await?;
     let kinds = cluster::discover_kinds(&client).await?;
     println!("{} listable kinds on {context}", kinds.len());
+    for info in &kinds {
+        println!("  {:<16} {}", info.category.label(), info.kind.key());
+    }
     println!("namespaces: {:?}", cluster::list_namespaces(&client).await?);
 
     let pods = kinds.iter().find(|k| k.kind.key() == "core/Pod").expect("pods").kind.clone();

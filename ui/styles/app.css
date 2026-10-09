@@ -71,13 +71,24 @@ button, input, select { font: inherit; color: inherit; }
 }
 .sidebar .search { margin: 10px; }
 .kinds { overflow-y: auto; padding: 0 6px 12px; }
+.kind-section-title {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin-top: 8px; padding: 4px 8px; border: none; background: none; cursor: pointer;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+}
+.kind-section-title:hover { color: var(--text); }
+.kind-section { border-top: 2px solid transparent; border-radius: 4px; }
+.kind-section.dragging { opacity: 0.4; }
+.kind-section.drop-target { border-top-color: var(--accent); background: var(--accent-soft); }
+.chevron { display: inline-block; width: 10px; transition: transform 0.12s; }
+.chevron.open { transform: rotate(90deg); }
+.section-count { margin-left: auto; font-weight: 400; }
 .kind-group-title {
-  margin: 12px 8px 4px; font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+  margin: 8px 10px 2px 22px; font-size: 11px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .kind {
-  display: block; width: 100%; text-align: left; padding: 4px 10px;
+  display: block; width: 100%; text-align: left; padding: 4px 10px 4px 22px;
   border: none; background: none; border-radius: 5px; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }

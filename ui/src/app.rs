@@ -1,30 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{ClusterInfo, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
+use subduer_types::{Category, ClusterInfo, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
 
 use crate::tauri::{NoArgs, invoke, listen};
-
-/// Kinds pinned at the top of the sidebar, as `group/Kind` keys.
-const COMMON_KINDS: &[&str] = &[
-    "core/Pod",
-    "apps/Deployment",
-    "apps/StatefulSet",
-    "apps/DaemonSet",
-    "batch/Job",
-    "batch/CronJob",
-    "core/Service",
-    "networking.k8s.io/Ingress",
-    "core/ConfigMap",
-    "core/Secret",
-    "core/PersistentVolumeClaim",
-    "core/Namespace",
-    "core/Node",
-    "core/Event",
-];
 
 /// App-wide reactive state. Every field is a `Copy` signal handle.
 #[derive(Clone, Copy)]
@@ -38,6 +20,13 @@ struct Store {
     /// `None` = all namespaces. Kept when switching kinds.
     namespace: RwSignal<Option<String>>,
     kind_filter: RwSignal<String>,
+    /// Expanded sidebar sections; all start closed.
+    expanded: RwSignal<HashSet<Category>>,
+    /// User's sidebar section order (drag and drop), persisted locally.
+    section_order: RwSignal<Vec<Category>>,
+    /// Section being dragged, and the section it's hovering over.
+    dragging: RwSignal<Option<Category>>,
+    drop_target: RwSignal<Option<Category>>,
     row_filter: RwSignal<String>,
     table: RwSignal<Option<ResourceTable>>,
     /// Snapshots from watches older than this id are ignored.
@@ -61,6 +50,10 @@ impl Store {
             kind: RwSignal::new(None),
             namespace: RwSignal::new(None),
             kind_filter: RwSignal::new(String::new()),
+            expanded: RwSignal::new(HashSet::new()),
+            section_order: RwSignal::new(crate::prefs::load_section_order()),
+            dragging: RwSignal::new(None),
+            drop_target: RwSignal::new(None),
             row_filter: RwSignal::new(String::new()),
             table: RwSignal::new(None),
             min_watch_id: RwSignal::new(0),
@@ -326,35 +319,31 @@ fn UnlockDialog(store: Store) -> impl IntoView {
 
 #[component]
 fn Sidebar(store: Store) -> impl IntoView {
-    // (section title, kinds) after applying the search box.
+    // Kinds arrive from the backend already in section order.
     let sections = move || {
         let filter = store.kind_filter.get().to_lowercase();
-        let kinds: Vec<KindRef> = store
-            .cluster
-            .get()
-            .map(|c| c.kinds.into_iter().map(|k| k.kind).collect())
-            .unwrap_or_default();
         let matches = |k: &KindRef| {
             filter.is_empty()
                 || k.kind.to_lowercase().contains(&filter)
                 || k.plural.contains(&filter)
                 || k.group.contains(&filter)
         };
-        let common: Vec<KindRef> = COMMON_KINDS
-            .iter()
-            .filter_map(|key| kinds.iter().find(|k| k.key() == *key))
-            .filter(|k| matches(k))
-            .cloned()
-            .collect();
-        let mut by_group: BTreeMap<String, Vec<KindRef>> = BTreeMap::new();
-        for k in kinds.into_iter().filter(|k| matches(k)) {
-            let group = if k.group.is_empty() { "core".to_owned() } else { k.group.clone() };
-            by_group.entry(group).or_default().push(k);
-        }
-        let mut sections = vec![("Common".to_owned(), common)];
-        sections.extend(by_group);
-        sections.retain(|(_, kinds)| !kinds.is_empty());
-        sections
+        let kinds = store.cluster.get().map(|c| c.kinds).unwrap_or_default();
+        // Kinds within a section keep the backend's order.
+        store
+            .section_order
+            .get()
+            .into_iter()
+            .map(|category| {
+                let in_section = kinds
+                    .iter()
+                    .filter(|k| k.category == category && matches(&k.kind))
+                    .map(|k| k.kind.clone())
+                    .collect::<Vec<_>>();
+                (category, in_section)
+            })
+            .filter(|(_, kinds)| !kinds.is_empty())
+            .collect::<Vec<_>>()
     };
 
     view! {
@@ -367,28 +356,120 @@ fn Sidebar(store: Store) -> impl IntoView {
                 on:input=move |ev| store.kind_filter.set(event_target_value(&ev))
             />
             <div class="kinds">
-                {move || sections().into_iter().map(|(title, kinds)| view! {
-                    <div class="kind-group">
-                        <div class="kind-group-title">{title}</div>
-                        {kinds.into_iter().map(|k| {
-                            let key = k.key();
-                            let active = move || store.kind.get().is_some_and(|cur| cur.key() == key);
-                            let label = k.kind.clone();
-                            let title = format!("{} ({})", k.plural, k.api_version());
-                            view! {
-                                <button
-                                    class="kind"
-                                    class:active=active
-                                    title=title
-                                    on:click=move |_| store.kind.set(Some(k.clone()))
-                                >{label}</button>
+                {move || sections().into_iter().map(|(category, kinds)| {
+                    // Searching shows every match, even in collapsed sections.
+                    let open = move || {
+                        !store.kind_filter.with(String::is_empty)
+                            || store.expanded.with(|c| c.contains(&category))
+                    };
+                    let toggle = move |_| store.expanded.update(|c| {
+                        if !c.remove(&category) {
+                            c.insert(category);
+                        }
+                    });
+                    let count = kinds.len();
+                    let is_dragging = move || store.dragging.get() == Some(category);
+                    let is_target = move || {
+                        store.drop_target.get() == Some(category) && store.dragging.get() != Some(category)
+                    };
+                    view! {
+                        <div
+                            class="kind-section"
+                            class:dragging=is_dragging
+                            class:drop-target=is_target
+                            on:dragover=move |ev: web_sys::DragEvent| {
+                                if store.dragging.get_untracked().is_some() {
+                                    ev.prevent_default();
+                                    store.drop_target.set(Some(category));
+                                }
                             }
-                        }).collect_view()}
-                    </div>
+                            on:drop=move |ev: web_sys::DragEvent| {
+                                ev.prevent_default();
+                                if let Some(moved) = store.dragging.get_untracked() {
+                                    move_section(store, moved, category);
+                                }
+                                end_drag(store);
+                            }
+                        >
+                            <button
+                                class="kind-section-title"
+                                draggable="true"
+                                title="Drag to reorder"
+                                on:click=toggle
+                                on:dragstart=move |ev: web_sys::DragEvent| {
+                                    // WebKit only starts a drag when data is set.
+                                    if let Some(dt) = ev.data_transfer() {
+                                        dt.set_effect_allowed("move");
+                                        let _ = dt.set_data("text/plain", category.label());
+                                    }
+                                    store.dragging.set(Some(category));
+                                }
+                                on:dragend=move |_| end_drag(store)
+                            >
+                                <span class="chevron" class:open=open>"▸"</span>
+                                {category.label()}
+                                <span class="section-count">{count}</span>
+                            </button>
+                            <Show when=open>
+                                {kind_list(store, category, kinds.clone())}
+                            </Show>
+                        </div>
+                    }
                 }).collect_view()}
             </div>
         </nav>
     }
+}
+
+/// Moves `moved` to where `target` is, shifting the sections in between.
+fn move_section(store: Store, moved: Category, target: Category) {
+    if moved == target {
+        return;
+    }
+    store.section_order.update(|order| {
+        let (Some(from), Some(to)) = (
+            order.iter().position(|c| *c == moved),
+            order.iter().position(|c| *c == target),
+        ) else {
+            return;
+        };
+        let item = order.remove(from);
+        order.insert(to, item);
+    });
+    crate::prefs::save_section_order(&store.section_order.get_untracked());
+}
+
+fn end_drag(store: Store) {
+    store.dragging.set(None);
+    store.drop_target.set(None);
+}
+
+/// Kind buttons for one section. Custom resources get a sub-heading per API group.
+fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl IntoView {
+    let mut last_group: Option<String> = None;
+    kinds
+        .into_iter()
+        .map(|k| {
+            let heading = (category == Category::CustomResources && last_group.as_deref() != Some(&k.group))
+                .then(|| {
+                    last_group = Some(k.group.clone());
+                    view! { <div class="kind-group-title">{k.group.clone()}</div> }
+                });
+            let key = k.key();
+            let active = move || store.kind.get().is_some_and(|cur| cur.key() == key);
+            let label = k.kind.clone();
+            let title = format!("{} ({})", k.plural, k.api_version());
+            view! {
+                {heading}
+                <button
+                    class="kind"
+                    class:active=active
+                    title=title
+                    on:click=move |_| store.kind.set(Some(k.clone()))
+                >{label}</button>
+            }
+        })
+        .collect_view()
 }
 
 #[component]
