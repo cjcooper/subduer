@@ -1,0 +1,9 @@
+[package]
+name = "subduer-types"
+description = "Types shared between the backend and the UI (must stay wasm-compatible)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true

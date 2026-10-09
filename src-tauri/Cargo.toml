@@ -1,0 +1,23 @@
+[package]
+name = "k8s-subduer"
+description = "Desktop app for browsing and controlling Kubernetes clusters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "k8s_subduer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+subduer-core.workspace = true
+subduer-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.12", features = [] }
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
