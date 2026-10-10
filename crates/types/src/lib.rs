@@ -549,6 +549,18 @@ pub fn has_workload_logs(kind: &KindRef) -> bool {
     )
 }
 
+/// Kinds that get Restart (a new rollout of the pod template) and Scale.
+pub fn is_scalable_workload(kind: &KindRef) -> bool {
+    matches!((kind.group.as_str(), kind.kind.as_str()), ("apps", "Deployment" | "StatefulSet"))
+}
+
+/// A workload's scale subresource: replicas asked for and replicas running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replicas {
+    pub desired: i32,
+    pub current: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogLine {
     /// `pod/container` when several streams are merged.

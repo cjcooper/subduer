@@ -422,6 +422,8 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 /* Port forwards */
 .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .modal-actions .primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.replicas { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.replicas-input { width: 90px; }
 .port-options { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 14px; }
 .port-option { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .local-port { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }

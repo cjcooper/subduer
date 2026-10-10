@@ -2,7 +2,28 @@
 
 How to pick this project back up. It covers what exists, how to run and verify it, the decisions behind it, and what's next. `README.md` is the short user-facing summary; this file is the working notes.
 
-_Last updated: 2026-10-10._
+_Last updated: 2026-10-10 (end of session)._
+
+## 0. Where things stand (read first)
+
+- **Nothing from this session is committed.** The user runs git. Everything since `eeab0e7` (sidebar sections) is in the working tree, along with the earlier uncommitted icon and core changes. A natural commit split, in the order things were built:
+  1. Pod usage: kubelet fallback, node ceiling, then last-hour line charts (Prometheus or local samples).
+  2. Delete, with the safety gate.
+  3. Sidebar icons, Helm group, cloud sections (AWS, Google Cloud, Azure), and `resources_by_stability` discovery.
+  4. About panel, MIT license.
+  5. Cluster page usage and history from Prometheus.
+  6. Logs windows; Shell (exec) windows with vendored xterm.js; port-forwarding.
+  7. File upload (with the folder browser) and download.
+  8. Restart and Scale for Deployments and StatefulSets.
+- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (29 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+- **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
+- **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
+- **Restart/Scale not yet dry-run on UAT:** the AWS SSO token had expired. After `aws sso login --profile uat`, run `examples/workload_dry_run.rs` against a UAT Deployment and StatefulSet (section 3). The harness checks passed.
+- **Open questions for the user:**
+  - Should port-forwards on prod contexts require unlocking? (Currently not gated.)
+  - Should revealing secrets require unlocking?
+  - Should logs and shell windows stay open when the main window closes? (Currently they close with it.)
+
 
 ## 1. What it is
 
@@ -10,7 +31,7 @@ A macOS-first desktop app for browsing and controlling Kubernetes clusters. It's
 
 - **Stack:** Rust everywhere, using a Tauri v2 shell, a `kube-rs` backend and a Leptos 0.8 UI built to WASM with Trunk. Use another language only where the OS forces it.
 - **Navigation:** by kind, with a namespace filter that persists across kinds.
-- **Safety:** read-only by default. Delete is the only mutation so far, behind the safety gate.
+- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Shell, Upload) are behind the safety gate.
 
 ## 2. Getting set up
 
@@ -43,10 +64,11 @@ cargo run -p subduer-core --example pod      -- <context> <ns> <pod>     # Pod D
 cargo run -p subduer-core --example history  -- <context> <ns> <pod>     # last-hour CPU/memory; shows which Prometheus it found
 cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm release summary (no values/manifest)
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
+cargo run -p subduer-core --example workload_dry_run -- <context> apps/Deployment <ns> <name> [replicas]   # replicas, then dry-run restart (and scale); checks the gate refuses
 ```
 
 - Use **`eg-uat-uat-v2`** for real-cluster checks. Docker Desktop's Kubernetes is usually off.
-- **Never point anything that writes at production.** All the examples are read-only (`delete_dry_run` uses the server's `dryRun=All`).
+- **Never point anything that writes at production.** All the examples are read-only (`delete_dry_run` and `workload_dry_run` use the server's `dryRun=All`).
 - **zsh doesn't word-split** unquoted variables. When passing `ns pod` from a variable, use `${=var}` or pass the words separately.
 
 ### Checking the UI without the app window (headless Chrome harness)
@@ -70,7 +92,7 @@ This is how the UI has been visually verified so far. Nothing is committed for i
 
 Encoding gotcha: a `Containers` cell is `state␞name␞detail␞(i|)`, with entries separated by `␟`. The real separators are the control characters `\u001e` and `\u001f`; see `subduer_types::containers`.
 
-A good follow-up is to commit this harness under `tools/ui-harness/` with JSON fixtures.
+The stubs are in `tools/ui-harness/` (see its README for the query parameters each one takes).
 
 ## 4. Layout and data flow
 
@@ -85,7 +107,7 @@ crates/core    all cluster logic, no UI deps
   watch.rs       watch -> full snapshot, throttled to 250 ms
   overview.rs    Cluster page: nodes, pods, requests/limits, usage (metrics-server → Prometheus → kubelet), last-hour history, warnings (1h)
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
-  actions.rs     mutations; each checks SafetyGate first (delete so far)
+  actions.rs     mutations; each checks SafetyGate first (delete, restart, scale)
   exec.rs        interactive shells (kubectl exec -it) over the websocket; callers check the gate
   logs.rs        container log streams: one container, or a workload's pods merged (stern-style)
   forward.rs     port-forwarding: 127.0.0.1 listener, one portforward stream per connection; services resolve to a ready pod
@@ -118,6 +140,8 @@ ui             Leptos CSR app
 | `pod_details` | Pod Details tab data |
 | `pod_history` | Last hour of pod and container CPU/memory, polled every 15 s |
 | `delete_resource` | Deletes one object; needs the context unlocked and still connected |
+| `get_replicas` | Desired and current replicas (scale subresource), for the Scale dialog |
+| `restart_workload` / `scale_workload` | Rollout restart, set replicas; checked like `delete_resource` |
 | `open_logs` | Opens (or focuses) a logs window bound to the current cluster |
 | `logs_start` | Called by a logs window: (re)starts its stream, events on the window's own name |
 | `open_exec` | Opens a shell window (needs the context unlocked) |
@@ -151,6 +175,9 @@ ui             Leptos CSR app
 - **Cluster page:** KPI tiles; memory (the headline number) and CPU, each with used, requested and limit meters; pods by status as a stacked bar; requests by namespace (top 8 plus Other); and a nodes table. Chart colours follow the dataviz skill palette (series blue plus the fixed status palette).
 - **Node page:** the same table as the Cluster page, with selectable rows that open YAML.
 - **Pod Details tab:** collapsible sections for resources (last-hour line charts with request and limit lines), pod info, each container (resources, state, ports, environment) and events. The collapsed state persists. Secret values are masked until **Show**, forgotten when the selection changes, and never logged.
+- **Pod containers** get action buttons: Forward (needs declared ports), Upload, Download, Shell (Upload and Shell are gated, and all four need the container running), and Logs.
+- **Workloads** (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, ReplicationController) get merged Logs; Deployments and StatefulSets also get Restart and Scale (gated). Services get Forward. Every kind with the `delete` verb gets Delete (gated).
+- **Separate windows** for logs and shells, listed under the Window menu. **Port Forwards** page at the top of the sidebar.
 - **App icon:** `src-tauri/icons/make_icon.py` generates `icon.svg`, a 7-spoke helm inside a control dial. Regeneration steps are in the script's header.
 
 ## 6. Decisions and why
@@ -168,6 +195,13 @@ ui             Leptos CSR app
   - The command re-checks that the dialog's context is still the connected one.
   - Background propagation, matching kubectl. No force or grace-period option yet.
   - Tested only by server-side dry run on UAT.
+- **Restart and Scale** (`actions::restart`/`scale`, `ui/src/workload.rs`):
+  - Header buttons for Deployments and StatefulSets (`subduer_types::is_scalable_workload`) whose discovery verbs include `patch`. Gated like Delete: a locked context gets the unlock prompt, then the dialog.
+  - Restart is `kubectl rollout restart`: a merge patch setting `kubectl.kubernetes.io/restartedAt` (UTC, whole seconds) on the pod template.
+  - Scale patches the `scale` subresource, like `kubectl scale`. The dialog reads the live counts (`get_replicas`) and defaults to the desired one; Scale is disabled until the number changes. It warns when scaling to 0, and when scaling a StatefulSet down (highest ordinals go, PVCs stay).
+  - Production-like contexts need the name typed, as with Delete. Commands re-check that the dialog's context is still connected (`client_for_change`, shared with delete).
+  - DaemonSet restart and ReplicaSet/CRD scaling would be small additions but weren't asked for. No HPA awareness: an HPA will undo a manual scale.
+  - Checked in the headless harness (`workloadstub.js`) only; not yet dry-run on UAT.
 - **Helm** (`helm.rs`):
   - Releases are a virtual kind, `helm.sh/Release`, listed only if any `owner=helm` Secret exists. Verbs are list/watch/get, so there's no Delete: deleting the Secret isn't `helm uninstall`.
   - The list is a metadata-only watch, one row per release at its latest revision.
@@ -246,7 +280,7 @@ ui             Leptos CSR app
 These are the v1 actions the user asked for at the start. All must go through the safety gate and be tested on docker-desktop or UAT, never prod:
 
 1. ~~**Delete**~~ done: detail-panel button for any kind with the `delete` verb (see section 6).
-2. **Scale / restart.** Patch replicas; restart by setting a `kubectl.kubernetes.io/restartedAt` annotation.
+2. ~~**Scale / restart.**~~ done for Deployments and StatefulSets (see section 6); still needs the UAT dry run.
 3. **Edit YAML and apply,** using CodeMirror in the webview with a diff before applying and server-side apply.
 4. ~~**Logs / exec / port-forward**~~ done.
 
@@ -259,7 +293,10 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
-- Commit the UI test harness (section 3).
+- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
+- Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
+- Port-forward from workloads (pick a pod), and optional gating for prod.
+- Upload/download of folders (tar), and a progress indicator for big files.
 - Clean up unused icons that `cargo tauri icon` generated (`android/`, `ios/`, `Square*.png`, `StoreLogo.png`, `icon.ico`). The user hadn't approved deleting them.
 - `response.json` at the repo root (`{"status":"success"}`) has an unknown origin and wasn't created during this work.
 
@@ -268,5 +305,5 @@ Smaller items that have come up:
 - **Git:** the user runs all git commands; a hook blocks git for Claude. Claude only edits files.
 - **Before handing back:** keep lint at zero warnings for both clippy commands, run `cargo test`, and run `trunk build`.
 - **Visual changes:** check with the headless harness in both light and dark mode.
-- **Real-cluster checks:** read-only against UAT. Nothing writes to a cluster yet.
+- **Real-cluster checks:** read-only against UAT (writes only as server-side dry runs). Nothing has written to a cluster yet.
 - **Charts:** load the dataviz skill before adding any chart.

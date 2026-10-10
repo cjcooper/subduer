@@ -53,6 +53,9 @@ pub(crate) struct Store {
     pub(crate) delete_prompt: RwSignal<Option<crate::delete::DeleteTarget>>,
     /// Delete to confirm once the unlock prompt succeeds.
     pub(crate) pending_delete: RwSignal<Option<crate::delete::DeleteTarget>>,
+    /// Restart or Scale awaiting confirmation, and one waiting for the unlock prompt.
+    pub(crate) workload_prompt: RwSignal<Option<crate::workload::WorkloadTarget>>,
+    pub(crate) pending_workload: RwSignal<Option<crate::workload::WorkloadTarget>>,
     /// Shell to open once the unlock prompt succeeds: (context, target).
     pub(crate) pending_exec: RwSignal<Option<(String, subduer_types::ExecTarget)>>,
     /// Upload dialog, and one waiting for the unlock prompt.
@@ -110,6 +113,8 @@ impl Store {
             unlock_prompt: RwSignal::new(None),
             delete_prompt: RwSignal::new(None),
             pending_delete: RwSignal::new(None),
+            workload_prompt: RwSignal::new(None),
+            pending_workload: RwSignal::new(None),
             pending_exec: RwSignal::new(None),
             upload_prompt: RwSignal::new(None),
             pending_upload: RwSignal::new(None),
@@ -287,6 +292,7 @@ pub fn App() -> impl IntoView {
             </div>
             <UnlockDialog store=store />
             <crate::delete::DeleteDialog store=store />
+            <crate::workload::WorkloadDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
             <crate::download::DownloadDialog store=store />
@@ -403,6 +409,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 typed.set(String::new());
                 store.unlock_prompt.set(None);
                 store.pending_delete.set(None);
+                store.pending_workload.set(None);
                 store.pending_exec.set(None);
                 store.pending_upload.set(None);
             };
@@ -422,6 +429,13 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                             store.delete_prompt.set(Some(target));
                         }
                         store.pending_delete.set(None);
+                        if let Some(mut target) = store.pending_workload.get_untracked()
+                            && target.context.name == name
+                        {
+                            target.context.unlocked = true;
+                            store.workload_prompt.set(Some(target));
+                        }
+                        store.pending_workload.set(None);
                         if let Some((context, target)) = store.pending_exec.get_untracked()
                             && context == name
                         {
@@ -992,6 +1006,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                         <div class="detail-actions">
                             <ServiceForwardButton store=store row=row.clone() />
                             <WorkloadLogsButton store=store row=row.clone() />
+                            <crate::workload::WorkloadButtons store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
                             <button class="close" title="Close" on:click=close>"×"</button>
                         </div>

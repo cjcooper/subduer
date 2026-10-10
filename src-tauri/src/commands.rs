@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, events};
+use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, Replicas, events};
 use subduer_core::{actions, cluster, contexts, overview, pod_details, watch};
 use tauri::{AppHandle, Emitter, State};
 
@@ -134,17 +134,66 @@ pub async fn delete_resource(
     namespace: Option<String>,
     name: String,
 ) -> CmdResult<()> {
-    let (client, context) = {
-        let session = state.session.read().await;
-        let session = session.as_ref().ok_or("not connected to a cluster")?;
-        if session.context != context {
-            return Err(format!("connected to {} now, not {context}; nothing was deleted", session.context));
-        }
-        (session.client.clone(), session.context.clone())
-    };
+    let client = client_for_change(&state, &context, "deleted").await?;
     actions::delete(&client, &state.gate, &context, &kind, namespace.as_deref(), &name, false)
         .await
         .map_err(|e| e.user_message())
+}
+
+/// Desired and current replicas of a Deployment or StatefulSet, for the Scale dialog.
+#[tauri::command]
+pub async fn get_replicas(
+    state: State<'_, AppState>,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+) -> CmdResult<Replicas> {
+    let client = connected_client(&state).await?;
+    actions::replicas(&client, &kind, &namespace, &name)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Rollout restart, checked like `delete_resource`.
+#[tauri::command]
+pub async fn restart_workload(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "restarted").await?;
+    actions::restart(&client, &state.gate, &context, &kind, &namespace, &name, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Sets replicas, checked like `delete_resource`.
+#[tauri::command]
+pub async fn scale_workload(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    replicas: i32,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "scaled").await?;
+    actions::scale(&client, &state.gate, &context, &kind, &namespace, &name, replicas, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// The connected client, provided `context` (what a confirmation dialog
+/// showed) is still the connected one. `done` names the change for the error.
+async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {
+    let session = state.session.read().await;
+    let session = session.as_ref().ok_or("not connected to a cluster")?;
+    if session.context != context {
+        return Err(format!("connected to {} now, not {context}; nothing was {done}", session.context));
+    }
+    Ok(session.client.clone())
 }
 
 /// Reveals one Secret value on explicit user request. The value is returned

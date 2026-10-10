@@ -13,6 +13,7 @@ mod pod_detail;
 mod prefs;
 mod tauri;
 mod upload;
+mod workload;
 
 fn main() {
     console_error_panic_hook::set_once();
