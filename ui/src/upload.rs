@@ -5,11 +5,12 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{DirEntry, DirListing, UploadOutcome, UploadTarget};
+use subduer_types::{DirListing, UploadOutcome, UploadTarget};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::app::Store;
+use crate::browser::{BrowseMode, FolderBrowser, folder_of, join};
 use crate::overview::fmt_bytes;
 use crate::tauri::{invoke, invoke_bytes};
 
@@ -45,20 +46,6 @@ enum Phase {
     /// The file exists; offer to replace it.
     Exists(String),
     Done { bytes: u64, path: String },
-}
-
-/// `dir` joined with `name`, without doubling the slash.
-fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") }
-}
-
-/// The folder part of a destination: itself if it ends with `/`, else its parent.
-fn folder_of(path: &str) -> String {
-    match path.trim().rsplit_once('/') {
-        Some(("", _)) => "/".into(),
-        Some((dir, _)) => dir.into(),
-        None => START_DIR.into(),
-    }
 }
 
 #[component]
@@ -258,7 +245,14 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                             />
                             <span class="muted">{hint}</span>
                         </label>
-                        <FolderBrowser listing=listing suggestions=suggestions browsing=browsing dest=dest browse=browse />
+                        <FolderBrowser
+                            listing=listing
+                            suggestions=suggestions
+                            browsing=browsing
+                            browse=browse
+                            pick_file=move |path| dest.set(path)
+                            mode=BrowseMode::Upload
+                        />
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
                             <button on:click=move |_| close()>"Cancel"</button>
@@ -280,96 +274,5 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                 </div>
             }
         })
-    }
-}
-
-/// Writable-place shortcuts, breadcrumbs and the current folder's entries.
-/// Clicking a folder opens it and points the destination there; clicking a
-/// file targets it (replacing it asks first).
-#[component]
-fn FolderBrowser(
-    listing: RwSignal<Option<Result<DirListing, String>>>,
-    suggestions: RwSignal<Vec<String>>,
-    browsing: RwSignal<bool>,
-    dest: RwSignal<String>,
-    browse: impl Fn(String, bool) + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let chips = move || {
-        suggestions
-            .get()
-            .into_iter()
-            .map(|s| {
-                let to = s.clone();
-                view! { <button class="chip-button mono" title="Writable" on:click=move |_| browse(to.clone(), false)>{s}</button> }
-            })
-            .collect_view()
-    };
-    let crumbs = move |path: &str| {
-        let mut acc = String::new();
-        let mut out = vec![("/".to_owned(), "/".to_owned())];
-        for part in path.split('/').filter(|p| !p.is_empty()) {
-            acc.push('/');
-            acc.push_str(part);
-            out.push((part.to_owned(), acc.clone()));
-        }
-        out.into_iter()
-            .map(|(label, to)| view! { <button class="crumb mono" on:click=move |_| browse(to.clone(), false)>{label}</button> })
-            .collect_view()
-    };
-    let entry_row = move |dir_path: String, e: DirEntry| {
-        let full = join(&dir_path, &e.name);
-        let icon = if e.dir { "📁" } else { "📄" };
-        let note = match (e.dir, e.writable) {
-            (true, true) => "writable",
-            (true, false) => "read-only",
-            (false, true) => "replace",
-            (false, false) => "read-only",
-        };
-        let title = if e.dir { format!("Open {full}") } else { format!("Upload as {full} (asks before replacing)") };
-        let click = move |_| {
-            if e.dir {
-                browse(full.clone(), false);
-            } else {
-                dest.set(full.clone());
-            }
-        };
-        view! {
-            <button class="browse-entry" class:dim=!e.writable class:file=!e.dir title=title on:click=click>
-                <span aria-hidden="true">{icon}</span>
-                <span class="mono name">{e.name.clone()}</span>
-                <span class="muted entry-note">{note}</span>
-            </button>
-        }
-    };
-
-    view! {
-        <div class="browser" class:stale=move || browsing.get()>
-            <Show when=move || suggestions.with(|s| !s.is_empty())>
-                <div class="browser-chips"><span class="muted">"Writable:"</span>{chips}</div>
-            </Show>
-            {move || match listing.get() {
-                None => view! { <p class="muted browser-msg">"Reading the container's folders…"</p> }.into_any(),
-                Some(Err(e)) => view! { <p class="warn browser-msg">{e}</p> }.into_any(),
-                Some(Ok(l)) => {
-                    let parent = folder_of(&l.path);
-                    let at_root = l.path == "/";
-                    let status = if l.writable { "✓ writable" } else { "read-only: files can't be saved here" };
-                    let rows = l.entries.iter().cloned().map(|e| entry_row(l.path.clone(), e)).collect_view();
-                    view! {
-                        <div class="browser-bar">
-                            <button class="btn small" prop:disabled=at_root title="Up one folder" on:click=move |_| browse(parent.clone(), false)>"↑"</button>
-                            <div class="crumbs">{crumbs(&l.path)}</div>
-                            <span class="browser-status" class:ok=l.writable>{status}</span>
-                        </div>
-                        <div class="browser-list">
-                            {rows}
-                            {l.entries.is_empty().then(|| view! { <p class="muted browser-msg">"Empty folder"</p> })}
-                            {l.truncated.then(|| view! { <p class="muted browser-msg">"Showing the first 1000 entries."</p> })}
-                        </div>
-                    }
-                    .into_any()
-                }
-            }}
-        </div>
     }
 }

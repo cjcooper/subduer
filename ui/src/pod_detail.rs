@@ -366,6 +366,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     let exec_target = ExecTarget { namespace: namespace.clone(), pod: pod.clone(), container: c.name.clone() };
     let has_ports = !c.ports.is_empty();
     let (upload_ns, upload_pod, upload_container) = (namespace.clone(), pod.clone(), c.name.clone());
+    let (download_ns, download_pod, download_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let forward_ns = namespace.clone();
     let forward_source = subduer_types::ForwardSource::Pod { pod: pod.clone() };
     let actions = view! {
@@ -385,6 +386,15 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                         store, upload_ns.clone(), upload_pod.clone(), upload_container.clone(),
                     )
                 >"Upload"</button>
+            })}
+            {running.then(|| view! {
+                <button
+                    class="btn small"
+                    title=format!("Download a file from {}", c.name)
+                    on:click=move |_| crate::download::request(
+                        store, download_ns.clone(), download_pod.clone(), download_container.clone(),
+                    )
+                >"Download"</button>
             })}
             {running.then(|| view! {
                 <button

@@ -91,6 +91,7 @@ crates/core    all cluster logic, no UI deps
   forward.rs     port-forwarding: 127.0.0.1 listener, one portforward stream per connection; services resolve to a ready pod
   helm.rs        Helm releases as a virtual kind (helm.sh/Release) from owner=helm Secrets
   upload.rs      file upload into a container via exec `sh -c 'cat > "$1"'` (gated)
+  download.rs    file download out of a container (`cat` streamed to a .part file, then renamed)
   usage.rs       kubelet /stats/summary helpers (per pod, per node totals)
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
   quantity.rs    "500m"/"1.5Gi" -> numbers
@@ -123,6 +124,7 @@ ui             Leptos CSR app
 | `exec_start` / `exec_input` / `exec_resize` | Called by a shell window: (re)connect (re-checks the gate), keystrokes, terminal size |
 | `forward_ports` / `start_forward` / `list_forwards` / `stop_forward` / `open_forward` | Port-forward dialog, start, list, stop, open in browser; changes arrive as `port-forwards` events |
 | `upload_file` | Raw binary body + `x-upload` header (URL-encoded JSON `UploadTarget`); gated, context re-checked |
+| `download_file` / `reveal_download` | Save a container file into ~/Downloads (numbered if taken); show it in Finder |
 | `secret_value` | One Secret value, on explicit click |
 
 ### How things fit together
@@ -218,6 +220,13 @@ ui             Leptos CSR app
   - Without overwrite, the script exits 17 if the file exists (read from the status's `ExitCode` cause), and the dialog offers Replace.
   - Limit 512 MiB, since the file is held in memory. No `tar` needed, but distroless images can't receive files (same as `kubectl cp`).
   - Tested on UAT with `examples/upload_check.rs` (refuses prod-like contexts): browse with suggestions, `/tmp/`, `/tmp` exists then replace, an explicit name, a missing dir, a read-only root, then clean-up. The Datadog cluster agent passed every case.
+- **File download** (`crates/core/src/download.rs`, `src-tauri/src/upload.rs`, `ui/src/download.rs`):
+  - A Download button on running containers. Not gated: it changes nothing.
+  - The dialog shares `ui/src/browser.rs` (`FolderBrowser`, `BrowseMode::Download`) with upload. It starts in the container's working directory (`browse_dir` with `.`); unreadable entries are dimmed and disabled (listing entries now carry `readable`). Click or type a file; Enter downloads it.
+  - The container runs `[ -e ] || exit 21; [ -f ] || exit 19; [ -r ] || exit 20; exec cat`, giving clear "doesn't exist", "not a regular file" and "can't read" messages.
+  - Output streams to `<name>.part` in Downloads and is renamed on success (removed on failure), so it's never held in memory. `unique_path` picks `name (1).ext` like browsers do and sanitises the name.
+  - "Show in Finder" runs `open -R`, restricted to the Downloads folder.
+  - Tested on UAT with `examples/download_check.rs` (read-only): `/etc/os-release` and `/bin/sh` (130 KB) matched `wc -c`, a repeat was numbered, and `/etc` and a missing path gave clear errors. Multi-MB files weren't checked end to end.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
 - **Cloud sections** (`Category::cloud_for_group`):

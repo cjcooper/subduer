@@ -711,4 +711,14 @@ pub struct DirEntry {
     pub name: String,
     pub dir: bool,
     pub writable: bool,
+    /// Whether the container user can read it (download a file, list a folder).
+    pub readable: bool,
+}
+
+/// A file copied out of a container onto this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadResult {
+    /// Where it was saved locally.
+    pub saved_to: String,
+    pub bytes: u64,
 }

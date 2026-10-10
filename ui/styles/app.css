@@ -458,7 +458,8 @@ table.forwards td { vertical-align: middle; }
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 3px 10px;
   border: none; background: none; text-align: left; cursor: pointer; font-size: 13px;
 }
-.browse-entry:hover { background: var(--row-hover); }
+.browse-entry:hover:not(:disabled) { background: var(--row-hover); }
+.browse-entry:disabled { cursor: default; }
 .browse-entry .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .browse-entry .entry-note { font-size: 11px; }

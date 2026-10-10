@@ -36,8 +36,8 @@ exec cat > "$p"
 "#;
 
 /// $1 = directory, $2 = 1 to include suggestions. Output lines: resolved
-/// path; `w` or `-`; `S <path>` suggestions; `E<d|f><w|-> <name>` entries;
-/// `T` if truncated.
+/// path; `w` or `-`; `S <path>` suggestions; `E<d|f><w|-><r|-> <name>`
+/// entries; `T` if truncated.
 const BROWSE_SCRIPT: &str = r#"
 cd -- "$1" 2>/dev/null || { echo "Can't open $1" >&2; exit 3; }
 pwd
@@ -62,7 +62,8 @@ for f in * .[!.]* ..?*; do
   if [ "$n" -gt MAX ]; then echo T; break; fi
   if [ -d "$f" ]; then t=d; else t=f; fi
   if [ -w "$f" ]; then w=w; else w=-; fi
-  echo "E$t$w $f"
+  if [ -r "$f" ]; then r=r; else r=-; fi
+  echo "E$t$w$r $f"
 done
 "#;
 
@@ -139,22 +140,23 @@ fn parse_listing(out: &str) -> DirListing {
         } else if line == "T" {
             truncated = true;
         } else if let Some(rest) = line.strip_prefix('E')
-            && let (Some(kind), Some(w), Some(name)) = (rest.get(0..1), rest.get(1..2), rest.get(3..))
+            && let (Some(kind), Some(w), Some(r), Some(name)) =
+                (rest.get(0..1), rest.get(1..2), rest.get(2..3), rest.get(4..))
         {
-            entries.push(DirEntry { name: name.to_owned(), dir: kind == "d", writable: w == "w" });
+            entries.push(DirEntry { name: name.to_owned(), dir: kind == "d", writable: w == "w", readable: r == "r" });
         }
     }
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
     DirListing { path, writable, entries, truncated, suggestions }
 }
 
-async fn read_all(r: &mut (impl AsyncReadExt + Unpin)) -> String {
+pub(crate) async fn read_all(r: &mut (impl AsyncReadExt + Unpin)) -> String {
     let mut text = String::new();
     let _ = r.read_to_string(&mut text).await;
     text
 }
 
-fn exit_code(s: &Status) -> Option<String> {
+pub(crate) fn exit_code(s: &Status) -> Option<String> {
     s.details
         .as_ref()?
         .causes
@@ -165,7 +167,7 @@ fn exit_code(s: &Status) -> Option<String> {
 }
 
 /// Reads better in the dialog than the runtime's raw message.
-fn friendly(stderr: &str, s: &Status) -> String {
+pub(crate) fn friendly(stderr: &str, s: &Status) -> String {
     let raw = match stderr.trim() {
         "" => s.message.clone().unwrap_or_default(),
         e => e.to_owned(),
@@ -204,7 +206,7 @@ mod tests {
 
     #[test]
     fn parses_listings() {
-        let out = "/data\nw\nS /tmp\nS /data\nS /tmp\nEdw cache\nEf- config.yaml\nEd- .hidden dir\nEfw a b.txt\n";
+        let out = "/data\nw\nS /tmp\nS /data\nS /tmp\nEdwr cache\nEf-r config.yaml\nEd-- .hidden dir\nEfwr a b.txt\n";
         let l = parse_listing(out);
         assert_eq!(l.path, "/data");
         assert!(l.writable && !l.truncated);
@@ -212,5 +214,6 @@ mod tests {
         let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, [".hidden dir", "cache", "a b.txt", "config.yaml"]);
         assert!(l.entries[1].writable && l.entries[1].dir && !l.entries[0].writable);
+        assert!(!l.entries[0].readable && l.entries[3].readable);
     }
 }

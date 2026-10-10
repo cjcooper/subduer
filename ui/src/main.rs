@@ -1,7 +1,9 @@
 mod app;
+mod browser;
 mod chart;
 mod columns;
 mod delete;
+mod download;
 mod exec;
 mod forward;
 mod icons;

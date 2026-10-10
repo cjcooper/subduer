@@ -95,6 +95,8 @@ pub fn run() {
             forward::open_forward,
             upload::upload_file,
             upload::browse_dir,
+            upload::download_file,
+            upload::reveal_download,
             commands::secret_value,
         ])
         .run(tauri::generate_context!())

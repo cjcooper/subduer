@@ -58,6 +58,7 @@ pub(crate) struct Store {
     /// Upload dialog, and one waiting for the unlock prompt.
     pub(crate) upload_prompt: RwSignal<Option<crate::upload::UploadPrompt>>,
     pub(crate) pending_upload: RwSignal<Option<crate::upload::UploadPrompt>>,
+    pub(crate) download_prompt: RwSignal<Option<crate::download::DownloadPrompt>>,
     /// Showing the Cluster page instead of a kind's table.
     pub(crate) overview_open: RwSignal<bool>,
     /// Showing the Port Forwards page.
@@ -112,6 +113,7 @@ impl Store {
             pending_exec: RwSignal::new(None),
             upload_prompt: RwSignal::new(None),
             pending_upload: RwSignal::new(None),
+            download_prompt: RwSignal::new(None),
             overview_open: RwSignal::new(true),
             forwards_open: RwSignal::new(false),
             forwards: RwSignal::new(vec![]),
@@ -287,6 +289,7 @@ pub fn App() -> impl IntoView {
             <crate::delete::DeleteDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
+            <crate::download::DownloadDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
