@@ -1,42 +1,78 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{Category, ClusterInfo, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
+use subduer_types::{Category, ClusterInfo, ClusterOverview, PodDetails, PodHistory, Column, ColumnKind, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
 
+use subduer_types::containers::{self, State};
+
+use crate::columns::{ColumnWidths, ResizableTh};
 use crate::tauri::{NoArgs, invoke, listen};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailTab {
+    Details,
+    Yaml,
+}
+
+/// Seconds between background refreshes of the selected pod's details.
+const POD_REFRESH: Duration = Duration::from_secs(15);
 
 /// App-wide reactive state. Every field is a `Copy` signal handle.
 #[derive(Clone, Copy)]
-struct Store {
-    contexts: RwSignal<Vec<ContextInfo>>,
-    context: RwSignal<Option<String>>,
-    cluster: RwSignal<Option<ClusterInfo>>,
-    connecting: RwSignal<bool>,
-    error: RwSignal<Option<String>>,
-    kind: RwSignal<Option<KindRef>>,
+pub(crate) struct Store {
+    pub(crate) contexts: RwSignal<Vec<ContextInfo>>,
+    pub(crate) context: RwSignal<Option<String>>,
+    pub(crate) cluster: RwSignal<Option<ClusterInfo>>,
+    pub(crate) connecting: RwSignal<bool>,
+    pub(crate) error: RwSignal<Option<String>>,
+    pub(crate) kind: RwSignal<Option<KindRef>>,
     /// `None` = all namespaces. Kept when switching kinds.
-    namespace: RwSignal<Option<String>>,
-    kind_filter: RwSignal<String>,
+    pub(crate) namespace: RwSignal<Option<String>>,
+    pub(crate) kind_filter: RwSignal<String>,
     /// Expanded sidebar sections; all start closed.
-    expanded: RwSignal<HashSet<Category>>,
+    pub(crate) expanded: RwSignal<HashSet<Category>>,
     /// User's sidebar section order (drag and drop), persisted locally.
-    section_order: RwSignal<Vec<Category>>,
+    pub(crate) section_order: RwSignal<Vec<Category>>,
     /// Section being dragged, and the section it's hovering over.
-    dragging: RwSignal<Option<Category>>,
-    drop_target: RwSignal<Option<Category>>,
-    row_filter: RwSignal<String>,
-    table: RwSignal<Option<ResourceTable>>,
+    pub(crate) dragging: RwSignal<Option<Category>>,
+    pub(crate) drop_target: RwSignal<Option<Category>>,
+    pub(crate) row_filter: RwSignal<String>,
+    pub(crate) table: RwSignal<Option<ResourceTable>>,
     /// Snapshots from watches older than this id are ignored.
-    min_watch_id: RwSignal<u64>,
-    selected: RwSignal<Option<ResourceRow>>,
-    yaml: RwSignal<Option<Result<String, String>>>,
+    pub(crate) min_watch_id: RwSignal<u64>,
+    pub(crate) selected: RwSignal<Option<ResourceRow>>,
+    pub(crate) yaml: RwSignal<Option<Result<String, String>>>,
     /// Current time (ms), ticking so ages stay fresh.
-    now: RwSignal<f64>,
+    pub(crate) now: RwSignal<f64>,
     /// Context awaiting unlock confirmation.
-    unlock_prompt: RwSignal<Option<ContextInfo>>,
+    pub(crate) unlock_prompt: RwSignal<Option<ContextInfo>>,
+    /// Object awaiting delete confirmation.
+    pub(crate) delete_prompt: RwSignal<Option<crate::delete::DeleteTarget>>,
+    /// Delete to confirm once the unlock prompt succeeds.
+    pub(crate) pending_delete: RwSignal<Option<crate::delete::DeleteTarget>>,
+    /// Showing the Cluster page instead of a kind's table.
+    pub(crate) overview_open: RwSignal<bool>,
+    pub(crate) overview: RwSignal<Option<ClusterOverview>>,
+    pub(crate) overview_error: RwSignal<Option<String>>,
+    pub(crate) overview_loading: RwSignal<bool>,
+    /// When `overview` was fetched (ms).
+    pub(crate) overview_at: RwSignal<f64>,
+    pub(crate) col_widths: ColumnWidths,
+    pub(crate) detail_tab: RwSignal<DetailTab>,
+    /// Details of the selected pod.
+    pub(crate) pod: RwSignal<Option<Result<PodDetails, String>>>,
+    pub(crate) pod_loading: RwSignal<bool>,
+    /// Last-hour CPU and memory of the selected pod, refreshed with it.
+    pub(crate) pod_history: RwSignal<Option<Result<PodHistory, String>>>,
+    pub(crate) history_loading: RwSignal<bool>,
+    /// Collapsed detail sections, kept across selections.
+    pub(crate) detail_collapsed: RwSignal<HashSet<String>>,
+    /// Secret values the user chose to reveal for the selected pod, by
+    /// (secret, key). Cleared whenever the selection changes.
+    pub(crate) revealed: RwSignal<HashMap<(String, String), Result<String, String>>>,
 }
 
 impl Store {
@@ -61,12 +97,42 @@ impl Store {
             yaml: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
             unlock_prompt: RwSignal::new(None),
+            delete_prompt: RwSignal::new(None),
+            pending_delete: RwSignal::new(None),
+            overview_open: RwSignal::new(true),
+            overview: RwSignal::new(None),
+            overview_error: RwSignal::new(None),
+            overview_loading: RwSignal::new(false),
+            overview_at: RwSignal::new(0.0),
+            col_widths: ColumnWidths::load(),
+            detail_tab: RwSignal::new(DetailTab::Yaml),
+            pod: RwSignal::new(None),
+            pod_loading: RwSignal::new(false),
+            pod_history: RwSignal::new(None),
+            history_loading: RwSignal::new(false),
+            detail_collapsed: RwSignal::new(HashSet::new()),
+            revealed: RwSignal::new(HashMap::new()),
         }
     }
 
-    fn current_context(&self) -> Option<ContextInfo> {
+    pub(crate) fn current_context(&self) -> Option<ContextInfo> {
         let name = self.context.get()?;
         self.contexts.get().into_iter().find(|c| c.name == name)
+    }
+
+    pub(crate) fn current_context_untracked(&self) -> Option<ContextInfo> {
+        let name = self.context.get_untracked()?;
+        self.contexts.get_untracked().into_iter().find(|c| c.name == name)
+    }
+
+    /// The Node kind is shown with the Cluster page's node table.
+    pub(crate) fn node_page(&self) -> bool {
+        !self.overview_open.get() && self.kind.with(|k| k.as_ref().is_some_and(|k| k.key() == "core/Node"))
+    }
+
+    /// Whether the visible page is built from `cluster_overview` data.
+    pub(crate) fn needs_overview(&self) -> bool {
+        self.overview_open.get() || self.node_page()
     }
 
     async fn refresh_contexts(self) {
@@ -89,6 +155,8 @@ impl Store {
         self.connecting.set(true);
         self.error.set(None);
         self.cluster.set(None);
+        self.overview.set(None);
+        self.overview_error.set(None);
         self.table.set(None);
         self.selected.set(None);
         self.context.set(Some(context.clone()));
@@ -137,6 +205,16 @@ pub fn App() -> impl IntoView {
     });
 
     set_interval(move || store.now.set(js_sys::Date::now()), Duration::from_secs(5));
+    crate::overview::start_refresh(store);
+    set_interval(
+        move || {
+            let pod_selected = store.selected.with_untracked(Option::is_some) && selected_is_pod(store);
+            if pod_selected && store.detail_tab.get_untracked() == DetailTab::Details {
+                crate::pod_detail::load(store, true);
+            }
+        },
+        POD_REFRESH,
+    );
 
     // (Re)start the watch whenever the cluster, kind or namespace changes.
     Effect::new(move |_| {
@@ -148,6 +226,16 @@ pub fn App() -> impl IntoView {
         let connected = store.cluster.with(Option::is_some);
         let kind = store.kind.get();
         let namespace = store.namespace.get();
+        if store.needs_overview() {
+            store.table.set(None);
+            store.selected.set(None);
+            if connected {
+                spawn_local(async move {
+                    let _ = invoke::<_, ()>("stop_watch", &NoArgs {}).await;
+                });
+            }
+            return;
+        }
         let Some(kind) = kind.filter(|_| connected) else { return };
         store.table.set(None);
         store.selected.set(None);
@@ -167,11 +255,16 @@ pub fn App() -> impl IntoView {
             <div class="body">
                 <Sidebar store=store />
                 <main class="main">
-                    <ResourceView store=store />
+                    {move || if store.overview_open.get() {
+                        view! { <crate::overview::Overview store=store /> }.into_any()
+                    } else {
+                        view! { <ResourceView store=store /> }.into_any()
+                    }}
                 </main>
                 <DetailPanel store=store />
             </div>
             <UnlockDialog store=store />
+            <crate::delete::DeleteDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
@@ -210,7 +303,11 @@ fn TopBar(store: Store) -> impl IntoView {
             </label>
             <label class="field">
                 "Namespace"
-                <select on:change=on_namespace prop:disabled=move || store.cluster.with(Option::is_none)>
+                <select
+                    on:change=on_namespace
+                    prop:disabled=move || store.cluster.with(Option::is_none) || store.overview_open.get()
+                    title=move || if store.overview_open.get() { "The Cluster page is cluster-wide" } else { "" }
+                >
                     <option value="" selected=move || store.namespace.get().is_none()>"All namespaces"</option>
                     {move || {
                         store.cluster.get().map(|c| c.namespaces).unwrap_or_default().into_iter().map(|ns| {
@@ -280,13 +377,25 @@ fn UnlockDialog(store: Store) -> impl IntoView {
             let cancel = move |_| {
                 typed.set(String::new());
                 store.unlock_prompt.set(None);
+                store.pending_delete.set(None);
             };
             let confirm = {
                 let name = name.clone();
                 move |_| {
                     typed.set(String::new());
                     store.unlock_prompt.set(None);
-                    spawn_local(set_unlocked(store, name.clone(), true));
+                    let name = name.clone();
+                    spawn_local(async move {
+                        set_unlocked(store, name.clone(), true).await;
+                        // A delete that asked for the unlock continues to its own confirmation.
+                        if let Some(mut target) = store.pending_delete.get_untracked()
+                            && target.context.name == name
+                        {
+                            target.context.unlocked = true;
+                            store.delete_prompt.set(Some(target));
+                        }
+                        store.pending_delete.set(None);
+                    });
                 }
             };
             view! {
@@ -319,29 +428,23 @@ fn UnlockDialog(store: Store) -> impl IntoView {
 
 #[component]
 fn Sidebar(store: Store) -> impl IntoView {
-    // Kinds arrive from the backend already in section order.
-    let sections = move || {
+    let in_category = move |category: Category| {
         let filter = store.kind_filter.get().to_lowercase();
-        let matches = |k: &KindRef| {
-            filter.is_empty()
-                || k.kind.to_lowercase().contains(&filter)
-                || k.plural.contains(&filter)
-                || k.group.contains(&filter)
-        };
-        let kinds = store.cluster.get().map(|c| c.kinds).unwrap_or_default();
-        // Kinds within a section keep the backend's order.
+        // Kinds keep the backend's order within a category.
+        store.cluster.with(|c| {
+            c.iter()
+                .flat_map(|c| &c.kinds)
+                .filter(|k| k.category == category && kind_matches(&k.kind, &filter))
+                .map(|k| k.kind.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    let sections = move || {
         store
             .section_order
             .get()
             .into_iter()
-            .map(|category| {
-                let in_section = kinds
-                    .iter()
-                    .filter(|k| k.category == category && matches(&k.kind))
-                    .map(|k| k.kind.clone())
-                    .collect::<Vec<_>>();
-                (category, in_section)
-            })
+            .map(|category| (category, in_category(category)))
             .filter(|(_, kinds)| !kinds.is_empty())
             .collect::<Vec<_>>()
     };
@@ -356,6 +459,16 @@ fn Sidebar(store: Store) -> impl IntoView {
                 on:input=move |ev| store.kind_filter.set(event_target_value(&ev))
             />
             <div class="kinds">
+                <div class="top-level-kinds">
+                    <Show when=move || kind_matches_text("Cluster", &store.kind_filter.get().to_lowercase())>
+                        <button
+                            class="kind"
+                            class:active=move || store.overview_open.get()
+                            on:click=move |_| store.overview_open.set(true)
+                        >"Cluster"</button>
+                    </Show>
+                    {move || kind_list(store, Category::TopLevel, in_category(Category::TopLevel))}
+                </div>
                 {move || sections().into_iter().map(|(category, kinds)| {
                     // Searching shows every match, even in collapsed sections.
                     let open = move || {
@@ -421,6 +534,14 @@ fn Sidebar(store: Store) -> impl IntoView {
     }
 }
 
+fn kind_matches_text(text: &str, filter: &str) -> bool {
+    filter.is_empty() || text.to_lowercase().contains(filter)
+}
+
+fn kind_matches(k: &KindRef, filter: &str) -> bool {
+    filter.is_empty() || k.kind.to_lowercase().contains(filter) || k.plural.contains(filter) || k.group.contains(filter)
+}
+
 /// Moves `moved` to where `target` is, shifting the sections in between.
 fn move_section(store: Store, moved: Category, target: Category) {
     if moved == target {
@@ -456,7 +577,7 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                     view! { <div class="kind-group-title">{k.group.clone()}</div> }
                 });
             let key = k.key();
-            let active = move || store.kind.get().is_some_and(|cur| cur.key() == key);
+            let active = move || !store.overview_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key);
             let label = k.kind.clone();
             let title = format!("{} ({})", k.plural, k.api_version());
             view! {
@@ -465,7 +586,10 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                     class="kind"
                     class:active=active
                     title=title
-                    on:click=move |_| store.kind.set(Some(k.clone()))
+                    on:click=move |_| {
+                        store.overview_open.set(false);
+                        store.kind.set(Some(k.clone()));
+                    }
                 >{label}</button>
             }
         })
@@ -474,8 +598,6 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
 
 #[component]
 fn ResourceView(store: Store) -> impl IntoView {
-    let show_namespace =
-        move || store.kind.get().is_some_and(|k| k.namespaced) && store.namespace.get().is_none();
 
     let rows = move || {
         let filter = store.row_filter.get().to_lowercase();
@@ -497,7 +619,11 @@ fn ResourceView(store: Store) -> impl IntoView {
             (_, Some(ns)) => format!("in {ns}"),
             _ => "in all namespaces".to_owned(),
         };
-        let count = store.table.get().map(|t| t.rows.len());
+        let count = if store.node_page() {
+            store.overview.with(|o| o.as_ref().map(|o| o.nodes.len()))
+        } else {
+            store.table.get().map(|t| t.rows.len())
+        };
         view! {
             <h1>{title}</h1>
             <span class="muted">{scope}</span>
@@ -509,6 +635,7 @@ fn ResourceView(store: Store) -> impl IntoView {
         <div class="resource-header">
             {header}
             <span class="spacer"></span>
+            {move || store.node_page().then(|| view! { <crate::overview::RefreshStatus store=store /> })}
             <input
                 class="search"
                 type="search"
@@ -520,48 +647,194 @@ fn ResourceView(store: Store) -> impl IntoView {
         {move || store.table.get().and_then(|t| t.error).map(|e| view! {
             <div class="warn">"Watch error (retrying): " {e}</div>
         })}
+        {move || store.node_page().then(|| store.overview_error.get()).flatten().map(|e| view! {
+            <div class="warn">{e}</div>
+        })}
         <div class="table-wrap">
-            {move || match store.table.get() {
+            {move || if store.node_page() {
+                view! { <crate::overview::NodePage store=store /> }.into_any()
+            } else { match store.table.get() {
                 None if store.cluster.with(Option::is_some) => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
                 None => view! { <p class="muted pad">"Not connected."</p> }.into_any(),
-                Some(table) => view! {
-                    <table class="resources">
+                Some(table) => {
+                    let table_id = store.kind.get_untracked().map(|k| k.key()).unwrap_or_default();
+                    let single_ns = store.namespace.get().is_some();
+                    let headers: Vec<String> = visible(&table.columns, single_ns).map(|(_, c)| c.header.clone()).collect();
+                    let style = {
+                        let table_id = table_id.clone();
+                        move || store.col_widths.table_style(&table_id, &headers)
+                    };
+                    view! {
+                    <table class="resources" class:fixed={let t = table_id.clone(); move || store.col_widths.has_table(&t)} style=style>
                         <thead><tr>
-                            <th>"Name"</th>
-                            {show_namespace().then(|| view! { <th>"Namespace"</th> })}
-                            {table.columns.iter().map(|c| view! { <th>{c.clone()}</th> }).collect_view()}
-                            <th>"Age"</th>
+                            {visible(&table.columns, single_ns)
+                                .map(|(_, c)| {
+                                    let title = if c.kind == ColumnKind::Containers { CONTAINER_LEGEND } else { "" };
+                                    view! {
+                                        <ResizableTh
+                                            widths=store.col_widths
+                                            table=table_id.clone()
+                                            header=c.header.clone()
+                                            class=column_class(c.kind)
+                                            title=title
+                                        />
+                                    }
+                                })
+                                .collect_view()}
                         </tr></thead>
                         <tbody>
                             <For
                                 each=rows
                                 key=|r| r.clone()
                                 children=move |row| {
+                                    let columns = store.table.with_untracked(|t| t.as_ref().map(|t| t.columns.clone()).unwrap_or_default());
+                                    let single_ns = store.namespace.get_untracked().is_some();
                                     let id = row.id.clone();
                                     let selected = move || store.selected.with(|s| s.as_ref().is_some_and(|s| s.id == id));
-                                    let created = row.created.clone();
-                                    let age = move || created.as_deref().map(|c| format_age(store.now.get(), c)).unwrap_or_default();
-                                    let ns = row.namespace.clone().unwrap_or_default();
                                     let clicked = row.clone();
+                                    let cells = visible(&columns, single_ns)
+                                        .filter_map(|(i, c)| row.cells.get(i).map(|v| cell_view(store, c.kind, v.clone())))
+                                        .collect_view();
                                     view! {
                                         <tr class:selected=selected on:click=move |_| select_row(store, clicked.clone())>
-                                            <td class="name">{row.name.clone()}</td>
-                                            {show_namespace().then(|| view! { <td>{ns}</td> })}
-                                            {row.cells.iter().map(|c| view! { <td>{c.clone()}</td> }).collect_view()}
-                                            <td class="age">{age}</td>
+                                            {cells}
                                         </tr>
                                     }
                                 }
                             />
                         </tbody>
                     </table>
-                }.into_any(),
-            }}
+                    }.into_any()
+                }
+            }}}
         </div>
     }
 }
 
-fn select_row(store: Store, row: ResourceRow) {
+/// Columns to display with their cell index. The namespace column is
+/// redundant while a single namespace is selected.
+fn visible(columns: &[Column], single_namespace: bool) -> impl Iterator<Item = (usize, &Column)> {
+    columns
+        .iter()
+        .enumerate()
+        .filter(move |(_, c)| !(single_namespace && c.kind == ColumnKind::Namespace))
+}
+
+fn column_class(kind: ColumnKind) -> &'static str {
+    match kind {
+        ColumnKind::Name => "name",
+        ColumnKind::LongText => "long",
+        ColumnKind::Number => "num",
+        ColumnKind::Age => "age",
+        ColumnKind::Namespace | ColumnKind::Text | ColumnKind::Badge | ColumnKind::Containers => "",
+    }
+}
+
+fn cell_view(store: Store, kind: ColumnKind, value: String) -> AnyView {
+    let class = column_class(kind);
+    match kind {
+        ColumnKind::Age => {
+            let age = move || format_age(store.now.get(), &value);
+            view! { <td class=class>{age}</td> }.into_any()
+        }
+        ColumnKind::Containers => view! { <td><ContainerIcons cell=value /></td> }.into_any(),
+        ColumnKind::LongText => {
+            let title = value.clone();
+            view! { <td class=class title=title>{value}</td> }.into_any()
+        }
+        ColumnKind::Badge => {
+            // e.g. "Completed (OOM)" -> badge-completed-oom
+            let slug = value
+                .to_lowercase()
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            let badge = format!("badge badge-{slug}");
+            view! { <td><span class=badge>{value}</span></td> }.into_any()
+        }
+        _ => view! { <td class=class>{value}</td> }.into_any(),
+    }
+}
+
+/// Explains the container icons (tooltip on the Ready header).
+const CONTAINER_LEGEND: &str = "Containers: ✓ running · ◐ starting · ■ stopped · ✕ failed";
+
+/// One icon per container. Each state has its own symbol, so colour is never
+/// the only cue: ✓ running, ◐ starting, ■ stopped (exited cleanly), ✕ failed.
+#[component]
+fn ContainerIcons(cell: String) -> impl IntoView {
+    view! {
+        <span class="ctr-icons">
+            {containers::decode(&cell).into_iter().map(container_icon).collect_view()}
+        </span>
+    }
+}
+
+#[component]
+pub(crate) fn ContainerIcon(c: containers::Container) -> impl IntoView {
+    container_icon(c)
+}
+
+fn container_icon(c: containers::Container) -> impl IntoView {
+    let (class, label) = match c.state {
+        State::Running => ("ctr running", "running"),
+        State::Starting => ("ctr starting", "starting"),
+        State::Stopped => ("ctr stopped", "stopped"),
+        State::Failed => ("ctr failed", "failed"),
+    };
+    let kind = if c.init { "init container " } else { "" };
+    let title = format!("{kind}{}: {}", c.name, c.detail);
+    let aria = format!("{kind}{} {label}", c.name);
+    let shape = match c.state {
+        State::Running => view! {
+            <circle cx="7" cy="7" r="6.5" fill="currentColor" />
+            <path d="M4 7.2 L6.1 9.2 L10 5" fill="none" stroke="var(--icon-ink)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        }
+        .into_any(),
+        State::Starting => view! {
+            <circle cx="7" cy="7" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" />
+            <path d="M7 1.4 A5.6 5.6 0 0 0 7 12.6 Z" fill="currentColor" />
+        }
+        .into_any(),
+        State::Stopped => view! {
+            <circle cx="7" cy="7" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" />
+            <rect x="4.9" y="4.9" width="4.2" height="4.2" rx="0.6" fill="currentColor" />
+        }
+        .into_any(),
+        State::Failed => view! {
+            <circle cx="7" cy="7" r="6.5" fill="currentColor" />
+            <path d="M4.8 4.8 L9.2 9.2 M9.2 4.8 L4.8 9.2" stroke="var(--icon-ink)" stroke-width="1.8" stroke-linecap="round" />
+        }
+        .into_any(),
+    };
+    view! {
+        <span class=class title=title role="img" aria-label=aria>
+            <svg width="14" height="14" viewBox="0 0 14 14">{shape}</svg>
+        </span>
+    }
+}
+
+fn selected_is_pod(store: Store) -> bool {
+    store.kind.with_untracked(|k| k.as_ref().is_some_and(|k| k.key() == "core/Pod"))
+}
+
+pub(crate) fn select_row(store: Store, row: ResourceRow) {
+    store.yaml.set(None);
+    store.pod.set(None);
+    store.pod_history.set(None);
+    store.revealed.set(HashMap::new());
+    store.selected.set(Some(row));
+    if selected_is_pod(store) {
+        store.detail_tab.set(DetailTab::Details);
+        crate::pod_detail::load(store, false);
+    } else {
+        store.detail_tab.set(DetailTab::Yaml);
+        load_yaml(store);
+    }
+}
+
+fn load_yaml(store: Store) {
     #[derive(Serialize)]
     struct Args {
         kind: KindRef,
@@ -569,8 +842,7 @@ fn select_row(store: Store, row: ResourceRow) {
         name: String,
     }
     let Some(kind) = store.kind.get_untracked() else { return };
-    store.yaml.set(None);
-    store.selected.set(Some(row.clone()));
+    let Some(row) = store.selected.get_untracked() else { return };
     spawn_local(async move {
         let args = Args {
             kind,
@@ -587,28 +859,74 @@ fn select_row(store: Store, row: ResourceRow) {
 
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
+    let close = move |_| {
+        store.selected.set(None);
+        store.revealed.set(HashMap::new());
+    };
+    let show_tab = move |tab: DetailTab| {
+        store.detail_tab.set(tab);
+        if tab == DetailTab::Yaml && store.yaml.with_untracked(Option::is_none) {
+            load_yaml(store);
+        }
+    };
     view! {
-        {move || store.selected.get().map(|row| view! {
-            <aside class="detail">
-                <div class="detail-header">
-                    <div>
-                        <div class="detail-title">{row.name.clone()}</div>
-                        <div class="muted">{row.namespace.clone().unwrap_or_default()}</div>
+        {move || store.selected.get().map(|row| {
+            let is_pod = selected_is_pod(store);
+            view! {
+                <aside class="detail">
+                    <div class="detail-header">
+                        <div>
+                            <div class="detail-title">{row.name.clone()}</div>
+                            <div class="muted">{row.namespace.clone().unwrap_or_default()}</div>
+                        </div>
+                        <div class="detail-actions">
+                            <crate::delete::DeleteButton store=store row=row.clone() />
+                            <button class="close" title="Close" on:click=close>"×"</button>
+                        </div>
                     </div>
-                    <button class="close" on:click=move |_| store.selected.set(None)>"×"</button>
-                </div>
-                {move || match store.yaml.get() {
-                    None => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
-                    Some(Ok(yaml)) => view! { <pre class="yaml">{yaml}</pre> }.into_any(),
-                    Some(Err(e)) => view! { <p class="warn">{e}</p> }.into_any(),
-                }}
-            </aside>
+                    {is_pod.then(|| view! {
+                        <div class="tabs" role="tablist">
+                            <button
+                                role="tab"
+                                class="tab"
+                                class:active=move || store.detail_tab.get() == DetailTab::Details
+                                on:click=move |_| show_tab(DetailTab::Details)
+                            >"Details"</button>
+                            <button
+                                role="tab"
+                                class="tab"
+                                class:active=move || store.detail_tab.get() == DetailTab::Yaml
+                                on:click=move |_| show_tab(DetailTab::Yaml)
+                            >"YAML"</button>
+                            <span class="spacer"></span>
+                            {move || (store.detail_tab.get() == DetailTab::Details).then(|| view! {
+                                <button
+                                    class="btn small"
+                                    prop:disabled=move || store.pod_loading.get()
+                                    on:click=move |_| crate::pod_detail::load(store, true)
+                                >"Refresh"</button>
+                            })}
+                        </div>
+                    })}
+                    <div class="detail-body">
+                        {move || if store.detail_tab.get() == DetailTab::Details && is_pod {
+                            view! { <crate::pod_detail::PodDetailView store=store /> }.into_any()
+                        } else {
+                            match store.yaml.get() {
+                                None => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
+                                Some(Ok(yaml)) => view! { <pre class="yaml">{yaml}</pre> }.into_any(),
+                                Some(Err(e)) => view! { <p class="warn">{e}</p> }.into_any(),
+                            }
+                        }}
+                    </div>
+                </aside>
+            }
         })}
     }
 }
 
 /// kubectl-style age: 45s, 12m, 5h, 3d, 2y.
-fn format_age(now_ms: f64, created: &str) -> String {
+pub(crate) fn format_age(now_ms: f64, created: &str) -> String {
     let then = js_sys::Date::parse(created);
     if then.is_nan() {
         return String::new();

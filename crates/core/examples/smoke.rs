@@ -1,6 +1,7 @@
-//! Read-only end-to-end check: `cargo run -p subduer-core --example smoke -- [context]`
-//! (defaults to docker-desktop). Discovers kinds, lists namespaces, and prints
-//! the first pod table snapshot.
+//! Read-only end-to-end check:
+//! `cargo run -p subduer-core --example smoke -- [context] [group/Kind]`
+//! (defaults: docker-desktop, core/Pod). Discovers kinds, lists namespaces,
+//! and prints the first table snapshot for the kind.
 
 use std::time::Duration;
 
@@ -23,16 +24,18 @@ async fn main() -> subduer_core::Result<()> {
     }
     println!("namespaces: {:?}", cluster::list_namespaces(&client).await?);
 
-    let pods = kinds.iter().find(|k| k.kind.key() == "core/Pod").expect("pods").kind.clone();
+    let key = std::env::args().nth(2).unwrap_or_else(|| "core/Pod".into());
+    let kind = kinds.iter().find(|k| k.kind.key() == key).expect("kind not found").kind.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(watch::watch_table(client, pods, None, 1, move |t| {
+    let task = tokio::spawn(watch::watch_table(client, kind, None, 1, move |t| {
         let _ = tx.send(t);
     }));
     let table = tokio::time::timeout(Duration::from_secs(15), rx.recv()).await.expect("snapshot").unwrap();
     task.abort();
-    println!("{:?}", table.columns);
+    let headers: Vec<_> = table.columns.iter().map(|c| c.header.as_str()).collect();
+    println!("{headers:?}");
     for row in table.rows {
-        println!("{:<50} {:?}", row.id, row.cells);
+        println!("{:?}", row.cells);
     }
     Ok(())
 }

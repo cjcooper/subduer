@@ -1,4 +1,9 @@
 mod app;
+mod chart;
+mod columns;
+mod delete;
+mod overview;
+mod pod_detail;
 mod prefs;
 mod tauri;
 

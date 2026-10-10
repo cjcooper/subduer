@@ -4474,7 +4474,10 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "subduer-core"
 version = "0.1.0"
 dependencies = [
+ "form_urlencoded",
  "futures",
+ "http",
+ "jiff",
  "k8s-openapi",
  "kube",
  "serde",

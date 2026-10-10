@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1a3c9c"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <filter id="lift" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0b1f5c" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <g filter="url(#lift)">
+        <g opacity="0.13"><path d="M512.0,212.0 L746.5,325.0 L804.5,578.8 L642.2,782.3 L381.8,782.3 L219.5,578.8 L277.5,325.0 Z" fill="#ffffff" stroke="#ffffff" stroke-width="60" stroke-linejoin="round"/></g>
+    <path d="M263.1,760.9 A352,352 0 1 1 760.9,760.9" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="22" stroke-linecap="round"/>
+    <path d="M263.1,760.9 A352,352 0 0 1 700.6,214.8" fill="none" stroke="#ffb21e" stroke-width="22" stroke-linecap="round"/>
+    <line x1="540.9" y1="466.4" x2="655.6" y2="285.7" stroke="#ffb21e" stroke-width="42" stroke-linecap="round"/>
+    <line x1="565.7" y1="506.2" x2="778.4" y2="483.2" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <line x1="550.0" y1="550.4" x2="700.7" y2="702.4" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <line x1="505.7" y1="565.6" x2="480.8" y2="778.2" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <line x1="466.1" y1="540.5" x2="284.4" y2="653.6" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <line x1="461.1" y1="493.9" x2="259.4" y2="422.4" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <line x1="494.4" y1="461.0" x2="424.6" y2="258.6" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+    <circle cx="512" cy="512" r="205" fill="none" stroke="#ffffff" stroke-width="44"/>
+    <circle cx="512" cy="512" r="64" fill="#ffffff"/>
+    <circle cx="512" cy="512" r="22" fill="#1d4fb8"/>
+    <line x1="611.1" y1="355.8" x2="655.6" y2="285.7" stroke="#ffb21e" stroke-width="42" stroke-linecap="round"/>
+  </g>
+</svg>

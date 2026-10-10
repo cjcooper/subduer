@@ -5,27 +5,30 @@ use subduer_types::Category;
 
 const SECTION_ORDER_KEY: &str = "sidebar.sectionOrder";
 
-fn storage() -> Option<web_sys::Storage> {
+pub(crate) fn storage() -> Option<web_sys::Storage> {
     leptos::prelude::window().local_storage().ok().flatten()
 }
 
-/// Saved section order. Unknown names are dropped and sections missing from
-/// the saved list (e.g. added in a newer version) are appended.
+/// Saved section order. Unknown names are dropped. Sections missing from the
+/// saved list (e.g. added in a newer version) go before the first saved
+/// section that follows them in the default order.
 pub fn load_section_order() -> Vec<Category> {
     let saved = storage()
         .and_then(|s| s.get_item(SECTION_ORDER_KEY).ok().flatten())
         .unwrap_or_default();
     let mut order: Vec<Category> = vec![];
     for name in saved.split(',') {
-        if let Some(c) = Category::ALL.into_iter().find(|c| format!("{c:?}") == name)
+        if let Some(c) = Category::SECTIONS.into_iter().find(|c| format!("{c:?}") == name)
             && !order.contains(&c)
         {
             order.push(c);
         }
     }
-    for c in Category::ALL {
+    let rank = |c: Category| Category::SECTIONS.iter().position(|x| *x == c);
+    for c in Category::SECTIONS {
         if !order.contains(&c) {
-            order.push(c);
+            let at = order.iter().position(|x| rank(*x) > rank(c)).unwrap_or(order.len());
+            order.insert(at, c);
         }
     }
     order

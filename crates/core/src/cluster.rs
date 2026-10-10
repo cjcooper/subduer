@@ -36,6 +36,7 @@ pub async fn discover_kinds(client: &Client) -> Result<Vec<KindInfo>> {
             };
             (position, info)
         })
+        .filter(|(_, info)| !catalog::is_hidden(&info.kind))
         .collect();
     kinds.sort_by(|(pa, a), (pb, b)| {
         (a.category, pa, &a.kind.group, &a.kind.kind).cmp(&(b.category, pb, &b.kind.group, &b.kind.kind))

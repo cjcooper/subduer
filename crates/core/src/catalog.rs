@@ -6,6 +6,7 @@ use crate::types::{Category, KindRef};
 
 /// Built-in kinds per section, as `group/Kind` keys, in display order.
 const SECTIONS: &[(Category, &[&str])] = &[
+    (Category::TopLevel, &["core/Node", "core/Event"]),
     (
         Category::Workloads,
         &[
@@ -71,9 +72,17 @@ const SECTIONS: &[(Category, &[&str])] = &[
             "rbac.authorization.k8s.io/ClusterRoleBinding",
         ],
     ),
-    // Leftover built-ins: the most useful ones first, the rest alphabetically.
-    (Category::Other, &["core/Node", "core/Event"]),
 ];
+
+/// Kinds left out of the sidebar because another kind shows the same objects.
+const HIDDEN: &[&str] = &[
+    // Same objects as core/Event, which has the fields the Events table uses.
+    "events.k8s.io/Event",
+];
+
+pub fn is_hidden(kind: &KindRef) -> bool {
+    HIDDEN.contains(&kind.key().as_str())
+}
 
 /// API groups that ship with Kubernetes. Anything else is treated as custom,
 /// which covers aggregated APIs (e.g. metrics.k8s.io) as well as CRDs.
@@ -141,7 +150,8 @@ mod tests {
         assert_eq!(classify(&kind("", "PersistentVolume"), &none).0, Category::Storage);
         assert_eq!(classify(&kind("", "Namespace"), &none).0, Category::Namespaces);
         assert_eq!(classify(&kind("rbac.authorization.k8s.io", "Role"), &none).0, Category::AccessControl);
-        assert_eq!(classify(&kind("", "Node"), &none), (Category::Other, 0));
+        assert_eq!(classify(&kind("", "Node"), &none), (Category::TopLevel, 0));
+        assert_eq!(classify(&kind("", "Event"), &none), (Category::TopLevel, 1));
         assert_eq!(classify(&kind("certificates.k8s.io", "CertificateSigningRequest"), &none).0, Category::Other);
     }
 

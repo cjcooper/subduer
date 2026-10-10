@@ -24,11 +24,15 @@ where
 {
     let api = dynamic_api(&client, &kind, namespace.as_deref());
     let columns = table::columns(&kind);
-    let snapshot = |rows: &BTreeMap<String, ResourceRow>, error: Option<String>| ResourceTable {
-        watch_id,
-        columns: columns.clone(),
-        rows: rows.values().cloned().collect(),
-        error,
+    let snapshot = |rows: &BTreeMap<String, ResourceRow>, error: Option<String>| {
+        let mut rows: Vec<ResourceRow> = rows.values().cloned().collect();
+        table::sort_rows(&kind, &mut rows);
+        ResourceTable {
+            watch_id,
+            columns: columns.clone(),
+            rows,
+            error,
+        }
     };
 
     let mut stream = watcher(api, watcher::Config::default()).default_backoff().boxed();

@@ -2,8 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
-use subduer_core::types::{ClusterInfo, ContextList, KindRef, events};
-use subduer_core::{cluster, contexts, watch};
+use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, events};
+use subduer_core::{actions, cluster, contexts, overview, pod_details, watch};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{AppState, Session};
@@ -38,6 +38,7 @@ pub async fn connect(state: State<'_, AppState>, context: String) -> CmdResult<C
     *state.session.write().await = Some(Session {
         context: context.clone(),
         client,
+        history: Default::default(),
     });
     Ok(ClusterInfo {
         context,
@@ -94,6 +95,61 @@ pub async fn get_yaml(
     cluster::get_yaml(&client, &kind, namespace.as_deref(), &name)
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+pub async fn cluster_overview(state: State<'_, AppState>) -> CmdResult<ClusterOverview> {
+    let client = connected_client(&state).await?;
+    overview::cluster_overview(&client).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pod_details(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<PodDetails> {
+    let client = connected_client(&state).await?;
+    pod_details::pod_details(&client, &namespace, &name).await.map_err(err)
+}
+
+/// The pod's CPU and memory over the last hour, polled by the UI every 15 s.
+#[tauri::command]
+pub async fn pod_history(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<PodHistory> {
+    let (client, history) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        (session.client.clone(), session.history.clone())
+    };
+    history.pod_history(&client, &namespace, &name).await.map_err(err)
+}
+
+/// Deletes one object. Refused unless the current context is unlocked, and
+/// unless `context` (what the confirmation showed) is still the connected one.
+#[tauri::command]
+pub async fn delete_resource(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: Option<String>,
+    name: String,
+) -> CmdResult<()> {
+    let (client, context) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        if session.context != context {
+            return Err(format!("connected to {} now, not {context}; nothing was deleted", session.context));
+        }
+        (session.client.clone(), session.context.clone())
+    };
+    actions::delete(&client, &state.gate, &context, &kind, namespace.as_deref(), &name, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Reveals one Secret value on explicit user request. The value is returned
+/// to the UI only; it is never logged.
+#[tauri::command]
+pub async fn secret_value(state: State<'_, AppState>, namespace: String, secret: String, key: String) -> CmdResult<String> {
+    let client = connected_client(&state).await?;
+    tracing::info!(%namespace, %secret, %key, "secret value revealed");
+    pod_details::secret_value(&client, &namespace, &secret, &key).await.map_err(err)
 }
 
 async fn connected_client(state: &AppState) -> CmdResult<subduer_core::kube::Client> {

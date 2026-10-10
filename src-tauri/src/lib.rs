@@ -4,6 +4,9 @@ mod shell_env;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 
+use std::sync::Arc;
+
+use subduer_core::history::HistoryStore;
 use subduer_core::kube::Client;
 use subduer_core::safety::SafetyGate;
 use tauri::async_runtime::JoinHandle;
@@ -12,6 +15,8 @@ use tauri::async_runtime::JoinHandle;
 pub struct Session {
     pub context: String,
     pub client: Client,
+    /// Prometheus lookup and locally recorded usage, reset on reconnect.
+    pub history: Arc<HistoryStore>,
 }
 
 #[derive(Default)]
@@ -51,6 +56,11 @@ pub fn run() {
             commands::watch_resources,
             commands::stop_watch,
             commands::get_yaml,
+            commands::cluster_overview,
+            commands::pod_details,
+            commands::pod_history,
+            commands::delete_resource,
+            commands::secret_value,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
