@@ -229,3 +229,19 @@ fn guard_asks_before_discarding_edits() {
     then();
     assert!(ran.get_untracked());
 }
+
+#[test]
+fn sidebar_sections_get_a_colour_class() {
+    assert_eq!(category_class(Category::Workloads), "cat-workloads");
+    assert_eq!(category_class(Category::AccessControl), "cat-access-control");
+    assert_eq!(category_class(Category::GoogleCloud), "cat-google-cloud");
+    assert_eq!(category_class(Category::CustomResources), "cat-custom-resources");
+    // Every section has a tint defined in the stylesheet, for both themes.
+    let css = include_str!("../styles/app.css");
+    for c in Category::SECTIONS {
+        let class = category_class(c);
+        assert!(css.contains(&format!(".{class} {{ --cat: var(--{class})")), "{class}");
+        let token = format!("--{class}:");
+        assert_eq!(css.matches(&token).count(), 3, "{token} in light and both dark blocks");
+    }
+}

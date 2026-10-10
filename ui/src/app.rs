@@ -669,7 +669,7 @@ fn Sidebar(store: Store) -> impl IntoView {
                     };
                     view! {
                         <div
-                            class="kind-section"
+                            class=format!("kind-section {}", category_class(category))
                             class:dragging=is_dragging
                             class:drop-target=is_target
                             on:dragover=move |ev: web_sys::DragEvent| {
@@ -715,6 +715,11 @@ fn Sidebar(store: Store) -> impl IntoView {
             </div>
         </nav>
     }
+}
+
+/// The class that tints a sidebar section, e.g. `cat-access-control`.
+pub(crate) fn category_class(category: Category) -> String {
+    format!("cat-{}", category.label().to_lowercase().replace(' ', "-"))
 }
 
 fn kind_matches_text(text: &str, filter: &str) -> bool {

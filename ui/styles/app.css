@@ -20,6 +20,25 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   --status-done: #b9b8b1;
+  /* CPU and memory each have their own colour (line, bar, track). Light
+     values are darker shades for contrast on white; dark values lighter. */
+  --cpu: #2563eb;
+  --cpu-track: #dbe6fd;
+  --memory: #9333ea;
+  --memory-track: #efe2fc;
+  /* Sidebar section tints. */
+  --cat-workloads: #2563eb;
+  --cat-config: #b45309;
+  --cat-network: #0f766e;
+  --cat-storage: #7c3aed;
+  --cat-namespaces: #0e7490;
+  --cat-access-control: #be123c;
+  --cat-helm: #0369a1;
+  --cat-aws: #c2410c;
+  --cat-google-cloud: #1d4ed8;
+  --cat-azure: #0078d4;
+  --cat-custom-resources: #a21caf;
+  --cat-other: #6b7686;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, Ubuntu, Cantarell, "Noto Sans", sans-serif;
   --mono: "SF Mono", Menlo, Consolas, "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
   font-size: 13px;
@@ -46,6 +65,22 @@
     --series-1: #3987e5;
     --meter-track: #1f3048;
     --status-done: #5c5b56;
+  --cpu: #60a5fa;
+  --cpu-track: #1e3352;
+  --memory: #c084fc;
+  --memory-track: #352450;
+  --cat-workloads: #60a5fa;
+  --cat-config: #fbbf24;
+  --cat-network: #2dd4bf;
+  --cat-storage: #a78bfa;
+  --cat-namespaces: #67e8f9;
+  --cat-access-control: #fb7185;
+  --cat-helm: #7dd3fc;
+  --cat-aws: #fb923c;
+  --cat-google-cloud: #93c5fd;
+  --cat-azure: #38bdf8;
+  --cat-custom-resources: #f0abfc;
+  --cat-other: #8b95a5;
   }
 }
 :root[data-theme="dark"] {
@@ -66,6 +101,22 @@
   --series-1: #3987e5;
   --meter-track: #1f3048;
   --status-done: #5c5b56;
+  --cpu: #60a5fa;
+  --cpu-track: #1e3352;
+  --memory: #c084fc;
+  --memory-track: #352450;
+  --cat-workloads: #60a5fa;
+  --cat-config: #fbbf24;
+  --cat-network: #2dd4bf;
+  --cat-storage: #a78bfa;
+  --cat-namespaces: #67e8f9;
+  --cat-access-control: #fb7185;
+  --cat-helm: #7dd3fc;
+  --cat-aws: #fb923c;
+  --cat-google-cloud: #93c5fd;
+  --cat-azure: #38bdf8;
+  --cat-custom-resources: #f0abfc;
+  --cat-other: #8b95a5;
 }
 :root[data-theme="light"] { color-scheme: light; }
 
@@ -286,7 +337,7 @@ table.resources { width: 100%; border-collapse: collapse; }
 .hbar-row:hover .hbar { filter: brightness(1.12); }
 .hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .hbar-track { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.hbar { display: block; height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; background: var(--series-1); max-width: calc(100% - 72px); }
+.hbar { display: block; height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; background: var(--series, var(--series-1)); max-width: calc(100% - 72px); }
 .hbar-value { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .table-scroll { overflow-x: auto; }
@@ -372,8 +423,8 @@ table.resources { width: 100%; border-collapse: collapse; }
 .lchart-grid { stroke: var(--border); stroke-width: 1; }
 .lchart-ref { stroke: var(--muted); stroke-width: 1; }
 .lchart-ref.dashed { stroke-dasharray: 4 3; }
-.lchart-area { fill: var(--series-1); opacity: 0.1; }
-.lchart-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.lchart-area { fill: var(--series, var(--series-1)); opacity: 0.12; }
+.lchart-line { fill: none; stroke: var(--series, var(--series-1)); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .lchart-tick, .lchart-ref-label {
   position: absolute; font-size: 11px; line-height: 14px; color: var(--muted); pointer-events: none;
   font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -588,3 +639,40 @@ button.link:hover { text-decoration: underline; }
 .theme-name { font-size: 12px; }
 .theme-card.on .theme-name { font-weight: 600; color: var(--accent); }
 .settings-note { margin: 8px 0 0; }
+
+/* CPU and memory colours: everything inside picks up --series. */
+.res-cpu { --series: var(--cpu); --series-track: var(--cpu-track); }
+.res-memory { --series: var(--memory); --series-track: var(--memory-track); }
+.res-cpu .meter, .res-memory .meter { background: var(--series-track); }
+.res-cpu .meter-fill:not(.warning):not(.critical), .res-memory .meter-fill:not(.warning):not(.critical) { background: var(--series); }
+.res-cpu .lchart-dot, .res-memory .lchart-dot { background: var(--series); }
+.res-dot {
+  display: inline-block; width: 9px; height: 9px; margin-right: 7px; border-radius: 50%;
+  background: var(--series, var(--series-1)); vertical-align: 0;
+}
+
+/* Sidebar sections: each tints its icons. */
+.cat-workloads { --cat: var(--cat-workloads); }
+.cat-config { --cat: var(--cat-config); }
+.cat-network { --cat: var(--cat-network); }
+.cat-storage { --cat: var(--cat-storage); }
+.cat-namespaces { --cat: var(--cat-namespaces); }
+.cat-access-control { --cat: var(--cat-access-control); }
+.cat-helm { --cat: var(--cat-helm); }
+.cat-aws { --cat: var(--cat-aws); }
+.cat-google-cloud { --cat: var(--cat-google-cloud); }
+.cat-azure { --cat: var(--cat-azure); }
+.cat-custom-resources { --cat: var(--cat-custom-resources); }
+.cat-other { --cat: var(--cat-other); }
+.kind-section .nav-icon { color: var(--cat, currentColor); opacity: 1; }
+.kind-section .kind .nav-icon { opacity: 0.9; }
+.top-level-kinds .nav-icon { color: var(--accent); opacity: 1; }
+
+/* Summary tiles: a coloured top edge and note by meaning. */
+.stat-tile.good, .stat-tile.warning, .stat-tile.critical { border-top: 3px solid var(--tone); }
+.stat-tile.good { --tone: var(--ok); }
+.stat-tile.warning { --tone: var(--status-warning); }
+.stat-tile.critical { --tone: var(--danger); }
+.stat-tile.warning .stat-note { color: var(--warn-text); }
+.stat-tile.critical .stat-note { color: var(--danger); }
+.stat-tile.good .stat-note { color: var(--ok); }

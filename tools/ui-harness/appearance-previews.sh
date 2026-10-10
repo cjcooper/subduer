@@ -10,7 +10,7 @@ cp tools/ui-harness/*.js "$out/build/"
 sed 's|<head>|<head><script src="workloadstub.js"></script>|' "$out/build/index.html" > "$out/build/w.html"
 (cd "$out/build" && python3 -m http.server 8790 >/dev/null 2>&1) &
 server=$!
-trap 'kill $server' EXIT
+trap 'kill $server 2>/dev/null' EXIT
 sleep 1
 chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 for pair in light:1 dark:0; do

@@ -194,6 +194,14 @@ pub(crate) enum Resource {
 }
 
 impl Resource {
+    /// The class that colours its charts: CPU and memory each have a colour.
+    pub(crate) fn css(self) -> &'static str {
+        match self {
+            Self::Cpu => "res-cpu",
+            Self::Memory => "res-memory",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Cpu => "CPU",
@@ -283,9 +291,9 @@ pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, contain
         Resource::Memory => Scale::Binary,
     };
     view! {
-        <div class="usage-chart">
+        <div class=format!("usage-chart {}", resource.css())>
             <div class="meter-row">
-                <span class="meter-label">{resource.label()}</span>
+                <span class="meter-label"><span class="res-dot"></span>{resource.label()}</span>
                 <span class="meter-value">{header}</span>
             </div>
             <LineChart label=resource.label() data=data fmt=fmt scale=scale />

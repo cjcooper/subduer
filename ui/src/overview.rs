@@ -147,11 +147,13 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
     };
     let pods = o.pods;
     let pods_note = format!("{} pending · {} failed", pods.pending, pods.failed);
-    let (warnings, warnings_note) = match o.warnings_last_hour {
-        Some(0) => ("0".to_owned(), "none".to_owned()),
-        Some(n) => (n.to_string(), "⚠ see Events".to_owned()),
-        None => ("–".to_owned(), "can't read events".to_owned()),
+    let (warnings, warnings_note, warnings_tone) = match o.warnings_last_hour {
+        Some(0) => ("0".to_owned(), "none".to_owned(), "good"),
+        Some(n) => (n.to_string(), "⚠ see Events".to_owned(), "warning"),
+        None => ("–".to_owned(), "can't read events".to_owned(), ""),
     };
+    let nodes_tone = if ready == node_count { "good" } else { "critical" };
+    let pods_tone = if pods.failed > 0 { "critical" } else if pods.pending > 0 { "warning" } else { "good" };
     let metrics = o.metrics_available;
     let source = o.usage_source;
     let history = o.history.clone();
@@ -160,15 +162,16 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
 
     view! {
         <div class="kpi-row">
-            <StatTile label="Nodes" value=node_count.to_string() note=nodes_note />
-            <StatTile label="Running pods" value=pods.running.to_string() note=pods_note />
+            <StatTile label="Nodes" value=node_count.to_string() note=nodes_note tone=nodes_tone />
+            <StatTile label="Running pods" value=pods.running.to_string() note=pods_note tone=pods_tone />
             <StatTile label="Namespaces" value=namespaces.to_string() note=String::new() />
-            <StatTile label="Warning events, last hour" value=warnings note=warnings_note />
+            <StatTile label="Warning events, last hour" value=warnings note=warnings_note tone=warnings_tone />
         </div>
 
         <div class="card-row">
             <ResourceCard
                 title="Memory available"
+                res="res-memory"
                 hero=true
                 totals=o.memory
                 nodes=node_count
@@ -179,6 +182,7 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
             />
             <ResourceCard
                 title="CPU available"
+                res="res-cpu"
                 hero=false
                 totals=o.cpu
                 nodes=node_count
@@ -195,12 +199,12 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
         </section>
 
         <div class="card-row">
-            <section class="card">
-                <h2 class="card-title">"Memory requested by namespace"</h2>
+            <section class="card res-memory">
+                <h2 class="card-title"><span class="res-dot"></span>"Memory requested by namespace"</h2>
                 <NamespaceBars rows=namespace_rows(&o.namespaces, |n| n.memory) fmt=fmt_bytes />
             </section>
-            <section class="card">
-                <h2 class="card-title">"CPU requested by namespace"</h2>
+            <section class="card res-cpu">
+                <h2 class="card-title"><span class="res-dot"></span>"CPU requested by namespace"</h2>
                 <NamespaceBars rows=namespace_rows(&by_cpu, |n| n.cpu) fmt=fmt_cpu />
             </section>
         </div>
@@ -213,9 +217,16 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
 }
 
 #[component]
-fn StatTile(label: &'static str, value: String, note: String) -> impl IntoView {
+fn StatTile(
+    label: &'static str,
+    value: String,
+    note: String,
+    /// `good`, `warning` or `critical` tints the tile; empty leaves it plain.
+    #[prop(optional)]
+    tone: &'static str,
+) -> impl IntoView {
     view! {
-        <div class="stat-tile">
+        <div class=format!("stat-tile {tone}")>
             <div class="stat-label">{label}</div>
             <div class="stat-value">{value}</div>
             <div class="stat-note">{note}</div>
@@ -228,6 +239,8 @@ fn StatTile(label: &'static str, value: String, note: String) -> impl IntoView {
 #[component]
 fn ResourceCard(
     title: &'static str,
+    /// `res-cpu` or `res-memory`: the card's colour.
+    res: &'static str,
     hero: bool,
     totals: ResourceTotals,
     nodes: usize,
@@ -249,8 +262,8 @@ fn ResourceCard(
         .into_any(),
     };
     view! {
-        <section class="card">
-            <h2 class="card-title">{title}</h2>
+        <section class=format!("card {res}")>
+            <h2 class="card-title"><span class="res-dot"></span>{title}</h2>
             <div class=if hero { "hero" } else { "stat-value" }>{fmt(alloc)}</div>
             <div class="muted">{sub}</div>
             <div class="meters">
@@ -440,11 +453,11 @@ fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: b
                     <td><span class=badge>{status}</span></td>
                     <td>{n.instance_type.clone().unwrap_or_default()}</td>
                     <td class="num">{format!("{}/{}", n.pods, n.pod_capacity)}</td>
-                    <td><MiniMeter value=n.cpu.requests total=n.cpu.allocatable /></td>
-                    <td><MiniMeter value=n.memory.requests total=n.memory.allocatable /></td>
+                    <td class="res-cpu"><MiniMeter value=n.cpu.requests total=n.cpu.allocatable /></td>
+                    <td class="res-memory"><MiniMeter value=n.memory.requests total=n.memory.allocatable /></td>
                     {metrics.then(|| view! {
-                        <td><MiniMeter value=n.cpu.used.unwrap_or(0.0) total=n.cpu.allocatable /></td>
-                        <td><MiniMeter value=n.memory.used.unwrap_or(0.0) total=n.memory.allocatable /></td>
+                        <td class="res-cpu"><MiniMeter value=n.cpu.used.unwrap_or(0.0) total=n.cpu.allocatable /></td>
+                        <td class="res-memory"><MiniMeter value=n.memory.used.unwrap_or(0.0) total=n.memory.allocatable /></td>
                     })}
                     <td class="num">{fmt_cpu(n.cpu.allocatable)}</td>
                     <td class="num">{fmt_bytes(n.memory.allocatable)}</td>
