@@ -10,6 +10,7 @@ mod overview;
 mod pod_detail;
 mod prefs;
 mod tauri;
+mod upload;
 
 fn main() {
     console_error_panic_hook::set_once();

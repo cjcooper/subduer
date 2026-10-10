@@ -14,6 +14,7 @@ pub mod pod_details;
 pub mod quantity;
 pub mod safety;
 pub mod table;
+pub mod upload;
 pub mod usage;
 pub mod watch;
 
@@ -34,6 +35,9 @@ pub enum Error {
     NotFound(String),
     #[error("context {0:?} not found in kubeconfig")]
     UnknownContext(String),
+    /// A complete message for people, shown as is.
+    #[error("{0}")]
+    Message(String),
 }
 
 impl Error {

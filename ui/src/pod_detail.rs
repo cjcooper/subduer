@@ -365,6 +365,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     let running = c.state == subduer_types::containers::State::Running;
     let exec_target = ExecTarget { namespace: namespace.clone(), pod: pod.clone(), container: c.name.clone() };
     let has_ports = !c.ports.is_empty();
+    let (upload_ns, upload_pod, upload_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let forward_ns = namespace.clone();
     let forward_source = subduer_types::ForwardSource::Pod { pod: pod.clone() };
     let actions = view! {
@@ -375,6 +376,15 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                     title="Forward a local port to this pod"
                     on:click=move |_| crate::forward::request(store, forward_ns.clone(), forward_source.clone())
                 >"Forward"</button>
+            })}
+            {running.then(|| view! {
+                <button
+                    class="btn small"
+                    title=format!("Upload a file into {} (needs changes allowed)", c.name)
+                    on:click=move |_| crate::upload::request(
+                        store, upload_ns.clone(), upload_pod.clone(), upload_container.clone(),
+                    )
+                >"Upload"</button>
             })}
             {running.then(|| view! {
                 <button

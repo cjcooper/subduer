@@ -55,6 +55,9 @@ pub(crate) struct Store {
     pub(crate) pending_delete: RwSignal<Option<crate::delete::DeleteTarget>>,
     /// Shell to open once the unlock prompt succeeds: (context, target).
     pub(crate) pending_exec: RwSignal<Option<(String, subduer_types::ExecTarget)>>,
+    /// Upload dialog, and one waiting for the unlock prompt.
+    pub(crate) upload_prompt: RwSignal<Option<crate::upload::UploadPrompt>>,
+    pub(crate) pending_upload: RwSignal<Option<crate::upload::UploadPrompt>>,
     /// Showing the Cluster page instead of a kind's table.
     pub(crate) overview_open: RwSignal<bool>,
     /// Showing the Port Forwards page.
@@ -107,6 +110,8 @@ impl Store {
             delete_prompt: RwSignal::new(None),
             pending_delete: RwSignal::new(None),
             pending_exec: RwSignal::new(None),
+            upload_prompt: RwSignal::new(None),
+            pending_upload: RwSignal::new(None),
             overview_open: RwSignal::new(true),
             forwards_open: RwSignal::new(false),
             forwards: RwSignal::new(vec![]),
@@ -281,6 +286,7 @@ pub fn App() -> impl IntoView {
             <UnlockDialog store=store />
             <crate::delete::DeleteDialog store=store />
             <crate::forward::ForwardDialog store=store />
+            <crate::upload::UploadDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
@@ -395,6 +401,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 store.unlock_prompt.set(None);
                 store.pending_delete.set(None);
                 store.pending_exec.set(None);
+                store.pending_upload.set(None);
             };
             let confirm = {
                 let name = name.clone();
@@ -418,6 +425,12 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                             crate::exec::open(store, target);
                         }
                         store.pending_exec.set(None);
+                        if let Some(prompt) = store.pending_upload.get_untracked()
+                            && prompt.context == name
+                        {
+                            store.upload_prompt.set(Some(prompt));
+                        }
+                        store.pending_upload.set(None);
                     });
                 }
             };

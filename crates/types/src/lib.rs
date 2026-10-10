@@ -665,3 +665,50 @@ pub struct ForwardInfo {
 pub mod forward_events {
     pub const CHANGED: &str = "port-forwards";
 }
+
+/// Where an uploaded file goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadTarget {
+    pub context: String,
+    pub namespace: String,
+    pub pod: String,
+    pub container: String,
+    /// Absolute path in the container. A directory (trailing `/`, or one that
+    /// exists) gets `file_name` appended; otherwise it's the file to write.
+    /// The directory must already exist.
+    pub path: String,
+    /// The original file's name, used when `path` is a directory.
+    pub file_name: String,
+    /// Replace an existing file instead of reporting it.
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UploadOutcome {
+    /// `path` is where the file ended up.
+    Uploaded { bytes: u64, path: String },
+    /// Nothing was written because `path` exists and `overwrite` was false.
+    Exists { path: String },
+}
+
+/// Who can browse to what: one directory in a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirListing {
+    /// Resolved absolute path.
+    pub path: String,
+    /// Whether the container user can create files here.
+    pub writable: bool,
+    /// Directories first, then files, each sorted by name.
+    pub entries: Vec<DirEntry>,
+    /// More entries existed than were listed.
+    pub truncated: bool,
+    /// Writable places worth offering: /tmp, $HOME, writable mounts.
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub dir: bool,
+    pub writable: bool,
+}

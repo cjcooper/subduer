@@ -9,6 +9,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
     async fn invoke_raw(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
+    async fn invoke_with_options(cmd: &str, args: JsValue, options: JsValue) -> Result<JsValue, JsValue>;
+
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen)]
     async fn listen_raw(event: &str, handler: &Closure<dyn FnMut(JsValue)>) -> JsValue;
 }
@@ -19,6 +22,25 @@ pub async fn invoke<A: Serialize, R: DeserializeOwned>(cmd: &str, args: &A) -> R
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(|e| e.to_string())?;
     let value = invoke_raw(cmd, args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| format!("{cmd}: bad response: {e}"))
+}
+
+/// Calls a backend command with a binary body (sent as is, not as JSON) and
+/// request headers for the metadata.
+pub async fn invoke_bytes<R: DeserializeOwned>(
+    cmd: &str,
+    body: &js_sys::Uint8Array,
+    headers: &[(&str, &str)],
+) -> Result<R, String> {
+    let header_obj = js_sys::Object::new();
+    for (k, v) in headers {
+        let _ = js_sys::Reflect::set(&header_obj, &(*k).into(), &(*v).into());
+    }
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"headers".into(), &header_obj);
+    let value = invoke_with_options(cmd, body.into(), options.into())
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
     serde_wasm_bindgen::from_value(value).map_err(|e| format!("{cmd}: bad response: {e}"))

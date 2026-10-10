@@ -53,7 +53,7 @@ cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns
 
 This is how the UI has been visually verified so far. Nothing is committed for it, so rebuild it each time:
 
-1. Run `trunk build`, then copy `dist/` to a scratch folder.
+1. Run `trunk build --dist <scratch>/build` and work from that copy. A running `trunk serve` rewrites `dist/` on every change, so copying it mid-rebuild gives a blank page.
 2. Inject a `<script>` at the top of `<head>` in the copied `index.html` that defines `window.__TAURI__`:
    - `core.invoke(cmd, args)` returns canned replies per command: `list_contexts`, `connect`, `cluster_overview`, `pod_details`, `secret_value`, `stop_watch`, and so on.
    - `event.listen(name, cb)` stores `cb`. When `watch_resources` is invoked, call `cb({payload: <ResourceTable>})`.
@@ -90,6 +90,7 @@ crates/core    all cluster logic, no UI deps
   logs.rs        container log streams: one container, or a workload's pods merged (stern-style)
   forward.rs     port-forwarding: 127.0.0.1 listener, one portforward stream per connection; services resolve to a ready pod
   helm.rs        Helm releases as a virtual kind (helm.sh/Release) from owner=helm Secrets
+  upload.rs      file upload into a container via exec `sh -c 'cat > "$1"'` (gated)
   usage.rs       kubelet /stats/summary helpers (per pod, per node totals)
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
   quantity.rs    "500m"/"1.5Gi" -> numbers
@@ -121,6 +122,7 @@ ui             Leptos CSR app
 | `open_exec` | Opens a shell window (needs the context unlocked) |
 | `exec_start` / `exec_input` / `exec_resize` | Called by a shell window: (re)connect (re-checks the gate), keystrokes, terminal size |
 | `forward_ports` / `start_forward` / `list_forwards` / `stop_forward` / `open_forward` | Port-forward dialog, start, list, stop, open in browser; changes arrive as `port-forwards` events |
+| `upload_file` | Raw binary body + `x-upload` header (URL-encoded JSON `UploadTarget`); gated, context re-checked |
 | `secret_value` | One Secret value, on explicit click |
 
 ### How things fit together
@@ -204,6 +206,18 @@ ui             Leptos CSR app
   - Open uses the OS opener (`open`, `xdg-open`, `start`) on `http://127.0.0.1:<port>/`; Copy uses `navigator.clipboard`.
   - **Not gated:** a forward changes nothing in the cluster. Writes made through it come from the user's own client.
   - Tested on UAT with `examples/forward_check.rs` (read-only HTTP GET): Prometheus 9090 gave 200, and 8080 resolved the named target port.
+- **File upload** (`crates/core/src/upload.rs`, `src-tauri/src/upload.rs`, `ui/src/upload.rs`):
+  - An Upload button on running containers. It's gated like Shell: a locked context opens the unlock prompt, then the dialog.
+  - The dialog takes a file chosen or dropped (HTML5 drop works because `dragDropEnabled` is false) and a destination, defaulting to `/tmp/`.
+  - The name is optional: a path ending in `/`, or naming an existing directory, gets the original file name. Anything else is the file path.
+  - The directory must already exist (exit 18 gives "directory … doesn't exist"; nothing is created). The script prints the final path, which the dialog shows.
+  - Folder browser (`browse_dir`, read-only, not gated): one exec per folder lists entries with dir and writable flags (capped at 1000). The first call also returns writable suggestions: /tmp, `$HOME` and `rw` mounts from /proc/mounts, excluding /proc, /sys, /dev and the kubelet-managed /etc files.
+  - `[ -w ]` uses access(2), so read-only root filesystems show as read-only.
+  - Clicking a folder opens it and points the destination there. Clicking a file targets it (replacing it asks first). Enter in the field browses to its folder.
+  - Transfer: the file goes as a raw IPC body via `invoke_bytes`, with no JSON or base64. The backend runs `sh -c 'cat > "$1"' sh <path>` (the path is an argv, never spliced into the script) and drops stdin to send EOF. That uses the v5 exec protocol (K8s 1.30+); kube falls back to closing the websocket.
+  - Without overwrite, the script exits 17 if the file exists (read from the status's `ExitCode` cause), and the dialog offers Replace.
+  - Limit 512 MiB, since the file is held in memory. No `tar` needed, but distroless images can't receive files (same as `kubectl cp`).
+  - Tested on UAT with `examples/upload_check.rs` (refuses prod-like contexts): browse with suggestions, `/tmp/`, `/tmp` exists then replace, an explicit name, a missing dir, a read-only root, then clean-up. The Datadog cluster agent passed every case.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
 - **Cloud sections** (`Category::cloud_for_group`):

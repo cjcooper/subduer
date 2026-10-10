@@ -4,6 +4,7 @@ mod forward;
 mod logs;
 mod menu;
 mod shell_env;
+mod upload;
 
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -92,6 +93,8 @@ pub fn run() {
             forward::list_forwards,
             forward::stop_forward,
             forward::open_forward,
+            upload::upload_file,
+            upload::browse_dir,
             commands::secret_value,
         ])
         .run(tauri::generate_context!())
