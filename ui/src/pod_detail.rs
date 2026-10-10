@@ -15,14 +15,23 @@ use crate::chart::{ChartData, LineChart, RefLine, Scale, clock};
 use crate::overview::{fmt_bytes, fmt_cpu};
 use crate::tauri::invoke;
 
-/// Re-fetches the selected pod's details (metrics, state, events).
+/// Re-fetches the selected object's Details tab: a pod's, or a workload's.
 pub fn load(store: Store, quiet: bool) {
+    if crate::app::selected_is_pod(store) {
+        load_pod(store, quiet);
+    } else {
+        crate::workload_detail::load(store, quiet);
+    }
+}
+
+/// Re-fetches the selected pod's details (metrics, state, events).
+fn load_pod(store: Store, quiet: bool) {
     #[derive(Serialize)]
     struct Args {
         namespace: String,
         name: String,
     }
-    load_history(store, quiet);
+    load_history(store, quiet, "pod_history", None);
     let Some(row) = store.selected.get_untracked() else { return };
     let Some(namespace) = row.namespace.clone() else { return };
     if store.pod_loading.get_untracked() {
@@ -44,11 +53,14 @@ pub fn load(store: Store, quiet: bool) {
     });
 }
 
-/// Re-fetches the selected pod's last-hour usage. Background refreshes skip
-/// while one is in flight, so the cadence stays one request per tick.
-fn load_history(store: Store, quiet: bool) {
+/// Re-fetches the selected object's last-hour usage with `command`. Background
+/// refreshes skip while one is in flight, so the cadence stays one request
+/// per tick.
+pub(crate) fn load_history(store: Store, quiet: bool, command: &'static str, kind: Option<subduer_types::KindRef>) {
     #[derive(Serialize)]
     struct Args {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<subduer_types::KindRef>,
         namespace: String,
         name: String,
     }
@@ -59,7 +71,7 @@ fn load_history(store: Store, quiet: bool) {
     }
     store.history_loading.set(true);
     spawn_local(async move {
-        let result = invoke::<_, PodHistory>("pod_history", &Args { namespace, name: row.name.clone() }).await;
+        let result = invoke::<_, PodHistory>(command, &Args { kind, namespace, name: row.name.clone() }).await;
         if store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == row.id)) {
             // A failed refresh keeps the last good chart.
             if result.is_ok() || !store.pod_history.with_untracked(|h| matches!(h, Some(Ok(_)))) {
@@ -111,14 +123,14 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
         <Section store=store id="resources" title="Resources".to_owned() summary=String::new()>
             <UsageChart store=store resource=Resource::Cpu usage=cpu container=None />
             <UsageChart store=store resource=Resource::Memory usage=memory container=None />
-            <HistoryNote store=store />
+            <HistoryNote store=store subject="this pod" />
         </Section>
         <Section store=store id="pod" title="Pod".to_owned() summary=String::new()>
             <PodInfo store=store d=info.clone() />
         </Section>
         {containers}
         <Section store=store id="events" title="Events".to_owned() summary=events_summary>
-            <EventList store=store events=events.clone() />
+            <EventList store=store events=events.clone() empty="No events for this pod." />
         </Section>
     }
 }
@@ -126,7 +138,7 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
 /// A collapsible section. `id` is remembered so the same section stays
 /// collapsed when you select another pod.
 #[component]
-fn Section(
+pub(crate) fn Section(
     store: Store,
     #[prop(into)] id: String,
     title: String,
@@ -173,7 +185,7 @@ fn Section(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Resource {
+pub(crate) enum Resource {
     Cpu,
     Memory,
 }
@@ -204,7 +216,7 @@ impl Resource {
 /// Last-hour line chart for the pod (`container: None`) or one container,
 /// with request and limit lines. Without a limit, the node is the ceiling.
 #[component]
-fn UsageChart(store: Store, resource: Resource, usage: Usage, container: Option<String>) -> impl IntoView {
+pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, container: Option<String>) -> impl IntoView {
     let Usage { requests, limits, used, node } = usage;
     let fmt = resource.fmt();
     let points = Memo::new(move |_| {
@@ -273,7 +285,7 @@ fn UsageChart(store: Store, resource: Resource, usage: Usage, container: Option<
 
 /// Where the charts' data comes from, and how far back it goes.
 #[component]
-fn HistoryNote(store: Store) -> impl IntoView {
+pub(crate) fn HistoryNote(store: Store, subject: &'static str) -> impl IntoView {
     move || {
         store.pod_history.with(|h| match h {
             None => view! { <p class="legend small"></p> }.into_any(),
@@ -283,7 +295,7 @@ fn HistoryNote(store: Store) -> impl IntoView {
                     HistorySource::Prometheus => "Last hour from Prometheus · updates every 15 s".to_owned(),
                     HistorySource::Local => match h.pod.memory.first().or(h.pod.cpu.first()) {
                         Some(&(t, _)) => format!(
-                            "No Prometheus data for this pod, so the app records usage itself: since {} · updates every 15 s",
+                            "No Prometheus data for {subject}, so the app records usage itself: since {} · updates every 15 s",
                             clock(t)
                         ),
                         None => "No usage source: needs Prometheus, metrics-server or kubelet stats.".to_owned(),
@@ -444,7 +456,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
 }
 
 #[component]
-fn EnvTable(store: Store, vars: Vec<EnvVar>, namespace: String) -> impl IntoView {
+pub(crate) fn EnvTable(store: Store, vars: Vec<EnvVar>, namespace: String) -> impl IntoView {
     if vars.is_empty() {
         return view! { <p class="muted">"No environment variables."</p> }.into_any();
     }
@@ -555,9 +567,9 @@ fn SecretValue(store: Store, namespace: String, secret: String, key: String) -> 
 }
 
 #[component]
-fn EventList(store: Store, events: Vec<EventSummary>) -> impl IntoView {
+pub(crate) fn EventList(store: Store, events: Vec<EventSummary>, empty: &'static str) -> impl IntoView {
     if events.is_empty() {
-        return view! { <p class="muted">"No events for this pod. Events expire after about an hour."</p> }.into_any();
+        return view! { <p class="muted">{empty}" Events expire after about an hour."</p> }.into_any();
     }
     events
         .into_iter()
@@ -576,6 +588,7 @@ fn EventList(store: Store, events: Vec<EventSummary>) -> impl IntoView {
                         <span class="muted">{e.source.clone()}</span>
                         <span class="event-when muted">{when}</span>
                     </div>
+                    {e.object.clone().map(|o| view! { <div class="event-object mono">{o}</div> })}
                     <div class="event-message">{e.message.clone()}</div>
                 </div>
             }

@@ -11,7 +11,7 @@ use crate::types::{KindRef, Replicas, is_scalable_workload};
 use crate::{Error, Result};
 
 /// The annotation `kubectl rollout restart` sets on the pod template.
-const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
+pub(crate) const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
 
 /// Deletes one object, letting the garbage collector remove dependents in the
 /// background (kubectl's default). A `dry_run` is validated by the server but

@@ -83,6 +83,8 @@ pub fn run() {
             commands::pod_history,
             commands::delete_resource,
             commands::get_replicas,
+            commands::workload_details,
+            commands::workload_history,
             commands::restart_workload,
             commands::scale_workload,
             logs::open_logs,

@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::pod_details::pod_usage;
-use crate::types::{ClusterHistory, ContainerHistory, HistorySource, PodHistory, Series, UsageHistory};
+use crate::types::{ClusterHistory, ContainerHistory, HistorySource, KindRef, PodHistory, Series, UsageHistory};
 use crate::Result;
 
 pub const WINDOW_SECS: f64 = 3600.0;
@@ -84,7 +84,7 @@ impl HistoryStore {
         let end = (now / STEP_SECS).floor() * STEP_SECS;
         let start = end - WINDOW_SECS;
         if let Some(prom) = self.prometheus(client).await
-            && let Some(containers) = prometheus_history(client, prom, namespace, name, start, end).await
+            && let Some(containers) = prometheus_history(client, prom, namespace, &format!(r#"pod="{name}""#), start, end).await
             && !containers.is_empty()
         {
             return Ok(assemble(HistorySource::Prometheus, start, end, containers));
@@ -93,6 +93,40 @@ impl HistoryStore {
         let node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
         let usage = pod_usage(client, namespace, &pod.name_any(), node).await;
         let containers = self.record(&format!("{namespace}/{name}"), now, usage);
+        Ok(assemble(HistorySource::Local, start, end, containers))
+    }
+
+    /// A Deployment's or StatefulSet's usage over the last hour, summed over
+    /// its pods per container. Prometheus matches pods by name pattern, so
+    /// pods replaced during the hour still count.
+    pub async fn workload_history(&self, client: &Client, kind: &KindRef, namespace: &str, name: &str) -> Result<PodHistory> {
+        let now = unix_now();
+        let end = (now / STEP_SECS).floor() * STEP_SECS;
+        let start = end - WINDOW_SECS;
+        if let Some(prom) = self.prometheus(client).await {
+            let matcher = format!(r#"pod=~"{}""#, crate::workload::pod_name_regex(kind, name));
+            if let Some(containers) = prometheus_history(client, prom, namespace, &matcher, start, end).await
+                && !containers.is_empty()
+            {
+                return Ok(assemble(HistorySource::Prometheus, start, end, containers));
+            }
+        }
+        let (selector, pods) = crate::workload::current_pods(client, kind, namespace, name).await?;
+        let usage = crate::pod_details::pods_usage(client, namespace, &selector, &pods).await.map(|by_pod| {
+            let mut total: HashMap<String, (f64, f64)> = HashMap::new();
+            for (pod, containers) in by_pod {
+                if !pods.iter().any(|(p, _)| *p == pod) {
+                    continue;
+                }
+                for (container, (cpu, memory)) in containers {
+                    let t = total.entry(container).or_default();
+                    t.0 += cpu;
+                    t.1 += memory;
+                }
+            }
+            total
+        });
+        let containers = self.record(&format!("{}:{namespace}/{name}", kind.kind), now, usage);
         Ok(assemble(HistorySource::Local, start, end, containers))
     }
 
@@ -196,14 +230,18 @@ async fn prometheus_history(
     client: &Client,
     prom: &Prometheus,
     namespace: &str,
-    name: &str,
+    pod_matcher: &str,
     start: f64,
     end: f64,
 ) -> Option<Vec<ContainerHistory>> {
-    let selector = format!(r#"namespace="{namespace}",pod="{name}",container!="",container!="POD""#);
-    // `max by` rather than `sum by`: some setups scrape cAdvisor twice.
-    let cpu = format!("max by (container) (rate(container_cpu_usage_seconds_total{{{selector}}}[2m])) * 1000");
-    let memory = format!("max by (container) (container_memory_working_set_bytes{{{selector}}})");
+    let selector = format!(r#"namespace="{namespace}",{pod_matcher},container!="",container!="POD""#);
+    // `max by` per pod first: some setups scrape cAdvisor twice. Then summed
+    // over pods, for workloads.
+    let cpu = format!(
+        "sum by (container) (max by (pod, container) (rate(container_cpu_usage_seconds_total{{{selector}}}[2m]))) * 1000"
+    );
+    let memory =
+        format!("sum by (container) (max by (pod, container) (container_memory_working_set_bytes{{{selector}}}))");
     let (start, end, step) = (start.to_string(), end.to_string(), STEP_SECS.to_string());
     let range = |query: String| {
         let (start, end, step) = (start.clone(), end.clone(), step.clone());

@@ -18,6 +18,7 @@ pub mod table;
 pub mod upload;
 pub mod usage;
 pub mod watch;
+pub mod workload;
 
 pub use kube;
 pub use subduer_types as types;

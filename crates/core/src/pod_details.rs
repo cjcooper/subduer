@@ -93,6 +93,20 @@ pub async fn pod_details(client: &Client, namespace: &str, name: &str) -> Result
     })
 }
 
+pub(crate) fn port_names(c: &Container) -> Vec<String> {
+    c.ports
+        .iter()
+        .flatten()
+        .map(|p| {
+            let proto = p.protocol.as_deref().unwrap_or("TCP");
+            match &p.name {
+                Some(n) => format!("{n} {}/{proto}", p.container_port),
+                None => format!("{}/{proto}", p.container_port),
+            }
+        })
+        .collect()
+}
+
 fn container_details(
     c: &Container,
     state: crate::types::containers::Container,
@@ -102,10 +116,7 @@ fn container_details(
     config_maps: &HashMap<String, std::result::Result<BTreeMap<String, String>, String>>,
     secret_keys: &HashMap<String, std::result::Result<Vec<String>, String>>,
 ) -> ContainerDetails {
-    let resources = c.resources.as_ref();
-    let quantity = |map: Option<&BTreeMap<String, Quantity>>, key: &str| map.and_then(|m| m.get(key)).map(|q| q.0.clone());
-    let requests = resources.and_then(|r| r.requests.as_ref());
-    let limits = resources.and_then(|r| r.limits.as_ref());
+    let (cpu, memory) = container_resources(c);
     let status = status.unwrap_or(&Value::Null);
     let last = &status["lastState"]["terminated"];
 
@@ -124,36 +135,38 @@ fn container_details(
             let at = text(&last["finishedAt"]);
             format!("{reason} (exit {}) at {at}", int(&last["exitCode"]))
         }),
-        ports: c
-            .ports
-            .iter()
-            .flatten()
-            .map(|p| {
-                let proto = p.protocol.as_deref().unwrap_or("TCP");
-                match &p.name {
-                    Some(n) => format!("{n} {}/{proto}", p.container_port),
-                    None => format!("{}/{proto}", p.container_port),
-                }
-            })
-            .collect(),
+        ports: port_names(c),
         cpu: Usage {
-            requests: quantity(requests, "cpu").map(|q| millicores(&q)),
-            limits: quantity(limits, "cpu").map(|q| millicores(&q)),
             used: used.map(|(cpu, _)| cpu),
             node: node.map(|(cpu, _)| cpu),
+            ..cpu
         },
         memory: Usage {
-            requests: quantity(requests, "memory").map(|q| bytes(&q)),
-            limits: quantity(limits, "memory").map(|q| bytes(&q)),
             used: used.map(|(_, mem)| mem),
             node: node.map(|(_, mem)| mem),
+            ..memory
         },
         env: env_vars(c, config_maps, secret_keys),
     }
 }
 
+/// A container's (cpu, memory) requests and limits; `used` and `node` unset.
+pub(crate) fn container_resources(c: &Container) -> (Usage, Usage) {
+    let resources = c.resources.as_ref();
+    let quantity = |map: Option<&BTreeMap<String, Quantity>>, key: &str| map.and_then(|m| m.get(key)).map(|q| q.0.clone());
+    let requests = resources.and_then(|r| r.requests.as_ref());
+    let limits = resources.and_then(|r| r.limits.as_ref());
+    let usage = |key: &str, f: fn(&str) -> f64| Usage {
+        requests: quantity(requests, key).map(|q| f(&q)),
+        limits: quantity(limits, key).map(|q| f(&q)),
+        used: None,
+        node: None,
+    };
+    (usage("cpu", millicores), usage("memory", bytes))
+}
+
 /// Explicit `env` first, then each `envFrom` source expanded into its keys.
-fn env_vars(
+pub(crate) fn env_vars(
     c: &Container,
     config_maps: &HashMap<String, std::result::Result<BTreeMap<String, String>, String>>,
     secret_keys: &HashMap<String, std::result::Result<Vec<String>, String>>,
@@ -242,7 +255,7 @@ fn unreadable(source: &str, error: &str) -> EnvVar {
 }
 
 /// Data of every ConfigMap the containers reference, by name.
-async fn read_config_maps(
+pub(crate) async fn read_config_maps(
     client: &Client,
     namespace: &str,
     containers: &[&Container],
@@ -269,7 +282,7 @@ async fn read_config_maps(
 }
 
 /// Key names (never values) of Secrets used via `envFrom`.
-async fn read_secret_keys(
+pub(crate) async fn read_secret_keys(
     client: &Client,
     namespace: &str,
     containers: &[&Container],
@@ -326,7 +339,7 @@ pub(crate) async fn pod_usage(
     }
 }
 
-async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<HashMap<String, (f64, f64)>> {
+fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
     let ar = ApiResource {
         group: "metrics.k8s.io".into(),
         version: "v1beta1".into(),
@@ -334,8 +347,10 @@ async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<H
         kind: "PodMetrics".into(),
         plural: "pods".into(),
     };
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-    let metrics = api.get(name).await.ok()?;
+    Api::namespaced_with(client.clone(), namespace, &ar)
+}
+
+fn metrics_containers(metrics: &DynamicObject) -> Option<HashMap<String, (f64, f64)>> {
     Some(
         metrics.data["containers"]
             .as_array()?
@@ -349,6 +364,46 @@ async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<H
                         usage["memory"].as_str().map_or(0.0, bytes),
                     ),
                 )
+            })
+            .collect(),
+    )
+}
+
+async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<HashMap<String, (f64, f64)>> {
+    let metrics = pod_metrics_api(client, namespace).get(name).await.ok()?;
+    metrics_containers(&metrics)
+}
+
+/// Pod → container → (cpu millicores, memory bytes) for the given pods, from
+/// metrics-server or, without it, the kubelet stats of their nodes. `None`
+/// if neither works.
+pub(crate) async fn pods_usage(
+    client: &Client,
+    namespace: &str,
+    selector: &str,
+    pods: &[(String, Option<String>)],
+) -> Option<HashMap<String, HashMap<String, (f64, f64)>>> {
+    let lp = ListParams::default().labels(selector);
+    if let Ok(list) = pod_metrics_api(client, namespace).list(&lp).await {
+        return Some(
+            list.items
+                .iter()
+                .filter_map(|m| Some((m.name_any(), metrics_containers(m)?)))
+                .collect(),
+        );
+    }
+    let nodes: BTreeSet<&str> = pods.iter().filter_map(|(_, n)| n.as_deref()).collect();
+    let summaries = join_all(nodes.iter().map(|n| crate::usage::kubelet_summary(client, n))).await;
+    let summaries: HashMap<&str, serde_json::Value> =
+        nodes.into_iter().zip(summaries).filter_map(|(n, s)| Some((n, s?))).collect();
+    if summaries.is_empty() {
+        return None;
+    }
+    Some(
+        pods.iter()
+            .filter_map(|(pod, node)| {
+                let summary = summaries.get(node.as_deref()?)?;
+                Some((pod.clone(), crate::usage::pod_usage(summary, namespace, pod)?))
             })
             .collect(),
     )
@@ -368,36 +423,57 @@ async fn node_allocatable(client: &Client, node: Option<&str>) -> Option<(f64, f
 }
 
 async fn pod_events(client: &Client, namespace: &str, name: &str, uid: Option<&str>) -> Vec<EventSummary> {
+    let fields = format!("involvedObject.name={name},involvedObject.kind=Pod");
+    // Same-named pods from earlier rollouts have a different uid.
+    list_events(client, namespace, Some(&fields), |e| {
+        (uid.is_none() || e.involved_object.uid.as_deref() == uid).then_some(None)
+    })
+    .await
+}
+
+/// A namespace's events (optionally narrowed by a field selector), newest
+/// first. `keep` drops an event with `None`, or keeps it with the object
+/// label to show beside it.
+pub(crate) async fn list_events(
+    client: &Client,
+    namespace: &str,
+    fields: Option<&str>,
+    keep: impl Fn(&Event) -> Option<Option<String>>,
+) -> Vec<EventSummary> {
     let api: Api<Event> = Api::namespaced(client.clone(), namespace);
-    let lp = ListParams::default().fields(&format!("involvedObject.name={name},involvedObject.kind=Pod"));
+    let mut lp = ListParams::default();
+    if let Some(fields) = fields {
+        lp = lp.fields(fields);
+    }
     let Ok(list) = api.list(&lp).await else { return vec![] };
     let mut events: Vec<EventSummary> = list
         .items
         .iter()
-        // Same-named pods from earlier rollouts have a different uid.
-        .filter(|e| uid.is_none() || e.involved_object.uid.as_deref() == uid)
-        .map(|e| {
-            let data = serde_json::to_value(e).unwrap_or_default();
-            let created = e.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string()).unwrap_or_default();
-            let first = first_str(&[&data["firstTimestamp"], &data["eventTime"]]).unwrap_or(&created).to_owned();
-            let last = first_str(&[&data["lastTimestamp"], &data["series"]["lastObservedTime"], &data["eventTime"]])
-                .map(str::to_owned)
-                .unwrap_or_else(|| first.clone());
-            EventSummary {
-                type_: text(&data["type"]),
-                reason: text(&data["reason"]),
-                message: text(&data["message"]).trim().to_owned(),
-                count: data["count"].as_i64().or_else(|| data["series"]["count"].as_i64()).unwrap_or(1),
-                first_seen: first,
-                last_seen: last,
-                source: first_str(&[&data["source"]["component"], &data["reportingComponent"]])
-                    .unwrap_or_default()
-                    .to_owned(),
-            }
-        })
+        .filter_map(|e| Some(summarize(e, keep(e)?)))
         .collect();
     events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
     events
+}
+
+fn summarize(e: &Event, object: Option<String>) -> EventSummary {
+    let data = serde_json::to_value(e).unwrap_or_default();
+    let created = e.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string()).unwrap_or_default();
+    let first = first_str(&[&data["firstTimestamp"], &data["eventTime"]]).unwrap_or(&created).to_owned();
+    let last = first_str(&[&data["lastTimestamp"], &data["series"]["lastObservedTime"], &data["eventTime"]])
+        .map(str::to_owned)
+        .unwrap_or_else(|| first.clone());
+    EventSummary {
+        type_: text(&data["type"]),
+        reason: text(&data["reason"]),
+        message: text(&data["message"]).trim().to_owned(),
+        count: data["count"].as_i64().or_else(|| data["series"]["count"].as_i64()).unwrap_or(1),
+        first_seen: first,
+        last_seen: last,
+        source: first_str(&[&data["source"]["component"], &data["reportingComponent"]])
+            .unwrap_or_default()
+            .to_owned(),
+        object,
+    }
 }
 
 fn positive(v: f64) -> Option<f64> {

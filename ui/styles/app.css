@@ -152,6 +152,9 @@ table.resources { width: 100%; border-collapse: collapse; }
 .badge-superseded, .badge-uninstalled { color: var(--muted); }
 .badge-pending-install, .badge-pending-upgrade, .badge-pending-rollback, .badge-uninstalling { background: var(--warn-bg); color: var(--warn-text); }
 .badge-pending, .badge-containercreating, .badge-terminating, .badge-completed-oom { background: var(--warn-bg); color: var(--warn-text); }
+.badge-available { color: var(--ok); }
+.badge-rolling-out { background: var(--warn-bg); color: var(--warn-text); }
+.badge-degraded { background: var(--danger-soft); color: var(--danger); }
 
 .warn { margin: 0 16px 8px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }
 .error-bar {
@@ -383,6 +386,15 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .event-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .event-when { margin-left: auto; font-size: 12px; }
 .event-message { margin-top: 3px; overflow-wrap: anywhere; }
+.event-object { margin-top: 2px; color: var(--muted); font-size: 11px; }
+
+/* Workload pods */
+.wpods { margin-top: 6px; }
+.wpods th { position: static; padding: 4px 6px; font-size: 12px; }
+.wpods td { padding: 4px 6px; }
+.wpods td.name { white-space: normal; }
+.wpods .ctr-icons { vertical-align: -2px; }
+.chip.old-rev { margin-left: 6px; background: var(--warn-bg); color: var(--warn-text); }
 
 /* Logs window */
 .logs-app { display: flex; flex-direction: column; height: 100vh; background: var(--bg); }

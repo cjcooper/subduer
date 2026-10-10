@@ -78,6 +78,10 @@ pub(crate) struct Store {
     pub(crate) detail_tab: RwSignal<DetailTab>,
     /// Details of the selected pod.
     pub(crate) pod: RwSignal<Option<Result<PodDetails, String>>>,
+    /// Details of the selected Deployment or StatefulSet (loading shares `pod_loading`).
+    pub(crate) workload: RwSignal<Option<Result<subduer_types::WorkloadDetails, String>>>,
+    /// Row id to select once the next table arrives (jumping to a workload's pod).
+    pub(crate) pending_select: RwSignal<Option<String>>,
     pub(crate) pod_loading: RwSignal<bool>,
     /// Last-hour CPU and memory of the selected pod, refreshed with it.
     pub(crate) pod_history: RwSignal<Option<Result<PodHistory, String>>>,
@@ -130,6 +134,8 @@ impl Store {
             col_widths: ColumnWidths::load(),
             detail_tab: RwSignal::new(DetailTab::Yaml),
             pod: RwSignal::new(None),
+            workload: RwSignal::new(None),
+            pending_select: RwSignal::new(None),
             pod_loading: RwSignal::new(false),
             pod_history: RwSignal::new(None),
             history_loading: RwSignal::new(false),
@@ -217,7 +223,13 @@ pub fn App() -> impl IntoView {
         listen::<ResourceTable>(events::RESOURCE_TABLE, move |table| {
             if table.watch_id >= store.min_watch_id.get_untracked() {
                 store.min_watch_id.set(table.watch_id);
+                let pending = store.pending_select.get_untracked();
+                let row = pending.and_then(|id| table.rows.iter().find(|r| r.id == id).cloned());
                 store.table.set(Some(table));
+                if let Some(row) = row {
+                    store.pending_select.set(None);
+                    select_row(store, row);
+                }
             }
         })
         .await;
@@ -233,8 +245,8 @@ pub fn App() -> impl IntoView {
     crate::overview::start_refresh(store);
     set_interval(
         move || {
-            let pod_selected = store.selected.with_untracked(Option::is_some) && selected_is_pod(store);
-            if pod_selected && store.detail_tab.get_untracked() == DetailTab::Details {
+            let has_details = store.selected.with_untracked(Option::is_some) && selected_has_details(store);
+            if has_details && store.detail_tab.get_untracked() == DetailTab::Details {
                 crate::pod_detail::load(store, true);
             }
         },
@@ -901,17 +913,34 @@ fn container_icon(c: containers::Container) -> impl IntoView {
     }
 }
 
-fn selected_is_pod(store: Store) -> bool {
+pub(crate) fn selected_is_pod(store: Store) -> bool {
     store.kind.with_untracked(|k| k.as_ref().is_some_and(|k| k.key() == "core/Pod"))
+}
+
+/// Pods, Deployments and StatefulSets get a Details tab besides YAML.
+fn selected_has_details(store: Store) -> bool {
+    selected_is_pod(store) || store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::is_scalable_workload))
+}
+
+/// Switches to the Pod list and selects one pod once it's listed.
+pub(crate) fn open_pod(store: Store, namespace: String, name: String) {
+    let Some(kind) = store.cluster.with_untracked(|c| c.as_ref().and_then(|c| find_kind(&c.kinds, "core/Pod"))) else {
+        return;
+    };
+    store.pending_select.set(Some(format!("{namespace}/{name}")));
+    store.overview_open.set(false);
+    store.forwards_open.set(false);
+    store.kind.set(Some(kind));
 }
 
 pub(crate) fn select_row(store: Store, row: ResourceRow) {
     store.yaml.set(None);
     store.pod.set(None);
+    store.workload.set(None);
     store.pod_history.set(None);
     store.revealed.set(HashMap::new());
     store.selected.set(Some(row));
-    if selected_is_pod(store) {
+    if selected_has_details(store) {
         store.detail_tab.set(DetailTab::Details);
         crate::pod_detail::load(store, false);
     } else {
@@ -995,7 +1024,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
     };
     view! {
         {move || store.selected.get().map(|row| {
-            let is_pod = selected_is_pod(store);
+            let has_details = selected_has_details(store);
             view! {
                 <aside class="detail">
                     <div class="detail-header">
@@ -1011,7 +1040,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <button class="close" title="Close" on:click=close>"×"</button>
                         </div>
                     </div>
-                    {is_pod.then(|| view! {
+                    {has_details.then(|| view! {
                         <div class="tabs" role="tablist">
                             <button
                                 role="tab"
@@ -1036,8 +1065,12 @@ fn DetailPanel(store: Store) -> impl IntoView {
                         </div>
                     })}
                     <div class="detail-body">
-                        {move || if store.detail_tab.get() == DetailTab::Details && is_pod {
-                            view! { <crate::pod_detail::PodDetailView store=store /> }.into_any()
+                        {move || if store.detail_tab.get() == DetailTab::Details && has_details {
+                            if selected_is_pod(store) {
+                                view! { <crate::pod_detail::PodDetailView store=store /> }.into_any()
+                            } else {
+                                view! { <crate::workload_detail::WorkloadDetailView store=store /> }.into_any()
+                            }
                         } else {
                             match store.yaml.get() {
                                 None => view! { <p class="muted pad">"Loading…"</p> }.into_any(),

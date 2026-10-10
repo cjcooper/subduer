@@ -14,6 +14,7 @@ mod prefs;
 mod tauri;
 mod upload;
 mod workload;
+mod workload_detail;
 
 fn main() {
     console_error_panic_hook::set_once();

@@ -185,7 +185,7 @@ pub mod containers {
         Failed,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Container {
         pub name: String,
         pub state: State,
@@ -443,6 +443,9 @@ pub struct EventSummary {
     pub first_seen: String,
     pub last_seen: String,
     pub source: String,
+    /// The object it's about, e.g. `Pod api-7d9f-x2k4q`, when a list mixes objects.
+    #[serde(default)]
+    pub object: Option<String>,
 }
 
 /// Everything shown in a selected pod's Details tab.
@@ -469,6 +472,82 @@ pub struct PodDetails {
     pub containers: Vec<ContainerDetails>,
     /// Newest first.
     pub events: Vec<EventSummary>,
+}
+
+/// Everything shown in a selected Deployment's or StatefulSet's Details tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkloadDetails {
+    pub kind: String,
+    pub name: String,
+    pub namespace: String,
+    /// e.g. `Available`, `Rolling out`, `Degraded`, `Paused`, `Scaled to 0`.
+    pub status: String,
+    pub replicas: ReplicaCounts,
+    /// Kind-specific facts in display order, e.g. `("Strategy", "RollingUpdate …")`.
+    pub info: Vec<(String, String)>,
+    pub created: Option<String>,
+    pub labels: Vec<(String, String)>,
+    pub conditions: Vec<Condition>,
+    /// Summed over the current pods; `node` is unused.
+    pub cpu: Usage,
+    pub memory: Usage,
+    pub metrics_available: bool,
+    pub pods: Vec<WorkloadPod>,
+    /// The pod template's containers, init containers first. Usage is
+    /// summed over the pods; requests and limits are per pod.
+    pub containers: Vec<TemplateContainer>,
+    /// The workload's, its ReplicaSets' and its pods' events, newest first.
+    pub events: Vec<EventSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaCounts {
+    pub desired: i32,
+    /// Pods that exist, any state.
+    pub current: i32,
+    pub ready: i32,
+    /// Running the latest pod template.
+    pub updated: i32,
+    pub available: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Condition {
+    pub type_: String,
+    pub status: String,
+    pub reason: String,
+    pub message: String,
+    pub last_transition: Option<String>,
+}
+
+/// One pod of a workload, for its Pods table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkloadPod {
+    pub name: String,
+    pub status: String,
+    /// Init containers first.
+    pub containers: Vec<containers::Container>,
+    /// `ready/total` app containers.
+    pub ready: String,
+    pub restarts: i64,
+    pub node: Option<String>,
+    pub created: Option<String>,
+    /// Runs the latest pod template.
+    pub updated: bool,
+    pub cpu: Option<f64>,
+    pub memory: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplateContainer {
+    pub name: String,
+    pub init: bool,
+    pub sidecar: bool,
+    pub image: String,
+    pub ports: Vec<String>,
+    pub cpu: Usage,
+    pub memory: Usage,
+    pub env: Vec<EnvVar>,
 }
 
 /// Where a pod's usage history came from.

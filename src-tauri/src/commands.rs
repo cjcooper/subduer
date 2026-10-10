@@ -2,8 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
-use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, Replicas, events};
-use subduer_core::{actions, cluster, contexts, overview, pod_details, watch};
+use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, Replicas, WorkloadDetails, events};
+use subduer_core::{actions, cluster, contexts, overview, pod_details, watch, workload};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{AppState, Session};
@@ -122,6 +122,39 @@ pub async fn pod_history(state: State<'_, AppState>, namespace: String, name: St
         (session.client.clone(), session.history.clone())
     };
     history.pod_history(&client, &namespace, &name).await.map_err(err)
+}
+
+/// Details tab data for a Deployment or StatefulSet.
+#[tauri::command]
+pub async fn workload_details(
+    state: State<'_, AppState>,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+) -> CmdResult<WorkloadDetails> {
+    let client = connected_client(&state).await?;
+    workload::workload_details(&client, &kind, &namespace, &name)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Last hour of a workload's CPU/memory, summed over its pods; polled every 15 s.
+#[tauri::command]
+pub async fn workload_history(
+    state: State<'_, AppState>,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+) -> CmdResult<PodHistory> {
+    let (client, history) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        (session.client.clone(), session.history.clone())
+    };
+    history
+        .workload_history(&client, &kind, &namespace, &name)
+        .await
+        .map_err(|e| e.user_message())
 }
 
 /// Deletes one object. Refused unless the current context is unlocked, and
