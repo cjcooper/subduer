@@ -16,10 +16,12 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
   - **Helm section:** a Details tab for releases, Rollback and Delete (`helm uninstall`). Files: `crates/core/src/helm.rs` (`release_details`, `manifest_objects`, `rollback`, `uninstall`, `run_helm`), `config.rs` (dispatch), core's tokio `process` feature, the types (`InfoTable.times`), `helm_rollback`/`helm_uninstall` in the commands, `examples/helm_rollback_dry_run.rs` (new; dry-runs both), `ui/src/workload.rs` (`Op::Rollback`, `Op::Uninstall`), `ui/src/object_detail.rs` (time columns, multi-line rows), `ui/src/app.rs` (links to cluster-scoped kinds), CSS, `tools/ui-harness/helmstub.js` (new) and docs.
   - **Settings › Appearance:** a Settings… menu item (⌘, / Ctrl+,) and dialog with Auto (where supported), Light and Dark. Files: `src-tauri/src/menu.rs`, `set_app_theme` in the commands, `ui/src/prefs.rs` (theme), `ui/src/main.rs`, `ui/src/app.rs` (`SettingsDialog`), `ui/src/exec.rs`, CSS, `tools/ui-harness/settingsstub.js` (new) and docs. Also: bigger top-level sidebar items and icons.
   - **Builds on each system:** per-OS bundle configs (`src-tauri/tauri.{macos,linux,windows}.conf.json`), `icon.ico` bundled, Unix-only login-shell PATH, no console windows on Windows, per-OS reveal label and fonts, and `.github/workflows/build.yml`. Only the macOS build has been run.
-- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (67 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+  - **Namespaces section:** a Details tab for Namespace, New namespace and Filter to it. Files: `crates/core/src/namespace.rs` (new), `pod_details.rs` (`namespace_usage`), `config.rs` (dispatch), the types, `create_namespace` in the commands, `examples/namespace_dry_run.rs` (new), `ui/src/namespace.rs` (new), `ui/src/app.rs` (list links, unlock flow), `ui/src/object_detail.rs` (Recent warnings), `ui/src/workload_detail.rs` (namespace conditions), `tools/ui-harness/nsstub.js` (new) and docs.
+- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (70 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): the Settings… menu item and the native title bar following the theme, the unsaved-edits hold on window close and Cmd+Q, logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
 - **Checked on UAT (2026-10-10):** `workload` and `workload_dry_run` against a Deployment, a StatefulSet, two CronJobs (one with `timeZone: America/New_York`) and completed and failed Jobs. Every dry run was accepted, and the locked gate refused each real call. UAT's Prometheus has no series for the short CronJob pods, so their history falls back to local samples; Deployment and StatefulSet history come from Prometheus.
+- **Namespaces checked on UAT (2026-10-10):** `config` read `eg-env-regalify`: 169 objects (19 pods by phase, 93 Secrets counted by metadata only), requests and the limits gap, 8 Helm releases. UAT has no metrics-server, so "Used now" says so. `namespace_dry_run` accepted a new name, refused an existing one, and the locked gate refused the real call; nothing was created.
 - **Helm checked on UAT (2026-10-10):** `config` read the `canary` release (10 revisions with chart and description, 2 resources, chart description). `helm_rollback_dry_run` (54 → 53) ran `helm rollback --dry-run=server` (Helm 4.3 locally) and succeeded; `helm history` afterwards still ended at 54. `helm uninstall --dry-run` also succeeded and `helm status` still showed revision 54 deployed. The locked gate refused both real calls. No real rollback or uninstall has been run anywhere.
 - **Access Control checked on UAT (2026-10-10):** `config` read a ServiceAccount with an IAM role (its bindings, effective rules and pods), the datadog ClusterRole (15 bindings), a ClusterRoleBinding, a RoleBinding and `cluster-admin` (Full access). `access_check` answered allowed with the granting binding for `list pods` and `get nodes/proxy`, and denied for `get secrets` and `create deployments.apps`, matching the rules shown.
 - **Storage section checked on UAT (2026-10-10):** `config` read the EFS claim and volume (static, no class), the `gp2` class and the EFS CSI driver with its nodes. `config_dry_run` was accepted for the PV reclaim policy. The PVC expand dry run was refused by the server ("only dynamically provisioned pvc can be resized"), and the panel says so and hides Expand. The locked gate refused both real calls. Disk usage isn't available there: the kubelet on Fargate doesn't report it.
@@ -37,7 +39,7 @@ A desktop app for browsing and controlling Kubernetes clusters: macOS first, and
 
 - **Stack:** Rust everywhere, using a Tauri v2 shell, a `kube-rs` backend and a Leptos 0.8 UI built to WASM with Trunk. Use another language only where the OS forces it.
 - **Navigation:** by kind, with a namespace filter that persists across kinds.
-- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Run now, Suspend/Resume, data Save, Edit range, Expand, Reclaim policy, Helm Rollback and Delete, Shell, Upload) are behind the safety gate.
+- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Run now, Suspend/Resume, data Save, Edit range, Expand, Reclaim policy, Helm Rollback and Delete, New namespace, Shell, Upload) are behind the safety gate.
 
 ## 2. Getting set up
 
@@ -93,6 +95,7 @@ cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm 
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
 cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <ns> <name>   # Details data + history source; no env values or secrets
 cargo run -p subduer-core --example workload_dry_run -- <context> <group/Kind> <ns> <name> [replicas]   # dry-run restart/scale, or suspend/resume and (CronJob) Run now; checks the gate refuses
+cargo run -p subduer-core --example namespace_dry_run -- <context> <new-name>   # server-side dry run of creating a namespace; checks the gate refuses
 cargo run -p subduer-core --example helm_rollback_dry_run -- <context> <ns> <release> <revision>   # helm rollback --dry-run=server and helm uninstall --dry-run; checks the gate refuses both
 cargo run -p subduer-core --example access_check -- <context> <ns> <serviceaccount> <verb> <resource> [ns|-]   # SubjectAccessReview: may it? (changes nothing)
 cargo run -p subduer-core --example config -- <context> <group/Kind> <ns|-> <name>   # Config, Network, Storage and Access Control Details data; ConfigMap values by size only, Secret values never fetched
@@ -141,6 +144,7 @@ crates/core    all cluster logic, no UI deps
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   workload.rs    Deployment/StatefulSet/Job/CronJob Details tab: status, owned pods (and a CronJob's Jobs), template containers, events
   config.rs      Config-section Details tabs: one generic ObjectDetails (info rows, sections, tables) per kind, read as JSON at the served version; ConfigMap/Secret data and the pods using them
+  namespace.rs   Namespace Details tab (contents, resources vs quota, releases, warnings) and create_namespace
   rbac.rs        Access Control Details tabs: rules with risky ones flagged, bindings both ways, a ServiceAccount's effective rules; check_access
   storage.rs     Storage-section Details tabs on config's shape: PVC usage from the kubelet and why it's pending, PV source and reclaim policy, class claims, CSI
   network.rs     Network-section Details tabs on config's shape: Service endpoints and routes, Ingress backend health/TLS/URLs, NetworkPolicy in words
@@ -183,6 +187,7 @@ ui             Leptos CSR app
 | `get_replicas` | Desired and current replicas (scale subresource), for the Scale dialog |
 | `restart_workload` / `scale_workload` | Rollout restart, set replicas; checked like `delete_resource` |
 | `object_details` | Details tab of a Config- or Network-section kind |
+| `create_namespace` | Creates a namespace (DNS-1123 name), checked like `delete_resource` |
 | `set_app_theme` | Native appearance of every window: `light`, `dark` or `auto` (follow the system) |
 | `helm_uninstall` | `helm uninstall` (optionally `--keep-history`, `--wait`), checked like `delete_resource`; returns Helm's output |
 | `helm_rollback` | `helm rollback` to a revision (optionally `--wait`), checked like `delete_resource`; returns Helm's output |
@@ -286,6 +291,14 @@ ui             Leptos CSR app
   - **NetworkPolicy:** what it applies to; Incoming and Outgoing in words (not restricted, only the rules below, or all blocked), following the `policyTypes` defaulting rules; rule tables with peers in words ("pods app=web in this namespace", "addresses 10.0.0.0/8 except …") and ports (with `endPort` ranges); the pods it currently selects. Status Denies all, Denies incoming, Denies outgoing or Allows listed.
   - **EndpointSlice / Endpoints:** service link, address type, ports, and each endpoint's state (ready, serving, terminating, not ready), target pod, node and zone. Endpoints notes it's deprecated.
   - **Open URL** (`open_url`): only `http://`/`https://` addresses without whitespace or control characters, passed to `open` as one argument.
+- **Namespace Details** (`crates/core/src/namespace.rs`):
+  - Status Active or Terminating; a stuck deletion says what it's waiting for (the true deletion conditions' messages) and lists finalizers; namespace conditions show red when True. Pod security from the `pod-security.kubernetes.io/{enforce,warn,audit}` labels.
+  - **Resources:** CPU and memory used now (metrics-server; says so when absent), requested and limits of running pods (limits only when every container has one, otherwise "not set on N pods"), and the tightest ResourceQuota on requests, with a bar (amber from 90%).
+  - **Contents:** pods by phase and counts of 14 common kinds, via metadata-only lists (Secrets included: no data read). Rows open that kind's list filtered to the namespace (`open_object` with an empty name).
+  - **Quotas, limits and releases:** ResourceQuotas, LimitRanges and Helm releases (from `owner=helm` Secret labels), linked.
+  - **Recent warnings:** the newest 20 Warning events from anything in the namespace, each with its object.
+- **New namespace** (`ui/src/namespace.rs`): a header button on the Namespace list when the `create` verb is allowed. Gated: a locked context asks to allow changes first and then opens the dialog (`pending_new_namespace`). The name is checked as you type (DNS-1123 label, not already listed); on success the new namespace is selected when the watch lists it.
+- **Filter to it:** on a selected namespace, sets the namespace menu to it (through `guard`, so unsaved edits are asked about first).
 - **Appearance** (Settings…, `ui/src/prefs.rs`):
   - The menu item is "Settings…" with ⌘, (Ctrl+, elsewhere): after About in the app menu on macOS, first in the File menu elsewhere. It focuses the main window and sends `open-settings`.
   - The dialog shows each choice as a preview card of the app (`ui/assets/appearance-{light,dark}.jpg`, copied by Trunk; Auto overlays the two with a diagonal split). Regenerate them after visible UI changes with `sh tools/ui-harness/appearance-previews.sh` (generic demo data only).
@@ -429,7 +442,7 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
-- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `storagestub.js`, `rbacstub.js`, `helmstub.js`, `settingsstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
+- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `storagestub.js`, `rbacstub.js`, `helmstub.js`, `settingsstub.js`, `nsstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
 - Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
 - Port-forward from workloads (pick a pod), and optional gating for prod.
 - Helm follow-ups: a diff of the chosen revision against the current one before rolling back (`helm get manifest`), and showing values on request (gated like secrets).

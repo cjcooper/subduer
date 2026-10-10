@@ -698,6 +698,7 @@ pub fn has_object_details(kind: &KindRef) -> bool {
             | "rbac.authorization.k8s.io/ClusterRole"
             | "rbac.authorization.k8s.io/ClusterRoleBinding"
             | "helm.sh/Release"
+            | "core/Namespace"
     )
 }
 

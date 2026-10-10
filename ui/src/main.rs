@@ -8,6 +8,7 @@ mod exec;
 mod forward;
 mod icons;
 mod logs;
+mod namespace;
 mod overview;
 mod pod_detail;
 mod prefs;

@@ -391,6 +391,15 @@ pub async fn helm_uninstall(
         .map_err(|e| e.user_message())
 }
 
+/// Creates a namespace, checked like `delete_resource`.
+#[tauri::command]
+pub async fn create_namespace(state: State<'_, AppState>, context: String, name: String) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "created").await?;
+    subduer_core::namespace::create_namespace(&client, &state.gate, &context, &name, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Opens an Ingress URL in the browser. Only plain http(s) addresses are
 /// accepted.
 #[tauri::command]

@@ -88,6 +88,10 @@ fn binding_text(mode: &str) -> String {
 }
 
 /// Bytes as `3.2 GiB`.
+pub(crate) fn bytes_text(n: f64) -> String {
+    bytes(n)
+}
+
 fn bytes(n: f64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut n = n;

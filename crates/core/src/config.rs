@@ -47,6 +47,7 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
             crate::network::related(client, key, ns, name, &v, &mut d).await?;
             crate::storage::related(client, key, ns, name, &v, &mut d).await?;
             crate::rbac::related(client, key, ns, name, &v, &mut d).await?;
+            crate::namespace::related(client, key, name, &mut d).await?;
         }
     }
     if let Some(ns) = namespace {
@@ -101,6 +102,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
             crate::network::describe(key, &mut d, v);
             crate::storage::describe(key, &mut d, v);
             crate::rbac::describe(key, &mut d, v);
+            crate::namespace::describe(key, &mut d, v);
         }
     }
     // Owner rows last, like workloads.

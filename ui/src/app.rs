@@ -91,6 +91,9 @@ pub(crate) struct Store {
     /// A ConfigMap or Secret is being edited: background refreshes pause so
     /// they don't replace the draft.
     pub(crate) editing: RwSignal<bool>,
+    /// The New namespace dialog is open, or waits for the unlock prompt.
+    pub(crate) new_namespace: RwSignal<bool>,
+    pub(crate) pending_new_namespace: RwSignal<bool>,
     /// The Settings dialog is open, and the Appearance setting.
     pub(crate) settings_open: RwSignal<bool>,
     pub(crate) theme: RwSignal<crate::prefs::Theme>,
@@ -158,6 +161,8 @@ impl Store {
             object: RwSignal::new(None),
             editing: RwSignal::new(false),
             settings_open: RwSignal::new(false),
+            new_namespace: RwSignal::new(false),
+            pending_new_namespace: RwSignal::new(false),
             theme: RwSignal::new(crate::prefs::load_theme()),
             dirty: RwSignal::new(None),
             discard_prompt: RwSignal::new(false),
@@ -373,6 +378,7 @@ pub fn App() -> impl IntoView {
             <crate::workload::WorkloadDialog store=store />
             <DiscardDialog store=store />
             <SettingsDialog store=store />
+            <crate::namespace::NewNamespaceDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
             <crate::download::DownloadDialog store=store />
@@ -504,6 +510,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 store.pending_workload.set(None);
                 store.pending_exec.set(None);
                 store.pending_upload.set(None);
+                store.pending_new_namespace.set(false);
             };
             let confirm = {
                 let name = name.clone();
@@ -534,6 +541,10 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                             crate::exec::open(store, target);
                         }
                         store.pending_exec.set(None);
+                        if store.pending_new_namespace.get_untracked() {
+                            store.new_namespace.set(true);
+                        }
+                        store.pending_new_namespace.set(false);
                         if let Some(prompt) = store.pending_upload.get_untracked()
                             && prompt.context == name
                         {
@@ -816,6 +827,7 @@ fn ResourceView(store: Store) -> impl IntoView {
         <div class="resource-header">
             {header}
             <span class="spacer"></span>
+            <crate::namespace::NewNamespaceButton store=store />
             {move || store.node_page().then(|| view! { <crate::overview::RefreshStatus store=store /> })}
             <input
                 class="search"
@@ -1146,6 +1158,15 @@ fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name
     };
     // Links don't always know whether a kind is namespaced (e.g. Helm manifests).
     let namespace = namespace.filter(|_| kind.namespaced);
+    // No name: open the kind's list, filtered to the namespace.
+    if name.is_empty() {
+        store.overview_open.set(false);
+        store.forwards_open.set(false);
+        store.selected.set(None);
+        store.namespace.set(namespace);
+        store.kind.set(Some(kind));
+        return;
+    }
     let id = match &namespace {
         Some(ns) => format!("{ns}/{name}"),
         None => name,
@@ -1281,6 +1302,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <div class="muted">{row.namespace.clone().unwrap_or_default()}</div>
                         </div>
                         <div class="detail-actions">
+                            <crate::namespace::FilterButton store=store row=row.clone() />
                             <ServiceForwardButton store=store row=row.clone() />
                             <WorkloadLogsButton store=store row=row.clone() />
                             <crate::workload::WorkloadButtons store=store row=row.clone() />

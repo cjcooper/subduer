@@ -79,7 +79,9 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
         .into_iter()
         .map(|s| view! { <InfoSectionView store=store s=s /> })
         .collect_view();
-    let events = d.namespace.is_some().then(|| {
+    // A namespace's own list is the recent warnings from anything in it.
+    let in_namespace = d.kind == "Namespace";
+    let events = (d.namespace.is_some() || in_namespace).then(|| {
         let events = d.events.clone();
         let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
         let summary = match (events.len(), warnings) {
@@ -88,8 +90,17 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
             (n, w) => format!("{n} · ⚠ {w}"),
         };
         view! {
-            <Section store=store id="events" title="Events".to_owned() summary=summary>
-                <EventList store=store events=events.clone() empty="No events for it." />
+            <Section
+                store=store
+                id=if in_namespace { "ns-warnings" } else { "events" }
+                title=if in_namespace { "Recent warnings".to_owned() } else { "Events".to_owned() }
+                summary=summary
+            >
+                <EventList
+                    store=store
+                    events=events.clone()
+                    empty=if in_namespace { "No warnings in it." } else { "No events for it." }
+                />
             </Section>
         }
     });

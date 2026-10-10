@@ -125,6 +125,7 @@ pub fn run() {
             commands::set_unsaved,
             commands::set_app_theme,
             commands::open_url,
+            commands::create_namespace,
             commands::helm_rollback,
             commands::helm_uninstall,
             commands::check_access,

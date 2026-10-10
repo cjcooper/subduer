@@ -351,6 +351,19 @@ pub(crate) async fn pod_usage(
     }
 }
 
+/// CPU (millicores) and memory (bytes) in use by every pod in a namespace,
+/// from metrics-server. `None` without metrics-server.
+pub(crate) async fn namespace_usage(client: &Client, namespace: &str) -> Option<(f64, f64)> {
+    let list = pod_metrics_api(client, namespace).list(&ListParams::default()).await.ok()?;
+    Some(
+        list.items
+            .iter()
+            .filter_map(metrics_containers)
+            .flat_map(|c| c.into_values())
+            .fold((0.0, 0.0), |(c, m), (dc, dm)| (c + dc, m + dm)),
+    )
+}
+
 fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
     let ar = ApiResource {
         group: "metrics.k8s.io".into(),
