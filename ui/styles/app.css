@@ -100,9 +100,10 @@ button, input, select { font: inherit; color: inherit; }
 .kind-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-count { margin-left: auto; font-weight: 400; }
 .kind-group-title {
+  display: flex; align-items: center; gap: 6px;
   margin: 8px 10px 2px 28px; font-size: 11px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.kind-group-title .nav-icon { width: 13px; height: 13px; }
 .kind {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 10px 4px 28px;
   border: none; background: none; border-radius: 5px; cursor: pointer;
@@ -217,6 +218,7 @@ table.resources { width: 100%; border-collapse: collapse; }
 .stat-note { margin-top: 2px; color: var(--muted); font-size: 12px; min-height: 1em; }
 .hero { font-size: 48px; font-weight: 600; line-height: 1.1; letter-spacing: -0.01em; }
 .note { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+.card-chart { margin-top: 14px; }
 
 /* Meters: fill carries severity, track is a light step of the same ramp. */
 .meters { margin-top: 14px; display: flex; flex-direction: column; }

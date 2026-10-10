@@ -13,12 +13,19 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::pod_details::pod_usage;
-use crate::types::{ContainerHistory, HistorySource, PodHistory, Series, UsageHistory};
+use crate::types::{ClusterHistory, ContainerHistory, HistorySource, PodHistory, Series, UsageHistory};
 use crate::Result;
 
 pub const WINDOW_SECS: f64 = 3600.0;
 /// Matches the UI's refresh interval.
 pub const STEP_SECS: f64 = 15.0;
+/// The Cluster page refreshes every 30 s; one point per refresh.
+pub const CLUSTER_STEP_SECS: f64 = 30.0;
+/// cAdvisor series for real containers, de-duplicated (some setups scrape
+/// cAdvisor twice) by keeping one value per container.
+const CPU_BY_CONTAINER: &str = r#"max by (node, namespace, pod, container) (rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[2m]))"#;
+const MEMORY_BY_CONTAINER: &str =
+    r#"max by (node, namespace, pod, container) (container_memory_working_set_bytes{container!="",container!="POD"})"#;
 /// Locally recorded pods not asked about for this long are dropped.
 const LOCAL_TTL_SECS: f64 = 2.0 * WINDOW_SECS;
 
@@ -87,6 +94,55 @@ impl HistoryStore {
         let usage = pod_usage(client, namespace, &pod.name_any(), node).await;
         let containers = self.record(&format!("{namespace}/{name}"), now, usage);
         Ok(assemble(HistorySource::Local, start, end, containers))
+    }
+
+    /// Current usage per node from Prometheus: node → (cpu millicores, memory
+    /// bytes), summed over its containers. Nodes Prometheus doesn't report are
+    /// missing from the map. `None` without a usable Prometheus.
+    pub async fn node_usage(&self, client: &Client) -> Option<HashMap<String, (f64, f64)>> {
+        let prom = self.prometheus(client).await?;
+        let cpu = format!("sum by (node) ({CPU_BY_CONTAINER}) * 1000");
+        let memory = format!("sum by (node) ({MEMORY_BY_CONTAINER})");
+        let (cpu_params, memory_params) = ([("query", cpu.as_str())], [("query", memory.as_str())]);
+        let (cpu, memory) = tokio::join!(
+            prom.get(client, "query", &cpu_params),
+            prom.get(client, "query", &memory_params),
+        );
+        let (cpu, memory) = (instant_by_node(&cpu?), instant_by_node(&memory?));
+        let mut out: HashMap<String, (f64, f64)> = HashMap::new();
+        for (node, v) in cpu {
+            out.entry(node).or_default().0 = v;
+        }
+        for (node, v) in memory {
+            out.entry(node).or_default().1 = v;
+        }
+        Some(out)
+    }
+
+    /// Cluster-wide container usage over the last hour, from Prometheus.
+    pub async fn cluster_history(&self, client: &Client) -> Option<ClusterHistory> {
+        let prom = self.prometheus(client).await?;
+        let end = (unix_now() / CLUSTER_STEP_SECS).floor() * CLUSTER_STEP_SECS;
+        let start = end - WINDOW_SECS;
+        let (s, e, step) = (start.to_string(), end.to_string(), CLUSTER_STEP_SECS.to_string());
+        let range = |query: String| {
+            let (s, e, step) = (s.clone(), e.clone(), step.clone());
+            async move {
+                let params = [("query", query.as_str()), ("start", &s), ("end", &e), ("step", &step)];
+                prom.get(client, "query_range", &params).await
+            }
+        };
+        let (cpu, memory) = tokio::join!(
+            range(format!("sum({CPU_BY_CONTAINER}) * 1000")),
+            range(format!("sum({MEMORY_BY_CONTAINER})")),
+        );
+        let first = |data: Option<Value>| data.and_then(|d| single_series(&d));
+        Some(ClusterHistory {
+            start,
+            end,
+            step: CLUSTER_STEP_SECS,
+            usage: UsageHistory { cpu: first(cpu)?, memory: first(memory)? },
+        })
     }
 
     /// Appends a sample (if any) and returns the pod's recorded series.
@@ -173,6 +229,31 @@ async fn prometheus_history(
             })
             .collect(),
     )
+}
+
+/// The single series of an aggregated `query_range` result.
+fn single_series(data: &Value) -> Option<Series> {
+    let points = data["result"].as_array()?.first()?["values"]
+        .as_array()?
+        .iter()
+        .filter_map(|p| Some((p[0].as_f64()?, p[1].as_str()?.parse::<f64>().ok()?)))
+        .filter(|(_, v)| v.is_finite())
+        .collect();
+    Some(points)
+}
+
+/// Node → value from an instant-query vector grouped by `node`.
+fn instant_by_node(data: &Value) -> HashMap<String, f64> {
+    data["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let node = r["metric"]["node"].as_str()?.to_owned();
+            let v = r["value"][1].as_str()?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((node, v))
+        })
+        .collect()
 }
 
 /// Container → series from a `query_range` matrix result.

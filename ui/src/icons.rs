@@ -40,6 +40,24 @@ const HELM: &str = r#"<circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="
 const PUZZLE: &str = r#"<path d="M4 7h4a2 2 0 1 1 4 0h4v4a2 2 0 1 1 0 4v4h-4a2 2 0 1 0-4 0H4v-4a2 2 0 1 0 0-4z"/>"#;
 const SLIDERS: &str = r#"<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>"#;
 const GLOBE: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/>"#;
+const BELL: &str = r#"<path d="M6 8.5a6 6 0 0 1 12 0c0 6.5 2.5 8.5 2.5 8.5h-17S6 15 6 8.5"/><path d="M10.3 20.5a2 2 0 0 0 3.4 0"/>"#;
+const DASHBOARD: &str = r#"<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>"#;
+const CHART: &str = r#"<path d="M3.5 3.5v17h17"/><path d="M7.5 15l4-4.5 3 3 5.5-6"/>"#;
+const BROADCAST: &str = r#"<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19 5a10 10 0 0 1 0 14M5 19A10 10 0 0 1 5 5"/>"#;
+const VAULT: &str = r#"<rect x="3" y="3.5" width="18" height="15.5" rx="2"/><circle cx="12" cy="11.25" r="3.5"/><path d="M12 7.75V6.5M12 16v-1.25M8.5 11.25H7.25M16.75 11.25H15.5M7 19v2M17 19v2"/>"#;
+/// A secret pulled into the cluster (ExternalSecret).
+const SECRET_IN: &str = r#"<rect x="4" y="12" width="16" height="9" rx="2"/><path d="M12 2.5V9M9 6l3 3 3-3M12 15.25v2.5"/>"#;
+/// A secret pushed out of the cluster (PushSecret).
+const SECRET_OUT: &str = r#"<rect x="4" y="12" width="16" height="9" rx="2"/><path d="M12 9V2.5M9 5.5l3-3 3 3M12 15.25v2.5"/>"#;
+const WAND: &str = r#"<path d="M4 20L14.5 9.5M12.5 7.5l4 4"/><path d="M18 2.5v3M16.5 4h3M20 9v2M19 10h2M9.5 3v2M8.5 4h2"/>"#;
+const CLOUD: &str = r#"<path d="M7 18.5a4.5 4.5 0 0 1-.55-8.97A6 6 0 0 1 17.9 9.6a4.25 4.25 0 0 1-.4 8.9z"/>"#;
+const CLIPBOARD: &str = r#"<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M8.5 11h7M8.5 15h4.5"/>"#;
+const SHIELD_OFF: &str = r#"<path d="M12 3l8 3v6c0 4.8-3.4 8-8 9-4.6-1-8-4.2-8-9V6z"/><path d="M5 5l14 14"/>"#;
+const ERASER: &str = r#"<path d="M8 20.5h12"/><path d="M4.6 14.9l8.8-8.8a2 2 0 0 1 2.83 0l2.67 2.67a2 2 0 0 1 0 2.83L11 19.5H8.4z"/><path d="M9.5 10l5.5 5.5"/>"#;
+const REFRESH: &str = r#"<path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4.5h4.5"/><path d="M4 13a8 8 0 0 0 14.6 4.5M20 20v-4.5h-4.5"/>"#;
+const EYE: &str = r#"<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>"#;
+const LIST: &str = r#"<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>"#;
+const ANTENNA: &str = r#"<circle cx="12" cy="9" r="2"/><path d="M12 11v10M8.5 21h7"/><path d="M8.2 5.2a5.4 5.4 0 0 0 0 7.6M15.8 5.2a5.4 5.4 0 0 1 0 7.6"/>"#;
 const BOX: &str = r#"<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/>"#;
 
 /// Icon markup for a kind; custom resources share the puzzle piece.
@@ -84,11 +102,94 @@ fn kind_paths(kind: &KindRef) -> &'static str {
     }
 }
 
+/// Icons for custom resources from well-known projects. Each draws what the
+/// kind does, in the same line style as built-ins, rather than a project logo.
+fn custom_paths(kind: &KindRef) -> Option<&'static str> {
+    let k = kind.kind.as_str();
+    let paths = match kind.group.as_str() {
+        // Kyverno: policies, exceptions, cleanup, reports.
+        "kyverno.io" | "policies.kyverno.io" | "reports.kyverno.io" | "wgpolicyk8s.io" => match k {
+            "PolicyException" => SHIELD_OFF,
+            "CleanupPolicy" | "ClusterCleanupPolicy" | "DeletingPolicy" | "NamespacedDeletingPolicy" => ERASER,
+            "UpdateRequest" => REFRESH,
+            "GlobalContextEntry" => GLOBE,
+            _ if k.ends_with("Report") => CLIPBOARD,
+            _ => SHIELD_CHECK,
+        },
+        "datadoghq.com" => match k {
+            "DatadogMonitor" => BELL,
+            "DatadogDashboard" => DASHBOARD,
+            "DatadogSLO" => TARGET,
+            "DatadogPodAutoscaler" => SCALE,
+            "DatadogAgent" | "DatadogAgentProfile" => SERVER,
+            "DatadogGenericResource" => BOX,
+            _ => CHART,
+        },
+        // Prometheus Operator.
+        "monitoring.coreos.com" => match k {
+            "PrometheusAgent" => ANTENNA,
+            "ServiceMonitor" | "PodMonitor" => EYE,
+            "Probe" => TARGET,
+            "PrometheusRule" | "ThanosRuler" => LIST,
+            "Alertmanager" => BELL,
+            "AlertmanagerConfig" | "ScrapeConfig" => SLIDERS,
+            _ => CHART,
+        },
+        "keda.sh" => match k {
+            "ScaledJob" => PLAY,
+            "TriggerAuthentication" | "ClusterTriggerAuthentication" => KEY,
+            _ => SCALE,
+        },
+        "eventing.keda.sh" => BROADCAST,
+        "external-secrets.io" => match k {
+            "SecretStore" | "ClusterSecretStore" => VAULT,
+            "PushSecret" | "ClusterPushSecret" => SECRET_OUT,
+            _ => SECRET_IN,
+        },
+        "generators.external-secrets.io" => match k {
+            "SSHKey" => KEY,
+            "GeneratorState" => CLIPBOARD,
+            _ => WAND,
+        },
+        // Cloud providers' controllers (AWS, Google Cloud, Azure).
+        g if Category::cloud_for_group(g).is_some() => match k {
+            "TargetGroupBinding" | "PolicyEndpoint" | "ClusterPolicyEndpoint" => TARGET,
+            "ManagedCertificate" => SHIELD_CHECK,
+            "PodMonitoring" | "ClusterPodMonitoring" | "GlobalRules" | "Rules" => CHART,
+            "ManagedCluster" | "AgentPool" | "ManagedClustersAgentPool" => SERVER,
+            "ApplicationNetworkPolicy" | "ClusterNetworkPolicy" => WALL,
+            "SecurityGroupPolicy" => SHIELD,
+            "GlobalAccelerator" => GLOBE,
+            "CNINode" => SERVER,
+            "ENIConfig" => CHIP,
+            _ if k.ends_with("Config") || k.ends_with("Configuration") || k.ends_with("Params") => SLIDERS,
+            _ => CLOUD,
+        },
+        _ => return None,
+    };
+    Some(paths)
+}
+
+/// Icon for a custom-resource group heading, for well-known projects.
+fn group_paths(group: &str) -> Option<&'static str> {
+    Some(match group {
+        "kyverno.io" | "policies.kyverno.io" | "reports.kyverno.io" | "wgpolicyk8s.io" => SHIELD_CHECK,
+        "datadoghq.com" | "monitoring.coreos.com" => CHART,
+        "keda.sh" => SCALE,
+        "eventing.keda.sh" => BROADCAST,
+        "external-secrets.io" => SECRET_IN,
+        "generators.external-secrets.io" => WAND,
+        g if Category::cloud_for_group(g).is_some() => CLOUD,
+        _ => return None,
+    })
+}
+
 fn category_paths(category: Category) -> &'static str {
     match category {
         Category::TopLevel => CLUSTER,
         Category::Workloads => CUBE,
         Category::Helm => HELM,
+        Category::Aws | Category::GoogleCloud | Category::Azure => CLOUD,
         Category::Config => SLIDERS,
         Category::Network => GLOBE,
         Category::Storage => DATABASE,
@@ -115,9 +216,17 @@ fn svg(paths: &'static str) -> impl IntoView {
     }
 }
 
+/// `custom`: the kind is a custom resource, so built-in names don't apply
+/// (a CRD may be called `Service` too); unknown ones get the puzzle piece.
 #[component]
 pub fn KindIcon(kind: KindRef, #[prop(optional)] custom: bool) -> impl IntoView {
-    svg(if custom { PUZZLE } else { kind_paths(&kind) })
+    svg(if custom { custom_paths(&kind).unwrap_or(PUZZLE) } else { kind_paths(&kind) })
+}
+
+/// Icon for a custom-resource API group heading; nothing for unknown groups.
+#[component]
+pub fn GroupIcon(group: String) -> impl IntoView {
+    group_paths(&group).map(svg)
 }
 
 #[component]
@@ -147,5 +256,33 @@ pub fn Chevron(#[prop(into)] open: Signal<bool>) -> impl IntoView {
         >
             <path d="M9 5.5l6.5 6.5L9 18.5" />
         </svg>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(group: &str, kind: &str) -> KindRef {
+        KindRef { group: group.into(), version: "v1".into(), kind: kind.into(), plural: String::new(), namespaced: true }
+    }
+
+    #[test]
+    fn well_known_custom_resources() {
+        assert_eq!(custom_paths(&kind("keda.sh", "ScaledObject")), Some(SCALE));
+        assert_eq!(custom_paths(&kind("external-secrets.io", "ClusterSecretStore")), Some(VAULT));
+        assert_eq!(custom_paths(&kind("kyverno.io", "PolicyException")), Some(SHIELD_OFF));
+        assert_eq!(custom_paths(&kind("wgpolicyk8s.io", "ClusterPolicyReport")), Some(CLIPBOARD));
+        assert_eq!(custom_paths(&kind("elbv2.k8s.aws", "TargetGroupBinding")), Some(TARGET));
+        assert_eq!(custom_paths(&kind("gateway.k8s.aws", "LoadBalancerConfiguration")), Some(SLIDERS));
+        assert_eq!(custom_paths(&kind("s3.services.k8s.aws", "Bucket")), Some(CLOUD));
+        assert_eq!(custom_paths(&kind("networking.gke.io", "ManagedCertificate")), Some(SHIELD_CHECK));
+        assert_eq!(custom_paths(&kind("cloud.google.com", "BackendConfig")), Some(SLIDERS));
+        assert_eq!(custom_paths(&kind("resources.azure.com", "ResourceGroup")), Some(CLOUD));
+        assert_eq!(custom_paths(&kind("monitoring.coreos.com", "ServiceMonitor")), Some(EYE));
+        assert_eq!(custom_paths(&kind("monitoring.coreos.com", "PrometheusRule")), Some(LIST));
+        assert_eq!(custom_paths(&kind("monitoring.coreos.com", "Prometheus")), Some(CHART));
+        assert_eq!(custom_paths(&kind("example.com", "Widget")), None);
+        assert_eq!(custom_paths(&kind("k8s.aws.example.com", "Widget")), None);
     }
 }

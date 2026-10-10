@@ -10,7 +10,8 @@ use kube::{Client, ResourceExt};
 
 use crate::Result;
 use crate::quantity::{bytes, millicores};
-use crate::types::{ClusterOverview, NamespaceRequests, NodeSummary, PodCounts, ResourceTotals};
+use crate::history::HistoryStore;
+use crate::types::{ClusterOverview, NamespaceRequests, NodeSummary, PodCounts, ResourceTotals, UsageSource};
 
 /// Requests and limits of one pod: (cpu req, cpu lim, mem req, mem lim).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -21,17 +22,20 @@ pub(crate) struct PodResources {
     pub(crate) memory_limits: f64,
 }
 
-pub async fn cluster_overview(client: &Client) -> Result<ClusterOverview> {
+/// `history` supplies the connection's Prometheus (for usage without
+/// metrics-server, and the last-hour charts).
+pub async fn cluster_overview(client: &Client, history: &HistoryStore) -> Result<ClusterOverview> {
     // resourceVersion=0: served from the API server's cache, cheaper on big clusters.
     let lp = ListParams::default().match_any();
     let nodes_api: Api<Node> = Api::all(client.clone());
     let pods_api: Api<Pod> = Api::all(client.clone());
-    let (nodes, pods, version, usage, warnings) = tokio::join!(
+    let (nodes, pods, version, metrics_server, warnings, cluster_history) = tokio::join!(
         nodes_api.list(&lp),
         pods_api.list(&lp),
         client.apiserver_version(),
         node_usage(client),
         warnings_last_hour(client),
+        history.cluster_history(client),
     );
     let (nodes, pods) = (nodes?.items, pods?.items);
 
@@ -71,6 +75,13 @@ pub async fn cluster_overview(client: &Client) -> Result<ClusterOverview> {
         }
     }
 
+    let (usage_source, usage) = match metrics_server {
+        Some(usage) => (Some(UsageSource::MetricsServer), Some(usage)),
+        None => {
+            let names: Vec<String> = nodes.iter().map(|n| n.name_any()).collect();
+            fallback_usage(client, history, &names, &per_node).await
+        }
+    };
     let mut node_summaries: Vec<NodeSummary> = nodes
         .iter()
         .map(|node| {
@@ -113,6 +124,8 @@ pub async fn cluster_overview(client: &Client) -> Result<ClusterOverview> {
         namespaces,
         warnings_last_hour: warnings,
         metrics_available,
+        usage_source,
+        history: cluster_history,
     })
 }
 
@@ -243,6 +256,35 @@ async fn node_usage(client: &Client) -> Option<HashMap<String, (f64, f64)>> {
             })
             .collect(),
     )
+}
+
+/// Usage without metrics-server: Prometheus per node, with kubelet stats for
+/// nodes it doesn't report; or kubelet stats alone. Only nodes running pods
+/// are asked (finished pods hold nothing); the rest count as idle.
+async fn fallback_usage(
+    client: &Client,
+    history: &HistoryStore,
+    nodes: &[String],
+    per_node: &HashMap<String, (usize, PodResources)>,
+) -> (Option<UsageSource>, Option<HashMap<String, (f64, f64)>>) {
+    let is_busy = |n: &String| per_node.get(n).is_some_and(|(pods, _)| *pods > 0);
+    let busy = nodes.iter().filter(|n| is_busy(n)).cloned();
+    let (source, mut usage) = match history.node_usage(client).await {
+        Some(usage) => (UsageSource::Prometheus, usage),
+        None => (UsageSource::Kubelet, HashMap::new()),
+    };
+    let missing: Vec<String> = busy.filter(|n| !usage.contains_key(n)).collect();
+    let asked = missing.len();
+    let from_kubelet = crate::usage::kubelet_node_usage(client, missing).await;
+    // Kubelet alone and every request failed: there's no usage to show.
+    if source == UsageSource::Kubelet && asked > 0 && from_kubelet.is_empty() {
+        return (None, None);
+    }
+    usage.extend(from_kubelet);
+    for idle in nodes.iter().filter(|n| !is_busy(n)) {
+        usage.entry(idle.clone()).or_insert((0.0, 0.0));
+    }
+    (Some(source), Some(usage))
 }
 
 async fn warnings_last_hour(client: &Client) -> Option<usize> {

@@ -83,10 +83,11 @@ crates/core    all cluster logic, no UI deps
   catalog.rs     sidebar sections + TopLevel; CRD detection via CRD names (metadata-only list)
   table.rs       columns + rows per kind, pod status (kubectl rules), container states, events
   watch.rs       watch -> full snapshot, throttled to 250 ms
-  overview.rs    Cluster page: nodes, pods, requests/limits, metrics-server usage, warnings (1h)
+  overview.rs    Cluster page: nodes, pods, requests/limits, usage (metrics-server → Prometheus → kubelet), last-hour history, warnings (1h)
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   actions.rs     mutations; each checks SafetyGate first (delete so far)
   helm.rs        Helm releases as a virtual kind (helm.sh/Release) from owner=helm Secrets
+  usage.rs       kubelet /stats/summary helpers (per pod, per node totals)
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
   quantity.rs    "500m"/"1.5Gi" -> numbers
 src-tauri      Tauri app: AppState (gate, session, one watch), commands.rs, shell_env.rs
@@ -126,7 +127,7 @@ ui             Leptos CSR app
 - **Contexts and safety:** the context picker marks prod-like contexts with ⚠. The lock toggle uses an in-app modal; prod contexts require typing the name. JS `prompt` and `confirm` are avoided because WKWebView may not support them.
 - **Sidebar:**
   - **Cluster** page, **Node** and **Event** at the top level.
-  - Collapsible sections: Workloads, Helm, Config, Network, Storage, Namespaces, Access Control, Custom Resources (grouped by API group), and Other.
+  - Collapsible sections: Workloads, Config, Network, Storage, Namespaces, Access Control, Helm, AWS, Google Cloud, Azure, Custom Resources, and Other. The cloud sections and Custom Resources are grouped by API group. Empty sections are hidden, so a cloud section appears only when the cluster has that provider's kinds.
   - Sections start closed and can be reordered by dragging. The order persists, and new sections slot into their default position.
   - `events.k8s.io/Event` is hidden as a duplicate of `core/Event`.
 - **Tables:**
@@ -161,9 +162,21 @@ ui             Leptos CSR app
   - Chart and app version are decoded from the latest revision's payload (Helm base64, then gzip, then JSON). `config`, `manifest`, `hooks` and everything in `chart` except `metadata` are dropped right away.
   - **Updated** is the revision Secret's creation time. The `modifiedAt` label is stale on UAT (identical across revisions).
   - The detail panel shows a summary (chart, status, notes, revision history) instead of YAML.
-- **Sidebar icons** (`ui/src/icons.rs`): hand-drawn 24×24 stroke icons in `currentColor`, one per built-in kind and section. Custom resources share a puzzle piece, unknown kinds a box. The group chevron is a 14px stroked SVG in body ink, also used in the Pod Details sections.
+- **Sidebar icons** (`ui/src/icons.rs`): hand-drawn 24×24 stroke icons in `currentColor`, one per built-in kind and section. Unknown custom resources get a puzzle piece and unknown built-ins a box. Well-known projects get descriptive icons per kind and on their group heading: Kyverno (`kyverno.io`, `policies.`/`reports.kyverno.io`, `wgpolicyk8s.io`), Datadog (`datadoghq.com`), Prometheus Operator (`monitoring.coreos.com`), KEDA (`keda.sh`, `eventing.keda.sh`), External Secrets (`external-secrets.io`, `generators.`) and the cloud sections (AWS, Google Cloud, Azure; config-like kinds get sliders, the rest a cloud). These are drawn icons, not project logos (trademarks). Add more in `custom_paths`/`group_paths`. The group chevron is a 14px stroked SVG in body ink, also used in the Pod Details sections.
+- **Cluster page usage:**
+  - Order: metrics-server; else Prometheus `sum by (node)` of cAdvisor container usage, with kubelet stats for busy nodes Prometheus doesn't report; else kubelet stats for every busy node. Nodes with no running pods count as 0.
+  - Every source counts usage as the sum of containers, so mixing them stays consistent.
+  - On UAT, Prometheus misses about 17 of 50 nodes: Fargate nodes holding only finished Job pods, plus the node running Prometheus itself.
+  - The last-hour charts (step 30 s, matching the page refresh) come from Prometheus only, so they exclude nodes it doesn't scrape. Expect them to sit a little below the "Used" meter (about 0.8 GiB on UAT).
+  - The charts have no request or allocatable lines: at cluster scale those flatten the trend. The header shows the hour's peak instead.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
+- **Cloud sections** (`Category::cloud_for_group`):
+  - AWS: `*.k8s.aws`, `*.amazonaws.com`.
+  - Google Cloud: `*.gke.io`, `cloud.google.com` (including Config Connector `*.cnrm.cloud.google.com`), `*.googleapis.com`.
+  - Azure: `*.azure.com` (ASO, AKS `*.kubernetes.azure.com`), `azure.microsoft.com`, `aadpodidentity.k8s.io`.
+  - Only custom (non-built-in) groups are checked. Matching is on whole domain labels, so `myazure.com` stays generic.
+- **Discovery uses `resources_by_stability()`**: every kind at its most stable version. The previous `recommended_resources()` took only the group's preferred version, which hid kinds that exist only elsewhere. On UAT that was `CNINode` (`v1alpha1` in a `v1beta1` group) and `PushSecret`/`ClusterPushSecret`.
 - **CRD detection** uses `<plural>.<group>` names from a metadata-only CRD list, because full CRDs are megabytes. It falls back to treating non-built-in API groups as custom.
 - **Watches** send full snapshots (throttled), not diffs. That's simple and fine at current sizes; revisit for very large clusters.
 - **`dragDropEnabled: false`** in `tauri.conf.json`, so HTML5 drag and drop works for section reordering. The app doesn't need file drops.
@@ -183,7 +196,6 @@ Smaller items that have come up:
 
 - Delete follow-ups: force delete (grace 0) for pods stuck Terminating; multi-select delete from the table; a uid precondition so a recreated same-name object isn't deleted.
 
-- Cluster page still reads usage only from metrics-server, so its "used" meters are empty on UAT. Could use Prometheus (now discoverable via `HistoryStore::prometheus`) or kubelet stats per node.
 
 - Decide whether revealing secrets should require an unlocked context.
 - Add a `Reason` column to Events (offered, not yet requested).

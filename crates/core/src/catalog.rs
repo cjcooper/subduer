@@ -119,7 +119,8 @@ pub fn classify(kind: &KindRef, crd_names: &HashSet<String>) -> (Category, usize
     let key = kind.key();
     let crd_name = format!("{}.{}", kind.plural, kind.group);
     if crd_names.contains(&crd_name) || !BUILTIN_GROUPS.contains(&kind.group.as_str()) {
-        return (Category::CustomResources, usize::MAX);
+        let category = Category::cloud_for_group(&kind.group).unwrap_or(Category::CustomResources);
+        return (category, usize::MAX);
     }
     SECTIONS
         .iter()
@@ -164,5 +165,24 @@ mod tests {
         let gateway = kind("gateway.networking.k8s.io", "Gateway");
         let crds = HashSet::from(["gateways.gateway.networking.k8s.io".to_owned()]);
         assert_eq!(classify(&gateway, &crds).0, Category::CustomResources);
+    }
+
+    #[test]
+    fn cloud_providers_get_their_own_sections() {
+        let none = HashSet::new();
+        let section = |group: &str| classify(&kind(group, "Thing"), &none).0;
+        assert_eq!(section("elbv2.k8s.aws"), Category::Aws);
+        assert_eq!(section("crd.k8s.amazonaws.com"), Category::Aws);
+        assert_eq!(section("networking.gke.io"), Category::GoogleCloud);
+        assert_eq!(section("cloud.google.com"), Category::GoogleCloud);
+        assert_eq!(section("storage.cnrm.cloud.google.com"), Category::GoogleCloud);
+        assert_eq!(section("monitoring.googleapis.com"), Category::GoogleCloud);
+        assert_eq!(section("resources.azure.com"), Category::Azure);
+        assert_eq!(section("approuting.kubernetes.azure.com"), Category::Azure);
+        assert_eq!(section("azure.microsoft.com"), Category::Azure);
+        // Look-alikes stay generic.
+        assert_eq!(section("notk8s.aws.example.com"), Category::CustomResources);
+        assert_eq!(section("myazure.com"), Category::CustomResources);
+        assert_eq!(section("keda.sh"), Category::CustomResources);
     }
 }

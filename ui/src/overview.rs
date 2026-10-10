@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use subduer_types::{ClusterOverview, NamespaceRequests, NodeSummary, PodCounts, ResourceRow, ResourceTotals};
+use subduer_types::{
+    ClusterHistory, ClusterOverview, NamespaceRequests, NodeSummary, PodCounts, ResourceRow, ResourceTotals, Series, UsageSource,
+};
 
 use crate::app::{Store, format_age, select_row};
+use crate::chart::{ChartData, LineChart, Scale};
 use crate::columns::ResizableTh;
 use crate::tauri::{NoArgs, invoke};
 
@@ -150,6 +153,8 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
         None => ("–".to_owned(), "can't read events".to_owned()),
     };
     let metrics = o.metrics_available;
+    let source = o.usage_source;
+    let history = o.history.clone();
     let mut by_cpu = o.namespaces.clone();
     by_cpu.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
 
@@ -167,16 +172,20 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
                 hero=true
                 totals=o.memory
                 nodes=node_count
-                metrics=metrics
+                source=source
+                history=history.clone().map(|h| (h.clone(), h.usage.memory))
                 fmt=fmt_bytes
+                scale=Scale::Binary
             />
             <ResourceCard
                 title="CPU available"
                 hero=false
                 totals=o.cpu
                 nodes=node_count
-                metrics=metrics
+                source=source
+                history=history.map(|h| (h.clone(), h.usage.cpu))
                 fmt=fmt_cpu
+                scale=Scale::Decimal
             />
         </div>
 
@@ -214,15 +223,18 @@ fn StatTile(label: &'static str, value: String, note: String) -> impl IntoView {
     }
 }
 
-/// Available capacity with used / requested / limits meters against it.
+/// Available capacity with used / requested / limits meters against it, and
+/// the last hour of usage when Prometheus has it.
 #[component]
 fn ResourceCard(
     title: &'static str,
     hero: bool,
     totals: ResourceTotals,
     nodes: usize,
-    metrics: bool,
+    source: Option<UsageSource>,
+    history: Option<(ClusterHistory, Series)>,
     fmt: fn(f64) -> String,
+    scale: Scale,
 ) -> impl IntoView {
     let alloc = totals.allocatable;
     let sub = format!("allocatable across {nodes} nodes · {} capacity", fmt(totals.capacity));
@@ -246,10 +258,34 @@ fn ResourceCard(
                 <Meter label="Requested" value=totals.requests total=alloc fmt=fmt />
                 <Meter label="Limits" value=totals.limits total=alloc fmt=fmt />
             </div>
-            {(!metrics).then(|| view! {
-                <p class="note">"Live usage needs metrics-server, which isn't installed on this cluster."</p>
+            {history.map(|(h, points)| {
+                // No request/allocatable lines: at cluster scale they dwarf usage
+                // and flatten the trend; the meters above carry them.
+                let peak = points.iter().map(|p| p.1).fold(0.0, f64::max);
+                let data = ChartData { start: h.start, end: h.end, step: h.step, points, refs: vec![] };
+                view! {
+                    <div class="card-chart">
+                        <div class="meter-row">
+                            <span class="meter-label">"Used, last hour"</span>
+                            <span class="meter-value">{format!("peak {}", fmt(peak))}</span>
+                        </div>
+                        <LineChart label=title data=Signal::derive(move || Some(data.clone())) fmt=fmt scale=scale />
+                    </div>
+                }
             })}
+            <p class="note">{usage_note(source)}</p>
         </section>
+    }
+}
+
+fn usage_note(source: Option<UsageSource>) -> &'static str {
+    match source {
+        Some(UsageSource::MetricsServer) => "Usage from metrics-server.",
+        Some(UsageSource::Prometheus) => {
+            "Usage from Prometheus (container working set), with kubelet stats for nodes it doesn't cover."
+        }
+        Some(UsageSource::Kubelet) => "Usage from kubelet stats on each node. No metrics-server or Prometheus found.",
+        None => "Live usage needs metrics-server, Prometheus, or access to kubelet stats (nodes/proxy).",
     }
 }
 

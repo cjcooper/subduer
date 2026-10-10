@@ -354,28 +354,9 @@ async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<H
     )
 }
 
-/// Reads `/stats/summary` through the API server's node proxy. Memory is the
-/// working set, the same figure metrics-server reports.
 async fn kubelet_usage(client: &Client, node: &str, namespace: &str, name: &str) -> Option<HashMap<String, (f64, f64)>> {
-    let request = http::Request::get(format!("/api/v1/nodes/{node}/proxy/stats/summary"))
-        .body(Vec::new())
-        .ok()?;
-    let summary: Value = client.request(request).await.ok()?;
-    let pod = summary["pods"]
-        .as_array()?
-        .iter()
-        .find(|p| p["podRef"]["name"] == name && p["podRef"]["namespace"] == namespace)?;
-    Some(
-        pod["containers"]
-            .as_array()?
-            .iter()
-            .map(|c| {
-                let cpu = c["cpu"]["usageNanoCores"].as_f64().unwrap_or(0.0) / 1e6;
-                let memory = c["memory"]["workingSetBytes"].as_f64().unwrap_or(0.0);
-                (text(&c["name"]), (cpu, memory))
-            })
-            .collect(),
-    )
+    let summary = crate::usage::kubelet_summary(client, node).await?;
+    crate::usage::pod_usage(&summary, namespace, name)
 }
 
 /// The node's allocatable (cpu millicores, memory bytes).

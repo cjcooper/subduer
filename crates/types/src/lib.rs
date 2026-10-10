@@ -57,13 +57,19 @@ pub enum Category {
     /// Listed at the top of the sidebar, outside any section.
     TopLevel,
     Workloads,
-    /// Helm releases (a virtual kind read from Helm's release Secrets).
-    Helm,
     Config,
     Network,
     Storage,
     Namespaces,
     AccessControl,
+    /// Helm releases (a virtual kind read from Helm's release Secrets).
+    Helm,
+    /// Custom resources from AWS controllers (load balancer, VPC CNI, ACK, …).
+    Aws,
+    /// Custom resources from GKE and Google Cloud (Config Connector, …).
+    GoogleCloud,
+    /// Custom resources from AKS and Azure (Azure Service Operator, …).
+    Azure,
     /// Kinds added to the cluster (CRDs and aggregated APIs).
     CustomResources,
     /// Built-in kinds that don't fit a section above.
@@ -72,14 +78,17 @@ pub enum Category {
 
 impl Category {
     /// Sidebar sections in default order (excludes `TopLevel`).
-    pub const SECTIONS: [Category; 9] = [
+    pub const SECTIONS: [Category; 12] = [
         Self::Workloads,
-        Self::Helm,
         Self::Config,
         Self::Network,
         Self::Storage,
         Self::Namespaces,
         Self::AccessControl,
+        Self::Helm,
+        Self::Aws,
+        Self::GoogleCloud,
+        Self::Azure,
         Self::CustomResources,
         Self::Other,
     ];
@@ -89,6 +98,9 @@ impl Category {
             Self::TopLevel => "Top level",
             Self::Workloads => "Workloads",
             Self::Helm => "Helm",
+            Self::Aws => "AWS",
+            Self::GoogleCloud => "Google Cloud",
+            Self::Azure => "Azure",
             Self::Config => "Config",
             Self::Network => "Network",
             Self::Storage => "Storage",
@@ -97,6 +109,28 @@ impl Category {
             Self::CustomResources => "Custom Resources",
             Self::Other => "Other",
         }
+    }
+}
+
+impl Category {
+    /// The cloud section for a custom resource's API group, if it belongs to
+    /// a cloud provider's controllers.
+    pub fn cloud_for_group(group: &str) -> Option<Category> {
+        let under = |domain: &str| group == domain || group.ends_with(&format!(".{domain}"));
+        if under("k8s.aws") || under("amazonaws.com") {
+            Some(Self::Aws)
+        } else if under("gke.io") || under("cloud.google.com") || under("googleapis.com") {
+            Some(Self::GoogleCloud)
+        } else if under("azure.com") || under("azure.microsoft.com") || group == "aadpodidentity.k8s.io" {
+            Some(Self::Azure)
+        } else {
+            None
+        }
+    }
+
+    /// Sections whose kinds are listed under API group sub-headings.
+    pub fn groups_by_api_group(self) -> bool {
+        matches!(self, Self::CustomResources | Self::Aws | Self::GoogleCloud | Self::Azure)
     }
 }
 
@@ -318,6 +352,30 @@ pub struct ClusterOverview {
     /// Warning events seen in the last hour; `None` if events can't be read.
     pub warnings_last_hour: Option<usize>,
     pub metrics_available: bool,
+    /// Where `used` figures came from; `None` when no source was readable.
+    pub usage_source: Option<UsageSource>,
+    /// Cluster-wide usage over the last hour, when Prometheus is available.
+    pub history: Option<ClusterHistory>,
+}
+
+/// Where live usage came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsageSource {
+    MetricsServer,
+    /// Prometheus cAdvisor metrics, with kubelet stats for nodes it doesn't cover.
+    Prometheus,
+    /// The kubelet's `/stats/summary` on each node, through the API server.
+    Kubelet,
+}
+
+/// Sum of all containers' usage across the cluster over a time window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClusterHistory {
+    /// Window bounds in unix seconds.
+    pub start: f64,
+    pub end: f64,
+    pub step: f64,
+    pub usage: UsageHistory,
 }
 
 /// Requests, limits and live usage for one resource. CPU in millicores,

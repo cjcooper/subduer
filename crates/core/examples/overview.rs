@@ -1,6 +1,7 @@
 //! Read-only: `cargo run -p subduer-core --example overview -- <context>`
 //! prints the Cluster page data (`--json` for the raw payload).
 
+use subduer_core::history::HistoryStore;
 use subduer_core::{contexts, overview};
 
 #[tokio::main]
@@ -8,13 +9,18 @@ async fn main() -> subduer_core::Result<()> {
     let context = std::env::args().nth(1).unwrap_or_else(|| "docker-desktop".into());
     let kubeconfig = contexts::load_kubeconfig()?;
     let client = contexts::client_for(&kubeconfig, &context).await?;
-    let o = overview::cluster_overview(&client).await?;
+    let o = overview::cluster_overview(&client, &HistoryStore::default()).await?;
     if std::env::args().any(|a| a == "--json") {
         println!("{}", serde_json::to_string(&o).unwrap());
         return Ok(());
     }
     let gib = |b: f64| b / 1024f64.powi(3);
-    println!("version {:?}  metrics {}  warnings(1h) {:?}", o.server_version, o.metrics_available, o.warnings_last_hour);
+    println!("version {:?}  usage {:?}  warnings(1h) {:?}", o.server_version, o.usage_source, o.warnings_last_hour);
+    if let Some(h) = &o.history {
+        let last = |s: &[(f64, f64)]| s.last().map(|p| p.1);
+        println!("history: {} cpu points (last {:?}m), {} memory points (last {:?} GiB)",
+            h.usage.cpu.len(), last(&h.usage.cpu), h.usage.memory.len(), last(&h.usage.memory).map(gib));
+    }
     println!("pods {:?}", o.pods);
     println!(
         "memory alloc {:.1} GiB  req {:.1}  lim {:.1}  used {:?}",

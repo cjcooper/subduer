@@ -12,13 +12,15 @@ use crate::{Result, catalog};
 use crate::types::{KindInfo, KindRef};
 
 /// All resource types the server lets us list, in sidebar order: by section,
-/// then catalog position, then group and kind. Uses each group's preferred version.
+/// then catalog position, then group and kind. Each kind comes at its most
+/// stable version, so kinds that exist only outside the group's preferred
+/// version (e.g. a `v1alpha1`-only kind in a `v1` group) still show up.
 pub async fn discover_kinds(client: &Client) -> Result<Vec<KindInfo>> {
     let discovery = Discovery::new(client.clone()).run().await?;
     let (crd_names, helm) = tokio::join!(crd_names(client), crate::helm::discover(client));
     let mut kinds: Vec<(usize, KindInfo)> = discovery
         .groups()
-        .flat_map(|group| group.recommended_resources())
+        .flat_map(|group| group.resources_by_stability())
         .filter(|(_, caps)| caps.supports_operation(verbs::LIST))
         .map(|(ar, caps)| {
             let kind = KindRef {

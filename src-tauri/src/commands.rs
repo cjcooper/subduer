@@ -99,8 +99,12 @@ pub async fn get_yaml(
 
 #[tauri::command]
 pub async fn cluster_overview(state: State<'_, AppState>) -> CmdResult<ClusterOverview> {
-    let client = connected_client(&state).await?;
-    overview::cluster_overview(&client).await.map_err(err)
+    let (client, history) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        (session.client.clone(), session.history.clone())
+    };
+    overview::cluster_overview(&client, &history).await.map_err(err)
 }
 
 #[tauri::command]

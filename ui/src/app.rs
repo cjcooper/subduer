@@ -572,17 +572,22 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
     kinds
         .into_iter()
         .map(|k| {
-            let heading = (category == Category::CustomResources && last_group.as_deref() != Some(&k.group))
+            let heading = (category.groups_by_api_group() && last_group.as_deref() != Some(&k.group))
                 .then(|| {
                     last_group = Some(k.group.clone());
-                    view! { <div class="kind-group-title">{k.group.clone()}</div> }
+                    view! {
+                        <div class="kind-group-title">
+                            <crate::icons::GroupIcon group=k.group.clone() />
+                            <span class="kind-label">{k.group.clone()}</span>
+                        </div>
+                    }
                 });
             let key = k.key();
             let active = move || !store.overview_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key);
             let label = k.kind.clone();
             let title = format!("{} ({})", k.plural, k.api_version());
             let icon = view! {
-                <crate::icons::KindIcon kind=k.clone() custom=category == Category::CustomResources />
+                <crate::icons::KindIcon kind=k.clone() custom=category.groups_by_api_group() />
             };
             view! {
                 {heading}

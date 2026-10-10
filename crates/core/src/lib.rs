@@ -11,6 +11,7 @@ pub mod pod_details;
 pub mod quantity;
 pub mod safety;
 pub mod table;
+pub mod usage;
 pub mod watch;
 
 pub use kube;
