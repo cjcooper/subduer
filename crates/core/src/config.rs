@@ -26,6 +26,9 @@ use crate::workload::{conditions, selector_string};
 use crate::{Error, Result};
 
 pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&str>, name: &str) -> Result<ObjectDetails> {
+    if crate::helm::is_release(kind) {
+        return crate::helm::release_details(client, namespace.unwrap_or_default(), name).await;
+    }
     if !has_object_details(kind) {
         return Err(Error::Message(format!("no details view for {}", kind.kind)));
     }
@@ -40,7 +43,11 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
         "admissionregistration.k8s.io/ValidatingAdmissionPolicy" => {
             d.sections.push(policy_bindings(client, kind, name).await?);
         }
-        key => crate::network::related(client, key, ns, name, &v, &mut d).await?,
+        key => {
+            crate::network::related(client, key, ns, name, &v, &mut d).await?;
+            crate::storage::related(client, key, ns, name, &v, &mut d).await?;
+            crate::rbac::related(client, key, ns, name, &v, &mut d).await?;
+        }
     }
     if let Some(ns) = namespace {
         let fields = format!("involvedObject.kind={},involvedObject.name={name}", kind.kind);
@@ -90,7 +97,11 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
         "admissionregistration.k8s.io/ValidatingWebhookConfiguration" => webhooks(&mut d, v, false),
         "admissionregistration.k8s.io/ValidatingAdmissionPolicy" => policy(&mut d, v),
         "admissionregistration.k8s.io/ValidatingAdmissionPolicyBinding" => binding(&mut d, v),
-        key => crate::network::describe(key, &mut d, v),
+        key => {
+            crate::network::describe(key, &mut d, v);
+            crate::storage::describe(key, &mut d, v);
+            crate::rbac::describe(key, &mut d, v);
+        }
     }
     // Owner rows last, like workloads.
     if let Some(owner) = v["metadata"]["ownerReferences"]
@@ -598,6 +609,7 @@ fn quota(d: &mut ObjectDetails, v: &Value) {
         summary,
         rows: Vec::new(),
         table: Some(InfoTable {
+            times: Vec::new(),
             columns: vec!["Resource".into(), "Used".into(), "Hard".into()],
             numeric: vec![1, 2],
             mono: vec![0],

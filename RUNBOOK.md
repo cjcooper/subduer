@@ -11,10 +11,16 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
   - **Config section:** Details tabs for all 13 Config kinds; editable ConfigMap and Secret data with Save; Edit range on HPAs. Files: `crates/core/src/config.rs` (new), `actions.rs` (`save_data`, `set_hpa_range`), `pod_details.rs` (`secret_values`), the types, the commands, `examples/config.rs` and `examples/config_dry_run.rs` (new), `ui/src/object_detail.rs` (new), `ui/src/workload.rs` (Save and Edit range in the shared dialog), `ui/src/app.rs`, `ui/src/pod_detail.rs`, CSS, `tools/ui-harness/configstub.js` (new) and docs.
   - **Unsaved-edit guard:** `app::guard`, the discard prompt, `set_unsaved`/`close_discarding` and the window close and Cmd+Q hold in `src-tauri/src/lib.rs`.
   - **Network section:** Details tabs for Service, Ingress, IngressClass, NetworkPolicy, EndpointSlice and Endpoints; Open buttons for Ingress URLs. Files: `crates/core/src/network.rs` (new), `config.rs` (dispatch), the types (`InfoRow.url`, `has_object_details`), `open_url` in the commands (`forward::open_in_browser` shared), `ui/src/object_detail.rs`, CSS, `tools/ui-harness/networkstub.js` (new) and docs.
-- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (53 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+  - **Storage section:** Details tabs for PVC, PV, StorageClass, VolumeAttachment, CSIDriver, CSINode and CSIStorageCapacity; Expand (PVC) and Reclaim policy (PV). Files: `crates/core/src/storage.rs` (new), `actions.rs` (`expand_claim`, `set_reclaim_policy`), `config.rs` (dispatch), the types, the commands, `examples/config_dry_run.rs`, `ui/src/workload.rs` (`Op::Expand`, `Op::Reclaim`, cluster-scoped targets), CSS, `tools/ui-harness/storagestub.js` (new) and docs.
+  - **Access Control section:** Details tabs for ServiceAccount, Role, RoleBinding, ClusterRole and ClusterRoleBinding; Check access on ServiceAccounts. Files: `crates/core/src/rbac.rs` (new), `config.rs` (dispatch), the types (`AccessCheck`), `check_access` in the commands, `examples/access_check.rs` (new), `ui/src/object_detail.rs` (`CheckAccess`), CSS, `tools/ui-harness/rbacstub.js` (new) and docs.
+  - **Helm section:** a Details tab for releases and Rollback. Files: `crates/core/src/helm.rs` (`release_details`, `manifest_objects`, `rollback`), `config.rs` (dispatch), core's tokio `process` feature, the types (`InfoTable.times`), `helm_rollback` in the commands, `examples/helm_rollback_dry_run.rs` (new), `ui/src/workload.rs` (`Op::Rollback`), `ui/src/object_detail.rs` (time columns, multi-line rows), `ui/src/app.rs` (links to cluster-scoped kinds), CSS, `tools/ui-harness/helmstub.js` (new) and docs.
+- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (65 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): the unsaved-edits hold on window close and Cmd+Q, logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
 - **Checked on UAT (2026-10-10):** `workload` and `workload_dry_run` against a Deployment, a StatefulSet, two CronJobs (one with `timeZone: America/New_York`) and completed and failed Jobs. Every dry run was accepted, and the locked gate refused each real call. UAT's Prometheus has no series for the short CronJob pods, so their history falls back to local samples; Deployment and StatefulSet history come from Prometheus.
+- **Helm checked on UAT (2026-10-10):** `config` read the `canary` release (10 revisions with chart and description, 2 resources, chart description). `helm_rollback_dry_run` (54 → 53) ran `helm rollback --dry-run=server` (Helm 4.3 locally) and succeeded; `helm history` afterwards still ended at 54. The locked gate refused the real call. A real rollback has not been run anywhere.
+- **Access Control checked on UAT (2026-10-10):** `config` read a ServiceAccount with an IAM role (its bindings, effective rules and pods), the datadog ClusterRole (15 bindings), a ClusterRoleBinding, a RoleBinding and `cluster-admin` (Full access). `access_check` answered allowed with the granting binding for `list pods` and `get nodes/proxy`, and denied for `get secrets` and `create deployments.apps`, matching the rules shown.
+- **Storage section checked on UAT (2026-10-10):** `config` read the EFS claim and volume (static, no class), the `gp2` class and the EFS CSI driver with its nodes. `config_dry_run` was accepted for the PV reclaim policy. The PVC expand dry run was refused by the server ("only dynamically provisioned pvc can be resized"), and the panel says so and hides Expand. The locked gate refused both real calls. Disk usage isn't available there: the kubelet on Fargate doesn't report it.
 - **Network section checked on UAT (2026-10-10):** `config` read a NodePort Service, a headless Service, an EndpointSlice, Endpoints and the `alb` IngressClass; endpoints, links and statuses matched `kubectl`. UAT has no Ingresses or NetworkPolicies, so those are covered by unit tests and the harness only.
 - **Config section checked on UAT (2026-10-10):** `config` read an HPA (KEDA-owned, external metric), the coredns PDB, a Helm-managed ConfigMap, a Secret (sizes only), a webhook configuration, a Lease and a PriorityClass. `config_dry_run` was accepted for a ConfigMap save, a Secret save and an HPA range. A save from a stale resourceVersion was refused with the "changed by someone else" message, and the locked gate refused the real calls. Nothing was written. The dry-run key was not persisted.
 - **Open questions for the user:**
@@ -29,7 +35,7 @@ A macOS-first desktop app for browsing and controlling Kubernetes clusters. It's
 
 - **Stack:** Rust everywhere, using a Tauri v2 shell, a `kube-rs` backend and a Leptos 0.8 UI built to WASM with Trunk. Use another language only where the OS forces it.
 - **Navigation:** by kind, with a namespace filter that persists across kinds.
-- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Run now, Suspend/Resume, data Save, Edit range, Shell, Upload) are behind the safety gate.
+- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Run now, Suspend/Resume, data Save, Edit range, Expand, Reclaim policy, Helm Rollback, Shell, Upload) are behind the safety gate.
 
 ## 2. Getting set up
 
@@ -64,8 +70,10 @@ cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm 
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
 cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <ns> <name>   # Details data + history source; no env values or secrets
 cargo run -p subduer-core --example workload_dry_run -- <context> <group/Kind> <ns> <name> [replicas]   # dry-run restart/scale, or suspend/resume and (CronJob) Run now; checks the gate refuses
-cargo run -p subduer-core --example config -- <context> <group/Kind> <ns|-> <name>   # Config- and Network-section Details data; ConfigMap values by size only, Secret values never fetched
-cargo run -p subduer-core --example config_dry_run -- <context> <core/ConfigMap|core/Secret|autoscaling/HorizontalPodAutoscaler> <ns> <name>   # dry-run save (adds key subduer-dry-run) or HPA range; checks stale versions and the gate
+cargo run -p subduer-core --example helm_rollback_dry_run -- <context> <ns> <release> <revision>   # helm rollback --dry-run=server; checks the gate refuses
+cargo run -p subduer-core --example access_check -- <context> <ns> <serviceaccount> <verb> <resource> [ns|-]   # SubjectAccessReview: may it? (changes nothing)
+cargo run -p subduer-core --example config -- <context> <group/Kind> <ns|-> <name>   # Config, Network, Storage and Access Control Details data; ConfigMap values by size only, Secret values never fetched
+cargo run -p subduer-core --example config_dry_run -- <context> <core/ConfigMap|core/Secret|autoscaling/HorizontalPodAutoscaler> <ns> <name>   # dry-run save (adds key subduer-dry-run), HPA range, PVC expand (+1Gi) or PV reclaim policy; checks stale versions and the gate
 ```
 
 - Use **`eg-uat-uat-v2`** for real-cluster checks. Docker Desktop's Kubernetes is usually off.
@@ -110,6 +118,8 @@ crates/core    all cluster logic, no UI deps
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   workload.rs    Deployment/StatefulSet/Job/CronJob Details tab: status, owned pods (and a CronJob's Jobs), template containers, events
   config.rs      Config-section Details tabs: one generic ObjectDetails (info rows, sections, tables) per kind, read as JSON at the served version; ConfigMap/Secret data and the pods using them
+  rbac.rs        Access Control Details tabs: rules with risky ones flagged, bindings both ways, a ServiceAccount's effective rules; check_access
+  storage.rs     Storage-section Details tabs on config's shape: PVC usage from the kubelet and why it's pending, PV source and reclaim policy, class claims, CSI
   network.rs     Network-section Details tabs on config's shape: Service endpoints and routes, Ingress backend health/TLS/URLs, NetworkPolicy in words
   cron.rs        a CronJob schedule's next run (five fields, names, steps, @shorthands, time zones), on jiff
   actions.rs     mutations; each checks SafetyGate first (delete, restart, scale)
@@ -150,6 +160,9 @@ ui             Leptos CSR app
 | `get_replicas` | Desired and current replicas (scale subresource), for the Scale dialog |
 | `restart_workload` / `scale_workload` | Rollout restart, set replicas; checked like `delete_resource` |
 | `object_details` | Details tab of a Config- or Network-section kind |
+| `helm_rollback` | `helm rollback` to a revision (optionally `--wait`), checked like `delete_resource`; returns Helm's output |
+| `check_access` | SubjectAccessReview for a ServiceAccount; read-only, so not gated |
+| `expand_claim` / `set_reclaim_policy` | Grow a PVC; set a PV's reclaim policy (Retain/Delete); checked like `delete_resource` |
 | `open_url` | Opens an http(s) address (Ingress URLs) in the browser; anything else is refused |
 | `secret_values` | Every value of a Secret, when editing starts (logged without values) |
 | `save_config_data` / `set_hpa_range` | Save edited ConfigMap/Secret data (with its resourceVersion); set an HPA's min/max; checked like `delete_resource` |
@@ -248,6 +261,29 @@ ui             Leptos CSR app
   - **NetworkPolicy:** what it applies to; Incoming and Outgoing in words (not restricted, only the rules below, or all blocked), following the `policyTypes` defaulting rules; rule tables with peers in words ("pods app=web in this namespace", "addresses 10.0.0.0/8 except …") and ports (with `endPort` ranges); the pods it currently selects. Status Denies all, Denies incoming, Denies outgoing or Allows listed.
   - **EndpointSlice / Endpoints:** service link, address type, ports, and each endpoint's state (ready, serving, terminating, not ready), target pod, node and zone. Endpoints notes it's deprecated.
   - **Open URL** (`open_url`): only `http://`/`https://` addresses without whitespace or control characters, passed to `open` as one argument.
+- **Helm release Details** (`helm::release_details`): the virtual `helm.sh/Release` kind gets a Details tab (YAML stays the summary).
+  - Chart, app version, revision, last change, first and last deployed, chart description and home (Open). Values are never shown.
+  - **History:** every kept revision (newest 20 decoded) with status, chart, app version, age and description; failed ones flagged.
+  - **Resources:** the objects in the current manifest, linked. Only apiVersion, kind, name and namespace are read from each document (`manifest_objects`); Secret data in the manifest goes no further, and the manifest is dropped like before.
+  - **Notes** as preformatted text.
+  - Links to cluster-scoped kinds (e.g. a chart's ClusterRole) drop the namespace in `open_object`, since manifests don't say whether a kind is namespaced.
+- **Rollback** (`helm::rollback`, `Op::Rollback`): shown when there's more than one revision (Helm uses your own credentials, so discovery verbs don't matter).
+  - The dialog lists earlier revisions with chart, app version and status, defaulting to the latest one that didn't fail; picking a failed one warns. "Wait until ready" (on by default) adds `--wait --timeout 5m0s`. It explains that Helm re-applies that revision's manifest and values as a new revision and runs its hooks, and that changes made outside Helm may be overwritten.
+  - It runs the `helm` CLI (found on the login-shell PATH) with arguments only, no shell: `rollback <release> <revision> --namespace=<ns> --kube-context=<context>`. Names must be valid Helm names starting with a letter or digit, so nothing can pass for a flag. Dry runs use `--dry-run=server` on Helm 4 and `--dry-run` on Helm 3. Times out after 6 minutes. Helm's errors are shown in the dialog.
+  - Gated like Delete, with the prod name check; the command re-checks the context is still connected.
+- **Access Control Details** (`crates/core/src/rbac.rs`):
+  - **Risky rules** are flagged in every rules table: full access (`*` verbs on `*` resources), can grant itself more (`escalate`, `bind`, `impersonate`), reads secrets, can exec into pods, reaches the kubelet (`nodes/proxy`). A role or binding with any shows Sensitive, or Full access.
+  - **Role / ClusterRole:** rules (verbs, API groups, resources or URLs, resource names), aggregation selectors, which built-in roles it adds to (`aggregate-to-admin/edit/view`), built-in note; **Bound by**: the RoleBindings (all namespaces for a ClusterRole) and ClusterRoleBindings using it, with their subjects.
+  - **RoleBinding / ClusterRoleBinding:** what it grants (role link) and where, in words (a RoleBinding to a ClusterRole is limited to its namespace); **What it grants**: the role's rules, or Role missing; **Subjects** with ServiceAccount links. Binding to `system:authenticated`/`system:unauthenticated` shows Everyone.
+  - **ServiceAccount:** cloud identity (AWS IAM role, Google service account, Azure identity), token automount, the username it acts as, token and image pull secrets; **Bindings** naming it directly or through `system:serviceaccounts[:<ns>]` groups, across all namespaces; **What it can do**: every rule from those bindings with where it applies and which role it comes from; **Pods running as it**.
+  - **Check access** (`rbac::check_access`): verb, resource (`pods`, `deployments.apps`, `pods/exec`), namespace (empty = all) and optional name, sent as a SubjectAccessReview for `system:serviceaccount:<ns>:<name>` with its groups. Shows Allowed with the granting rule, or Denied. Read-only, not gated.
+- **Storage section Details** (`crates/core/src/storage.rs`):
+  - **PersistentVolumeClaim:** requested vs capacity (an unfinished resize is called out), access modes in words, storage class (or the default, or none when there is no default), volume link, block mode, data source, selector. **Can expand** comes from its StorageClass (`allowVolumeExpansion`); static claims without a class can't grow. **Why pending**: WaitForFirstConsumer, or waiting for the provisioner. **Disk usage** (space and inodes, with bars, amber from 85%) from the kubelet `/stats/summary` of a node where a running pod mounts it; on Fargate it says unknown. **Mounted by**: the pods using it (including generic ephemeral volumes). Status Bound, Pending, Lost or Resizing.
+  - **PersistentVolume:** capacity, access, reclaim policy in words, class and claim links (Released says the claim is gone), source (CSI driver and volume handle, or hostPath, NFS, EBS, …), node affinity (e.g. its zone), mount options, phase time.
+  - **StorageClass:** provisioner, default, reclaim policy, binding mode in words, expansion, mount options, allowed topologies, parameters; the claims using it across namespaces (non-Bound ones flagged).
+  - **VolumeAttachment:** attacher, node and volume links, attached, attach/detach errors; status Attached, Attaching, Detaching or Error. **CSIDriver:** its capabilities, and the nodes running it. **CSINode:** drivers with node ID, volume limit and topology keys. **CSIStorageCapacity:** class, capacity, largest volume, nodes.
+- **Expand** (PVCs, `actions::expand_claim`, `Op::Expand`): shown only when "Can expand" is yes and `patch` is allowed. The dialog starts at the current size, accepts quantities like `40Gi`, and enables only for a bigger size; the backend checks again against the live claim. It says claims can't shrink and some drivers need a pod restart.
+- **Reclaim policy** (PVs, `actions::set_reclaim_policy`, `Op::Reclaim`): switches Retain ⇄ Delete; switching to Delete warns that deleting the claim then deletes the data. PVs are cluster-scoped, so change dialogs now accept targets without a namespace.
 - **ConfigMap/Secret editing** (`DataSection` in `object_detail.rs`, `actions::save_data`):
   - **Edit** turns each key into a key field and a value textarea; keys can be added, renamed and removed. Binary values can only be kept or removed. Keys are checked as you type (letters, digits, `-`, `_`, `.`; no duplicates).
   - Secret values appear only after **Show** on one key, or **Edit (shows values)**, which fetches them all (`secret_values`). The draft lives only in the component: Cancel, Save, or a new selection drops it.
@@ -360,9 +396,12 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
-- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
+- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `storagestub.js`, `rbacstub.js`, `helmstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
 - Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
 - Port-forward from workloads (pick a pod), and optional gating for prod.
+- Helm follow-ups: a diff of the chosen revision against the current one before rolling back (`helm get manifest`), Uninstall, and showing values on request (gated like secrets).
+- Access Control follow-ups: Check access for users and groups (and "can I" for yourself via SelfSubjectRulesReview); bindings for users and groups as their own view.
+- Storage follow-ups: disk usage from Prometheus (`kubelet_volume_stats_*`) where the kubelet doesn't report it; VolumeSnapshots when the CRDs are installed.
 - Network follow-ups: Gateway API kinds (HTTPRoute, Gateway) when installed; port-forward from an Ingress backend.
 - Config follow-ups: TLS Secrets could show the certificate's subject and expiry (needs an X.509 parser); "restart the workloads using it" after a save; a PriorityClass's pod count.
 - Jobs and CronJobs: merged Logs for a CronJob (its latest Job's pods), and Rerun for finished Jobs (a copy without the generated selector and labels).

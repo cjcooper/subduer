@@ -603,6 +603,9 @@ pub struct InfoTable {
     /// Monospaced columns.
     #[serde(default)]
     pub mono: Vec<usize>,
+    /// Columns holding RFC 3339 times, shown as ages (`3h`) with the time on hover.
+    #[serde(default)]
+    pub times: Vec<usize>,
     pub rows: Vec<InfoTableRow>,
 }
 
@@ -659,7 +662,7 @@ pub struct DataChange {
 /// A Secret's values for editing; `None` for binary values.
 pub type SecretValues = Vec<(String, Option<String>)>;
 
-/// Config- and Network-section kinds with an [`ObjectDetails`] Details tab.
+/// Config, Network, Storage and Access Control kinds with an [`ObjectDetails`] Details tab.
 pub fn has_object_details(kind: &KindRef) -> bool {
     matches!(
         kind.key().as_str(),
@@ -682,7 +685,28 @@ pub fn has_object_details(kind: &KindRef) -> bool {
             | "networking.k8s.io/NetworkPolicy"
             | "discovery.k8s.io/EndpointSlice"
             | "core/Endpoints"
+            | "core/PersistentVolumeClaim"
+            | "core/PersistentVolume"
+            | "storage.k8s.io/StorageClass"
+            | "storage.k8s.io/VolumeAttachment"
+            | "storage.k8s.io/CSIDriver"
+            | "storage.k8s.io/CSINode"
+            | "storage.k8s.io/CSIStorageCapacity"
+            | "core/ServiceAccount"
+            | "rbac.authorization.k8s.io/Role"
+            | "rbac.authorization.k8s.io/RoleBinding"
+            | "rbac.authorization.k8s.io/ClusterRole"
+            | "rbac.authorization.k8s.io/ClusterRoleBinding"
+            | "helm.sh/Release"
     )
+}
+
+/// The API server's answer to "may this account do that?".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessCheck {
+    pub allowed: bool,
+    /// Which rule allowed it, or why not; often empty when denied.
+    pub reason: String,
 }
 
 /// ConfigMaps and Secrets: their data can be edited and saved.

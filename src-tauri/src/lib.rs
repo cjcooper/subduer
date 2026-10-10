@@ -124,6 +124,10 @@ pub fn run() {
             commands::secret_value,
             commands::set_unsaved,
             commands::open_url,
+            commands::helm_rollback,
+            commands::check_access,
+            commands::expand_claim,
+            commands::set_reclaim_policy,
             commands::close_discarding,
         ])
         .build(tauri::generate_context!())

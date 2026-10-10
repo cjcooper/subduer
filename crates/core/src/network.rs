@@ -146,6 +146,7 @@ fn service(d: &mut ObjectDetails, v: &Value) {
         })
         .collect();
     let table = InfoTable {
+        times: Vec::new(),
         columns: ["Name", "Port", "Target", "Node port", "Protocol", "App protocol"].map(String::from).to_vec(),
         numeric: vec![1, 3],
         mono: vec![2],
@@ -439,6 +440,7 @@ fn ingress(d: &mut ObjectDetails, v: &Value) {
         summary: plural(n, "path"),
         rows: Vec::new(),
         table: Some(InfoTable {
+            times: Vec::new(),
             columns: ["Host", "Path", "Match", "Backend", "Ready"].map(String::from).to_vec(),
             numeric: vec![4],
             mono: vec![1, 3],

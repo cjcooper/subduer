@@ -93,11 +93,20 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
             </Section>
         }
     });
+    let check = (d.kind == "ServiceAccount").then(|| {
+        let (ns, name) = (d.namespace.clone().unwrap_or_default(), d.name.clone());
+        view! {
+            <Section store=store id="check-access" title="Check access".to_owned() summary="ask the API server".to_owned()>
+                <CheckAccess account_namespace=ns.clone() account=name.clone() />
+            </Section>
+        }
+    });
     view! {
         <Section store=store id=kind_id title=d.kind.clone() summary=status>
             <KindInfo store=store d=d.clone() />
         </Section>
         {data}
+        {check}
         {sections}
         {events}
     }
@@ -153,6 +162,8 @@ fn InfoRowView(store: Store, r: InfoRow) -> impl IntoView {
     let value = if r.time && !js_sys::Date::parse(&r.value).is_nan() {
         let v = r.value.clone();
         view! { <span>{move || format!("{} · {v}", relative(store.now.get(), &v))}</span> }.into_any()
+    } else if r.value.contains('\n') {
+        view! { <pre class="data-value">{r.value.clone()}</pre> }.into_any()
     } else if let Some(url) = r.url.clone() {
         view! { <OpenUrl store=store url=url /> }.into_any()
     } else if let Some(link) = r.link.clone() {
@@ -235,7 +246,14 @@ fn InfoTableView(store: Store, t: InfoTable) -> impl IntoView {
                 .cells
                 .iter()
                 .enumerate()
-                .map(|(i, c)| view! { <td class:num=t.numeric.contains(&i) class:mono=mono.contains(&i)>{c.clone()}</td> })
+                .map(|(i, c)| {
+                    if t.times.contains(&i) && !js_sys::Date::parse(c).is_nan() {
+                        let c = c.clone();
+                        let title = c.clone();
+                        return view! { <td class="age" title=title>{move || format!("{} ago", format_age(store.now.get(), &c))}</td> }.into_any();
+                    }
+                    view! { <td class:num=t.numeric.contains(&i) class:mono=mono.contains(&i)>{c.clone()}</td> }.into_any()
+                })
                 .collect_view();
             let fill = has_fill.then(|| {
                 let pct = r.fill.map(|f| (f * 100.0).round());
@@ -273,6 +291,95 @@ fn InfoTableView(store: Store, t: InfoTable) -> impl IntoView {
             <thead><tr>{head}{has_fill.then(|| view! { <th></th> })}</tr></thead>
             <tbody>{rows}</tbody>
         </table>
+    }
+}
+
+// ---- Check access ----
+
+/// "May this ServiceAccount do X?", answered by a SubjectAccessReview.
+#[component]
+fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
+    #[derive(Serialize)]
+    struct Args {
+        account_namespace: String,
+        account: String,
+        verb: String,
+        resource: String,
+        namespace: String,
+        name: String,
+    }
+    let verb = RwSignal::new("get".to_owned());
+    let resource = RwSignal::new(String::new());
+    let namespace = RwSignal::new(account_namespace.clone());
+    let name = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let answer = RwSignal::new(None::<Result<subduer_types::AccessCheck, String>>);
+    let ask = move || {
+        if resource.with_untracked(|r| r.trim().is_empty()) {
+            return;
+        }
+        let args = Args {
+            account_namespace: account_namespace.clone(),
+            account: account.clone(),
+            verb: verb.get_untracked(),
+            resource: resource.get_untracked(),
+            namespace: namespace.get_untracked(),
+            name: name.get_untracked(),
+        };
+        busy.set(true);
+        spawn_local(async move {
+            answer.set(Some(invoke::<_, subduer_types::AccessCheck>("check_access", &args).await));
+            busy.set(false);
+        });
+    };
+    let ask_click = {
+        let ask = ask.clone();
+        move |_| ask()
+    };
+    let field = move |label: &'static str, value: RwSignal<String>, placeholder: &'static str| {
+        let ask = ask.clone();
+        view! {
+            <label class="access-field">
+                <span class="muted small">{label}</span>
+                <input
+                    class="confirm-input mono"
+                    placeholder=placeholder
+                    spellcheck="false"
+                    prop:value=move || value.get()
+                    on:input=move |ev| {
+                        value.set(event_target_value(&ev));
+                        answer.set(None);
+                    }
+                    on:keydown=move |ev| if ev.key() == "Enter" { ask() }
+                />
+            </label>
+        }
+    };
+    let verbs = ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "*"];
+    view! {
+        <div class="access-form">
+            <label class="access-field">
+                <span class="muted small">"Verb"</span>
+                <select prop:value=move || verb.get() on:change=move |ev| { verb.set(event_target_value(&ev)); answer.set(None); }>
+                    {verbs.map(|v| view! { <option value=v>{v}</option> }).collect_view()}
+                </select>
+            </label>
+            {field("Resource", resource, "pods, deployments.apps, pods/exec")}
+            {field("Namespace", namespace, "empty: all namespaces")}
+            {field("Name", name, "any")}
+            <button class="btn small primary" prop:disabled=move || busy.get() || resource.with(|r| r.trim().is_empty()) on:click=ask_click>
+                {move || if busy.get() { "Asking…" } else { "Check" }}
+            </button>
+        </div>
+        {move || answer.get().map(|a| match a {
+            Ok(c) => {
+                let (class, text) = if c.allowed { ("badge badge-ready", "Allowed") } else { ("badge badge-warning", "Denied") };
+                let reason = if c.reason.is_empty() && !c.allowed { "No rule allows it.".to_owned() } else { c.reason.clone() };
+                view! { <p class="access-answer"><span class=class>{text}</span>" "<span class="muted">{reason}</span></p> }.into_any()
+            }
+            Err(e) => view! { <p class="warn">{e}</p> }.into_any(),
+        })}
+        <p class="muted small">"Asks the API server as this account would (RBAC and any other authorizers). Nothing is changed."</p>
     }
 }
 

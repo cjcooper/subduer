@@ -1,7 +1,8 @@
 //! Server-side dry run only, never changes anything:
-//! `cargo run -p subduer-core --example config_dry_run -- <context> <core/ConfigMap|core/Secret|autoscaling/HorizontalPodAutoscaler> <namespace> <name>`
+//! `cargo run -p subduer-core --example config_dry_run -- <context> <core/ConfigMap|core/Secret|autoscaling/HorizontalPodAutoscaler|core/PersistentVolumeClaim|core/PersistentVolume> <namespace|-> <name>`
 //! ConfigMap/Secret: checks a save adding the key `subduer-dry-run` (no
 //! existing value is read or sent). HPA: checks setting its current range.
+//! PVC: checks growing it by 1Gi. PV: checks setting its current reclaim policy.
 //! Then checks that the locked gate refuses the real call.
 
 use subduer_core::safety::SafetyGate;
@@ -23,9 +24,34 @@ async fn main() -> subduer_core::Result<()> {
         std::process::exit(2);
     };
     let kind = &info.kind;
-    let d = config::object_details(&client, kind, Some(namespace), name).await?;
     // A fresh gate is locked; dry runs don't need it unlocked.
     let gate = SafetyGate::default();
+    let ns = (namespace != "-").then_some(namespace.as_str());
+    let d = config::object_details(&client, kind, ns, name).await?;
+    let row = |k: &str| d.info.iter().find(|r| r.key == k).map(|r| r.value.clone());
+    if key == "core/PersistentVolumeClaim" {
+        let current = row("Requested").unwrap_or_default();
+        let gib = subduer_core::quantity::parse(&current).unwrap_or(0.0) / 1024f64.powi(3);
+        let bigger = format!("{}Gi", gib.ceil() as i64 + 1);
+        println!("can expand: {:?}", row("Can expand"));
+        match actions::expand_claim(&client, &gate, context, namespace, name, &bigger, true).await {
+            Ok(()) => println!("expand {current} -> {bigger} dry run OK"),
+            Err(e) => println!("expand dry run refused: {}", e.user_message()),
+        }
+        let gated = actions::expand_claim(&client, &gate, context, namespace, name, &bigger, false).await;
+        println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        return Ok(());
+    }
+    if key == "core/PersistentVolume" {
+        let policy = row("Reclaim policy").and_then(|p| p.split(':').next().map(str::to_owned)).unwrap_or_default();
+        match actions::set_reclaim_policy(&client, &gate, context, name, &policy, true).await {
+            Ok(()) => println!("reclaim policy {policy} dry run OK"),
+            Err(e) => println!("reclaim dry run refused: {}", e.user_message()),
+        }
+        let gated = actions::set_reclaim_policy(&client, &gate, context, name, &policy, false).await;
+        println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        return Ok(());
+    }
     if let Some(data) = &d.data {
         let change = [DataChange { key: "subduer-dry-run".into(), value: Some("check".into()) }];
         let rv = &data.resource_version;

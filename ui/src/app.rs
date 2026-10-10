@@ -1060,6 +1060,8 @@ fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name
         store.error.set(Some(format!("{kind_key} isn't listed on this cluster")));
         return;
     };
+    // Links don't always know whether a kind is namespaced (e.g. Helm manifests).
+    let namespace = namespace.filter(|_| kind.namespaced);
     let id = match &namespace {
         Some(ns) => format!("{ns}/{name}"),
         None => name,

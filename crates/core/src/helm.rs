@@ -5,7 +5,11 @@
 //! watch, so it doesn't download release payloads. Chart and app version are
 //! decoded from each release's latest revision; only `chart.metadata` and
 //! `info` are kept. Values and manifests (which can hold secrets) are dropped
-//! straight after decoding and never shown.
+//! straight after decoding and never shown; the Details tab takes only each
+//! manifest object's kind and name first.
+//!
+//! Rollback runs the `helm` CLI (`helm rollback`), which re-applies the old
+//! revision, runs its hooks and records a new revision exactly as Helm does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -20,7 +24,11 @@ use kube::runtime::{WatchStreamExt, watcher};
 use kube::{Client, ResourceExt};
 use serde_json::{Value, json};
 
-use crate::types::{Category, Column, ColumnKind, KindInfo, KindRef, ResourceRow, ResourceTable};
+use crate::safety::SafetyGate;
+use crate::types::{
+    Category, Column, ColumnKind, InfoRow, InfoSection, InfoTable, InfoTableRow, KindInfo, KindRef, ObjectDetails,
+    ObjectLink, ResourceRow, ResourceTable,
+};
 use crate::{Error, Result};
 
 const SELECTOR: &str = "owner=helm";
@@ -233,10 +241,26 @@ where
 /// Helm's own base64, usually gzipped JSON. Values and manifest are removed
 /// before returning.
 async fn read_release(client: &Client, namespace: &str, secret: &str) -> Option<Value> {
+    read_release_with_objects(client, namespace, secret).await.map(|(r, _)| r)
+}
+
+/// One object a release created, from its manifest.
+#[derive(Debug, Clone, PartialEq)]
+struct ManifestObject {
+    api_version: String,
+    kind: String,
+    name: String,
+    namespace: Option<String>,
+}
+
+/// Like [`read_release`], also listing the manifest's objects (kind and name
+/// only) before the manifest is dropped.
+async fn read_release_with_objects(client: &Client, namespace: &str, secret: &str) -> Option<(Value, Vec<ManifestObject>)> {
     let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
     let s = api.get(secret).await.ok()?;
     let raw = s.data.as_ref()?.get("release")?;
     let mut release = decode(&raw.0)?;
+    let objects = manifest_objects(release["manifest"].as_str().unwrap_or_default());
     if let Some(obj) = release.as_object_mut() {
         obj.remove("config");
         obj.remove("manifest");
@@ -245,7 +269,33 @@ async fn read_release(client: &Client, namespace: &str, secret: &str) -> Option<
     if let Some(chart) = release["chart"].as_object_mut() {
         chart.retain(|k, _| k == "metadata");
     }
-    Some(release)
+    Some((release, objects))
+}
+
+/// Kind, name and namespace of each document in a rendered manifest. Nothing
+/// else is kept, so Secret data in the manifest goes no further.
+fn manifest_objects(manifest: &str) -> Vec<ManifestObject> {
+    let mut docs = vec![String::new()];
+    for line in manifest.lines() {
+        if line.starts_with("---") {
+            docs.push(String::new());
+        } else if let Some(doc) = docs.last_mut() {
+            doc.push_str(line);
+            doc.push('\n');
+        }
+    }
+    docs.iter()
+        .filter_map(|doc| {
+            let v: Value = serde_norway::from_str(doc).ok()?;
+            let text = |x: &Value| x.as_str().map(str::to_owned);
+            Some(ManifestObject {
+                api_version: text(&v["apiVersion"])?,
+                kind: text(&v["kind"])?,
+                name: text(&v["metadata"]["name"])?,
+                namespace: text(&v["metadata"]["namespace"]),
+            })
+        })
+        .collect()
 }
 
 fn decode(helm_b64: &[u8]) -> Option<Value> {
@@ -323,6 +373,212 @@ pub async fn release_yaml(client: &Client, namespace: &str, release: &str) -> Re
     Ok(text)
 }
 
+/// The Details tab of a release: chart, status, history with each
+/// revision's chart and description, notes and the objects it created.
+/// Values are never read out.
+pub async fn release_details(client: &Client, namespace: &str, release: &str) -> Result<ObjectDetails> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("{SELECTOR},name={release}"));
+    let mut history: Vec<Revision> = api.list_metadata(&lp).await?.items.iter().filter_map(Revision::from_meta).collect();
+    history.sort_by_key(|r| std::cmp::Reverse(r.revision));
+    let latest = history.first().cloned().ok_or_else(|| Error::NotFound(format!("Helm release {namespace}/{release}")))?;
+    let (decoded, objects) = read_release_with_objects(client, namespace, &latest.secret).await.unwrap_or((Value::Null, Vec::new()));
+    // Older revisions: chart, app version and description, newest 20.
+    let older: Vec<(i64, Value)> = stream::iter(history.iter().skip(1).take(19).cloned())
+        .map(|r| async move { (r.revision, read_release(client, namespace, &r.secret).await.unwrap_or(Value::Null)) })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let by_revision: HashMap<i64, Value> = older.into_iter().chain([(latest.revision, decoded.clone())]).collect();
+    Ok(describe_release(namespace, release, &history, &by_revision, &objects))
+}
+
+fn describe_release(
+    namespace: &str,
+    release: &str,
+    history: &[Revision],
+    decoded: &HashMap<i64, Value>,
+    objects: &[ManifestObject],
+) -> ObjectDetails {
+    let latest = &history[0];
+    let current = decoded.get(&latest.revision).cloned().unwrap_or(Value::Null);
+    let meta = &current["chart"]["metadata"];
+    let info = &current["info"];
+    let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    let mut rows = vec![];
+    let chart = chart_info(&current);
+    if !chart.chart.is_empty() {
+        rows.push(InfoRow::new("Chart", chart.chart.clone()).mono());
+    }
+    if !chart.app_version.is_empty() {
+        rows.push(InfoRow::new("App version", chart.app_version.clone()));
+    }
+    rows.push(InfoRow::new("Revision", latest.revision.to_string()));
+    if let Some(d) = text(&info["description"]) {
+        rows.push(InfoRow::new("Last change", d));
+    }
+    if let Some(t) = text(&info["first_deployed"]) {
+        rows.push(InfoRow::new("First deployed", t).time());
+    }
+    if let Some(t) = text(&info["last_deployed"]) {
+        rows.push(InfoRow::new("Last deployed", t).time());
+    }
+    if let Some(d) = text(&meta["description"]) {
+        rows.push(InfoRow::new("About the chart", d));
+    }
+    if let Some(h) = text(&meta["home"]) {
+        rows.push(InfoRow::new("Chart home", h.clone()).url(h));
+    }
+    rows.push(InfoRow::new("Values", "not shown: they can hold secrets"));
+
+    let history_rows: Vec<InfoTableRow> = history
+        .iter()
+        .map(|r| {
+            let d = decoded.get(&r.revision).cloned().unwrap_or(Value::Null);
+            let c = chart_info(&d);
+            let mut row = InfoTableRow::new(vec![
+                r.revision.to_string(),
+                r.status.clone(),
+                c.chart,
+                c.app_version,
+                r.updated.clone(),
+                text(&d["info"]["description"]).unwrap_or_default(),
+            ]);
+            row.warn = r.status == "failed";
+            row
+        })
+        .collect();
+    let mut sections = vec![InfoSection {
+        id: "helm-history".into(),
+        title: "History".into(),
+        summary: crate::config::plural(history.len(), "revision"),
+        rows: Vec::new(),
+        table: Some(InfoTable {
+            columns: ["Revision", "Status", "Chart", "App version", "Updated", "Description"].map(String::from).to_vec(),
+            numeric: vec![0],
+            times: vec![4],
+            rows: history_rows,
+            ..Default::default()
+        }),
+        empty: None,
+    }];
+    let object_rows: Vec<InfoTableRow> = objects
+        .iter()
+        .map(|o| {
+            let group = o.api_version.split_once('/').map_or("core", |(g, _)| g);
+            let ns = o.namespace.clone().unwrap_or_else(|| namespace.to_owned());
+            let mut row = InfoTableRow::new(vec![o.kind.clone(), o.name.clone(), o.namespace.clone().unwrap_or_default()]);
+            row.link = Some(ObjectLink { kind: format!("{group}/{}", o.kind), namespace: Some(ns), name: o.name.clone() });
+            row
+        })
+        .collect();
+    let n = object_rows.len();
+    sections.push(InfoSection {
+        id: "helm-resources".into(),
+        title: "Resources".into(),
+        summary: if n == 0 { "none".into() } else { crate::config::plural(n, "object") },
+        rows: Vec::new(),
+        table: Some(InfoTable { columns: vec!["Kind".into(), "Name".into(), "Namespace".into()], rows: object_rows, ..Default::default() }),
+        empty: Some("Its manifest lists no objects.".into()),
+    });
+    if let Some(notes) = text(&info["notes"]) {
+        let lines: Vec<&str> = notes.lines().map(str::trim_end).collect();
+        sections.push(InfoSection {
+            id: "helm-notes".into(),
+            title: "Notes".into(),
+            summary: String::new(),
+            rows: vec![InfoRow::new("", lines.join("\n").trim_matches('\n').to_owned()).mono()],
+            table: None,
+            empty: None,
+        });
+    }
+    ObjectDetails {
+        kind: "Release".into(),
+        name: release.into(),
+        namespace: Some(namespace.into()),
+        status: Some(latest.status.clone()),
+        info: rows,
+        created: history.last().map(|r| r.updated.clone()),
+        labels: Vec::new(),
+        annotations: Vec::new(),
+        conditions: Vec::new(),
+        data: None,
+        sections,
+        events: Vec::new(),
+    }
+}
+
+/// Helm names: lowercase letters, digits, `-` and `.`, starting with a letter
+/// or digit (so one can't pass for a flag).
+fn valid_name(s: &str) -> bool {
+    s.len() <= 253
+        && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+/// `helm rollback` arguments. Dry runs are server-side: `--dry-run=server`
+/// on Helm 4, `--dry-run` on Helm 3.
+fn rollback_args(context: &str, namespace: &str, release: &str, revision: i64, wait: bool, dry_run: bool, helm4: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "rollback".into(),
+        release.into(),
+        revision.to_string(),
+        // `--flag=value`, so a value can never be read as another flag.
+        format!("--namespace={namespace}"),
+        format!("--kube-context={context}"),
+    ];
+    if wait {
+        args.extend(["--wait".into(), "--timeout".into(), "5m0s".into()]);
+    }
+    if dry_run {
+        args.push(if helm4 { "--dry-run=server".into() } else { "--dry-run".into() });
+    }
+    args
+}
+
+/// Rolls a release back to `revision` with the `helm` CLI, which creates a
+/// new revision from the old one, as `helm rollback` does. Returns Helm's
+/// output. A `dry_run` asks the server to validate it and changes nothing.
+#[allow(clippy::too_many_arguments)]
+pub async fn rollback(
+    gate: &SafetyGate,
+    context: &str,
+    namespace: &str,
+    release: &str,
+    revision: i64,
+    wait: bool,
+    dry_run: bool,
+) -> Result<String> {
+    if !valid_name(release) || !valid_name(namespace) {
+        return Err(Error::Message("not a valid release or namespace name".into()));
+    }
+    if revision < 1 {
+        return Err(Error::Message("pick a revision to roll back to".into()));
+    }
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    let version = tokio::process::Command::new("helm")
+        .args(["version", "--short"])
+        .output()
+        .await
+        .map_err(|_| Error::Message("The helm command isn't installed or isn't on PATH (brew install helm).".into()))?;
+    let helm4 = String::from_utf8_lossy(&version.stdout).trim_start().starts_with("v4");
+    let args = rollback_args(context, namespace, release, revision, wait, dry_run, helm4);
+    let run = tokio::process::Command::new("helm").args(&args).kill_on_drop(true).output();
+    let out = tokio::time::timeout(Duration::from_secs(6 * 60), run)
+        .await
+        .map_err(|_| Error::Message("helm rollback took more than 6 minutes; check the release's history".into()))?
+        .map_err(|e| Error::Message(format!("couldn't run helm: {e}")))?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim().to_owned();
+    tracing::info!(%context, %namespace, %release, revision, wait, dry_run, ok = out.status.success(), "helm rollback");
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(Error::Message(if text.is_empty() { format!("helm rollback failed ({})", out.status) } else { text }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +616,62 @@ mod tests {
         assert_eq!(rows[0].id, "apps/web");
         assert_eq!(rows[0].cells[2..6], ["web-1.2.0", "3.4", "10", "deployed"]);
         assert_eq!(rows[1].cells[4..6], ["2", "failed"]);
+    }
+
+    #[test]
+    fn manifest_objects_keep_only_kind_and_name() {
+        let manifest = "---\n# Source: web/templates/secret.yaml\napiVersion: v1\nkind: Secret\nmetadata:\n  name: web-creds\ndata:\n  password: aHVudGVyMg==\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: shop\nspec:\n  replicas: 2\n---\n# empty\n";
+        let objects = manifest_objects(manifest);
+        assert_eq!(objects.len(), 2);
+        assert_eq!((objects[0].kind.as_str(), objects[0].name.as_str(), objects[0].namespace.clone()), ("Secret", "web-creds", None));
+        assert_eq!((objects[1].api_version.as_str(), objects[1].namespace.as_deref()), ("apps/v1", Some("shop")));
+        assert!(!format!("{objects:?}").contains("aHVudGVy"));
+    }
+
+    #[test]
+    fn release_details_history_and_links() {
+        let history: Vec<Revision> = [rev("shop", "web", 3, "deployed"), rev("shop", "web", 2, "superseded"), rev("shop", "web", 1, "failed")]
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        let decoded = HashMap::from([
+            (3, json!({"chart": {"metadata": {"name": "web", "version": "1.3.0", "appVersion": "2.0"}},
+                       "info": {"description": "Upgrade complete", "notes": "Visit https://shop.acme.io  \n\n"}})),
+            (2, json!({"chart": {"metadata": {"name": "web", "version": "1.2.0", "appVersion": "1.9"}}, "info": {"description": "Install complete"}})),
+        ]);
+        let objects = vec![ManifestObject { api_version: "apps/v1".into(), kind: "Deployment".into(), name: "web".into(), namespace: None }];
+        let d = describe_release("shop", "web", &history, &decoded, &objects);
+        assert_eq!(d.status.as_deref(), Some("deployed"));
+        let h = d.sections[0].table.as_ref().unwrap();
+        assert_eq!(h.rows[0].cells[..4], ["3", "deployed", "web-1.3.0", "2.0"]);
+        assert_eq!(h.rows[1].cells[5], "Install complete");
+        assert!(h.rows[2].warn);
+        let link = d.sections[1].table.as_ref().unwrap().rows[0].link.clone().unwrap();
+        assert_eq!((link.kind.as_str(), link.namespace.as_deref()), ("apps/Deployment", Some("shop")));
+        assert_eq!(d.sections[2].rows[0].value, "Visit https://shop.acme.io");
+    }
+
+    #[test]
+    fn rollback_arguments() {
+        let args = rollback_args("acme-uat", "shop", "web", 2, true, true, true);
+        assert_eq!(
+            args,
+            ["rollback", "web", "2", "--namespace=shop", "--kube-context=acme-uat", "--wait", "--timeout", "5m0s", "--dry-run=server"]
+        );
+        assert_eq!(rollback_args("c", "n", "r", 1, false, true, false).last().unwrap(), "--dry-run");
+        assert!(!rollback_args("c", "n", "r", 1, false, false, true).iter().any(|a| a.starts_with("--dry-run")));
+        assert!(valid_name("corporate-wallet") && !valid_name("web; rm") && !valid_name("--all"));
+    }
+
+    #[tokio::test]
+    async fn rollback_is_gated_and_checked() {
+        let gate = SafetyGate::default();
+        let err = rollback(&gate, "acme-prd", "shop", "web", 2, false, false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+        let err = rollback(&gate, "acme-prd", "shop", "--all", 2, false, true).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
+        let err = rollback(&gate, "acme-prd", "shop", "web", 0, false, true).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
     }
 
     #[test]

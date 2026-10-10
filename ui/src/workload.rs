@@ -26,6 +26,12 @@ pub enum Op {
     Range,
     /// Edited ConfigMap or Secret data.
     Save,
+    /// Grow a PersistentVolumeClaim.
+    Expand,
+    /// Switch a PersistentVolume between Retain and Delete.
+    Reclaim,
+    /// Roll a Helm release back to an earlier revision.
+    Rollback,
 }
 
 impl Op {
@@ -38,6 +44,9 @@ impl Op {
             Op::Resume => "Resume",
             Op::Range => "Edit range",
             Op::Save => "Save",
+            Op::Expand => "Expand",
+            Op::Reclaim => "Reclaim policy",
+            Op::Rollback => "Rollback",
         }
     }
 
@@ -52,6 +61,9 @@ impl Op {
             (Op::Resume, _) => "Start its pods again",
             (Op::Range, _) => "Change its min and max replicas",
             (Op::Save, _) => "Save the edited data",
+            (Op::Expand, _) => "Make the claim bigger",
+            (Op::Reclaim, _) => "Keep or delete the data when its claim is deleted",
+            (Op::Rollback, _) => "Go back to an earlier revision with helm rollback",
         }
     }
 }
@@ -102,11 +114,20 @@ struct Change<'a> {
     resource_version: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     changes: Option<&'a [DataChange]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait: Option<bool>,
 }
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
 fn request(store: Store, kind: KindRef, row: &ResourceRow, op: Op) {
-    let Some(namespace) = row.namespace.clone() else { return };
+    // Cluster-scoped objects (PersistentVolumes) have no namespace.
+    let namespace = row.namespace.clone().unwrap_or_default();
     open(store, kind, namespace, row.name.clone(), op, None);
 }
 
@@ -136,7 +157,16 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
         let kind = store
             .kind
             .get()
-            .filter(|k| has_workload_details(k) || k.key() == "autoscaling/HorizontalPodAutoscaler")?;
+            .filter(|k| {
+                has_workload_details(k)
+                    || matches!(
+                        k.key().as_str(),
+                        "autoscaling/HorizontalPodAutoscaler"
+                            | "core/PersistentVolumeClaim"
+                            | "core/PersistentVolume"
+                            | "helm.sh/Release"
+                    )
+            })?;
         let allowed = |key: &str, verb: &str| {
             store.cluster.with(|c| {
                 c.iter()
@@ -146,9 +176,30 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
         };
         let patch = allowed(&kind.key(), "patch");
         let mut ops = Vec::new();
-        if kind.kind == "HorizontalPodAutoscaler" {
+        // Rows of the loaded details, tracked so buttons appear once they load.
+        let detail = |key: &str| {
+            store.object.with(|o| match o {
+                Some(Ok(d)) if d.name == row.name => d.info.iter().find(|r| r.key == key).map(|r| r.value.clone()),
+                _ => None,
+            })
+        };
+        if kind.key() == "helm.sh/Release" {
+            // Helm runs it with your own credentials, so the listed verbs don't apply.
+            if history(store, &row.name, true).len() > 1 {
+                ops.push(Op::Rollback);
+            }
+        } else if kind.kind == "HorizontalPodAutoscaler" {
             if patch {
                 ops.push(Op::Range);
+            }
+        } else if kind.kind == "PersistentVolumeClaim" {
+            if patch && detail("Can expand").as_deref() == Some("yes") {
+                ops.push(Op::Expand);
+            }
+        } else if kind.kind == "PersistentVolume" {
+            let policy = detail("Reclaim policy");
+            if patch && policy.is_some_and(|p| p.starts_with("Retain") || p.starts_with("Delete")) {
+                ops.push(Op::Reclaim);
             }
         } else if is_scalable_workload(&kind) {
             if patch {
@@ -219,6 +270,51 @@ fn run_note(store: Store, name: &str) -> Option<&'static str> {
     }
 }
 
+/// A release's revisions from its loaded History: (revision, status, chart,
+/// app version, updated), newest first.
+fn history(store: Store, name: &str, tracked: bool) -> Vec<(i64, String, String, String, String)> {
+    let read = |o: &Option<Result<subduer_types::ObjectDetails, String>>| match o {
+        Some(Ok(d)) if d.name == name && d.kind == "Release" => d
+            .sections
+            .iter()
+            .find(|s| s.id == "helm-history")
+            .and_then(|s| s.table.as_ref())
+            .map(|t| {
+                t.rows
+                    .iter()
+                    .filter_map(|r| {
+                        let c = &r.cells;
+                        Some((c.first()?.parse().ok()?, c.get(1)?.clone(), c.get(2)?.clone(), c.get(3)?.clone(), c.get(4)?.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if tracked { store.object.with(read) } else { store.object.with_untracked(read) }
+}
+
+/// A size like `20Gi`, `500M` or `1e9` in bytes.
+fn bytes(s: &str) -> Option<f64> {
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let (number, suffix) = s.split_at(split);
+    let n: f64 = number.parse().ok()?;
+    let k: f64 = match suffix {
+        "" => 1.0,
+        "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "Ki" => 1024.0,
+        "Mi" => 1024f64.powi(2),
+        "Gi" => 1024f64.powi(3),
+        "Ti" => 1024f64.powi(4),
+        "Pi" => 1024f64.powi(5),
+        _ => return None,
+    };
+    Some(n * k)
+}
+
 /// An info row of the selected object's details, e.g. an HPA's `Min replicas`.
 fn object_row(store: Store, name: &str, key: &str) -> Option<String> {
     store.object.with_untracked(|o| match o {
@@ -262,6 +358,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     let current = RwSignal::new(None::<Replicas>);
     let wanted = RwSignal::new(String::new());
     let (min, max) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let size = RwSignal::new(String::new());
+    let rollback_to = RwSignal::new(String::new());
+    let wait = RwSignal::new(true);
     let close = move || {
         typed.set(String::new());
         error.set(None);
@@ -278,6 +377,17 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
         if target.op == Op::Range {
             min.set(object_row(store, &target.name, "Min replicas").unwrap_or_default());
             max.set(object_row(store, &target.name, "Max replicas").unwrap_or_default());
+            return;
+        }
+        if target.op == Op::Expand {
+            size.set(object_row(store, &target.name, "Requested").unwrap_or_default());
+            return;
+        }
+        if target.op == Op::Rollback {
+            // The latest earlier revision that didn't fail.
+            let revisions = history(store, &target.name, false);
+            let pick = revisions.iter().skip(1).find(|r| r.1 != "failed").or_else(|| revisions.get(1));
+            rollback_to.set(pick.map(|r| r.0.to_string()).unwrap_or_default());
             return;
         }
         if target.op != Op::Scale {
@@ -308,6 +418,16 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 let parse = |s: RwSignal<String>| s.get().trim().parse::<i32>().ok();
                 parse(min).zip(parse(max)).filter(|(lo, hi)| *lo >= 1 && hi >= lo)
             };
+            let current_size = object_row(store, &name, "Requested").unwrap_or_default();
+            let grows = {
+                let current = current_size.clone();
+                move || size.with(|s| bytes(s.trim()).zip(bytes(&current)).is_some_and(|(new, old)| new > old))
+            };
+            // Reclaim switches to the other policy.
+            let new_policy = match object_row(store, &name, "Reclaim policy") {
+                Some(p) if p.starts_with("Retain") => "Delete",
+                _ => "Retain",
+            };
             let range_now = {
                 let name = name.clone();
                 move || {
@@ -317,11 +437,14 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
             };
             let ok = {
                 let name = name.clone();
+                let grows = grows.clone();
                 move || {
                     let typed_ok = !prod || typed.get().trim() == name;
                     let scale_ok = match op {
                         Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
                         Op::Range => range().is_some_and(|r| Some(r) != range_now()),
+                        Op::Expand => grows(),
+                        Op::Rollback => rollback_to.with(|r| r.parse::<i64>().is_ok()),
                         _ => true,
                     };
                     !busy.get() && typed_ok && scale_ok
@@ -333,6 +456,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     let target = target.clone();
                     let replicas = replicas();
                     let range = range();
+                    let size = size.get_untracked().trim().to_owned();
+                    let revision = rollback_to.get_untracked().parse::<i64>().ok();
+                    let wait = wait.get_untracked();
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
@@ -344,6 +470,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             Op::Resume => ("suspend_workload", None, Some(false)),
                             Op::Range => ("set_hpa_range", None, None),
                             Op::Save => ("save_config_data", None, None),
+                            Op::Expand => ("expand_claim", None, None),
+                            Op::Reclaim => ("set_reclaim_policy", None, None),
+                            Op::Rollback => ("helm_rollback", None, None),
                         };
                         let args = Change {
                             context: &target.context.name,
@@ -354,6 +483,10 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             max: range.map(|r| r.1),
                             resource_version: target.save.as_ref().map(|s| s.resource_version.as_str()),
                             changes: target.save.as_ref().map(|s| s.changes.as_slice()),
+                            size: (target.op == Op::Expand).then_some(size.as_str()),
+                            policy: (target.op == Op::Reclaim).then_some(new_policy),
+                            revision: (target.op == Op::Rollback).then_some(revision).flatten(),
+                            wait: (target.op == Op::Rollback).then_some(wait),
                         };
                         // Run now answers with the new Job's name; the others with nothing.
                         match invoke::<_, Option<String>>(command, &args).await {
@@ -374,7 +507,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
             };
             let what = view! {
                 <strong class="mono">{name.clone()}</strong>
-                " in namespace "<strong>{namespace.clone()}</strong>
+                {(!namespace.is_empty()).then(|| view! { " in namespace "<strong>{namespace.clone()}</strong> })}
                 " on context "<strong>{context.name.clone()}</strong>
             };
             let body = match op {
@@ -419,6 +552,80 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         {owner.map(|o| view! {
                             <p class="warn-text">{format!("It's controlled by {o}, which sets the range itself: change it there, or this edit is undone.")}</p>
                         })}
+                    }
+                    .into_any()
+                }
+                Op::Expand => view! {
+                    <p>"Grow "{what}" from "<strong>{current_size.clone()}</strong>"."</p>
+                    <label class="replicas">
+                        "New size "
+                        <input
+                            class="confirm-input replicas-input size-input"
+                            placeholder="e.g. 20Gi"
+                            prop:value=move || size.get()
+                            on:input=move |ev| size.set(event_target_value(&ev))
+                        />
+                    </label>
+                    {
+                        let grows = grows.clone();
+                        move || (!grows()).then(|| view! { <p class="warn-text">"Enter a size bigger than now, like 20Gi."</p> })
+                    }
+                    <p class="muted">"Claims can't shrink again. The filesystem grows when the driver resizes it, which for some drivers needs the pod restarted."</p>
+                }
+                .into_any(),
+                Op::Rollback => {
+                    let revisions = history(store, &name, false);
+                    let current = revisions.first().cloned();
+                    let options = revisions
+                        .iter()
+                        .skip(1)
+                        .map(|(rev, status, chart, app, _)| {
+                            let label = format!("{rev} · {chart}{} · {status}", if app.is_empty() { String::new() } else { format!(" (app {app})") });
+                            view! { <option value=rev.to_string()>{label}</option> }
+                        })
+                        .collect_view();
+                    let chosen = {
+                        let revisions = revisions.clone();
+                        move || {
+                            let r: i64 = rollback_to.get().parse().ok()?;
+                            revisions.iter().find(|x| x.0 == r).cloned()
+                        }
+                    };
+                    let next = current.as_ref().map_or(0, |c| c.0 + 1);
+                    view! {
+                        <p>"Roll "{what}" back."</p>
+                        {current.map(|(rev, status, chart, _, _)| view! {
+                            <p class="muted">{format!("Now at revision {rev} ({chart}, {status}).")}</p>
+                        })}
+                        <label class="rollback-field">
+                            "To revision"
+                            <select class="rollback-select" prop:value=move || rollback_to.get() on:change=move |ev| rollback_to.set(event_target_value(&ev))>
+                                {options}
+                            </select>
+                        </label>
+                        <label class="check-row">
+                            <input type="checkbox" prop:checked=move || wait.get() on:change=move |ev| wait.set(event_target_checked(&ev)) />
+                            " Wait until its resources are ready (up to 5 minutes)"
+                        </label>
+                        {move || chosen().filter(|c| c.1 == "failed").map(|_| view! {
+                            <p class="warn-text">"That revision failed when it was deployed."</p>
+                        })}
+                        <p class="muted">{format!(
+                            "Helm re-applies that revision's manifest and values as a new revision {next} and runs its rollback hooks. Changes made outside Helm may be overwritten."
+                        )}</p>
+                        <p class="muted small">"Runs helm rollback with your kubeconfig and this context."</p>
+                    }
+                    .into_any()
+                }
+                Op::Reclaim => {
+                    let note = if new_policy == "Delete" {
+                        "Once its claim is deleted, the volume and all its data are deleted too."
+                    } else {
+                        "Once its claim is deleted, the volume and its data are kept; you clean them up yourself."
+                    };
+                    view! {
+                        <p>"Change the reclaim policy of "{what}" to "<strong>{new_policy}</strong>"?"</p>
+                        <p class=if new_policy == "Delete" { "warn-text" } else { "muted" }>{note}</p>
                     }
                     .into_any()
                 }
@@ -482,6 +689,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 Op::Suspend => (format!("Suspend {}?", kind.kind), "Suspending…"),
                 Op::Resume => (format!("Resume {}?", kind.kind), "Resuming…"),
                 Op::Range => ("Edit HPA range?".to_owned(), "Saving…"),
+                Op::Expand => ("Expand claim?".to_owned(), "Expanding…"),
+                Op::Reclaim => ("Change reclaim policy?".to_owned(), "Saving…"),
+                Op::Rollback => ("Roll back Helm release?".to_owned(), "Rolling back…"),
                 Op::Save => (format!("Save {}?", kind.kind), "Saving…"),
             };
             let label = move || {
@@ -489,6 +699,12 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     doing.to_owned()
                 } else if op == Op::Scale {
                     replicas().map_or_else(|| "Scale".to_owned(), |n| format!("Scale to {n}"))
+                } else if op == Op::Rollback {
+                    rollback_to.with(|r| if r.is_empty() { "Rollback".to_owned() } else { format!("Roll back to {r}") })
+                } else if op == Op::Reclaim {
+                    format!("Set {new_policy}")
+                } else if op == Op::Expand {
+                    size.with(|s| if s.trim().is_empty() { "Expand".to_owned() } else { format!("Expand to {}", s.trim()) })
                 } else if op == Op::Range {
                     range().map_or_else(|| "Save".to_owned(), |(lo, hi)| format!("Set {lo}–{hi}"))
                 } else {
@@ -497,7 +713,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
             };
             view! {
                 <div class="modal-backdrop">
-                    <div class="modal" class:prod=context.prod_like>
+                    <div class="modal" class:prod=context.prod_like class:wide=op == Op::Rollback>
                         <h2>{title}</h2>
                         {body}
                         {context.prod_like.then(|| view! {

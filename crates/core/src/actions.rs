@@ -277,6 +277,70 @@ pub async fn set_hpa_range(
     Ok(())
 }
 
+/// Grows a PersistentVolumeClaim to `size` (e.g. `20Gi`). Claims can only
+/// grow, and only if their StorageClass allows expansion; the API server
+/// enforces the latter.
+#[allow(clippy::too_many_arguments)]
+pub async fn expand_claim(
+    client: &Client,
+    gate: &SafetyGate,
+    context: &str,
+    namespace: &str,
+    name: &str,
+    size: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let new = crate::quantity::parse(size).filter(|b| *b > 0.0).ok_or_else(|| {
+        Error::Message(format!("{size:?} isn't a size: use e.g. 20Gi or 500Mi"))
+    })?;
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    let api = Api::<k8s_openapi::api::core::v1::PersistentVolumeClaim>::namespaced(client.clone(), namespace);
+    let claim = api.get(name).await?;
+    let current = claim
+        .spec
+        .as_ref()
+        .and_then(|s| s.resources.as_ref())
+        .and_then(|r| r.requests.as_ref())
+        .and_then(|r| r.get("storage"))
+        .map(|q| q.0.clone())
+        .unwrap_or_default();
+    if crate::quantity::parse(&current).is_some_and(|c| new <= c) {
+        return Err(Error::Message(format!("claims can only grow: it's {current} now")));
+    }
+    let patch = json!({ "spec": { "resources": { "requests": { "storage": size } } } });
+    let params = PatchParams { dry_run, ..PatchParams::default() };
+    api.patch(name, &params, &Patch::Merge(&patch)).await?;
+    tracing::info!(%context, %namespace, %name, from = %current, to = %size, dry_run, "claim expanded");
+    Ok(())
+}
+
+/// Sets a PersistentVolume's reclaim policy: `Retain` keeps the volume and
+/// its data when its claim is deleted, `Delete` removes them.
+pub async fn set_reclaim_policy(
+    client: &Client,
+    gate: &SafetyGate,
+    context: &str,
+    name: &str,
+    policy: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if !matches!(policy, "Retain" | "Delete") {
+        return Err(Error::Message(format!("reclaim policy must be Retain or Delete, not {policy:?}")));
+    }
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    let patch = json!({ "spec": { "persistentVolumeReclaimPolicy": policy } });
+    let params = PatchParams { dry_run, ..PatchParams::default() };
+    Api::<k8s_openapi::api::core::v1::PersistentVolume>::all(client.clone())
+        .patch(name, &params, &Patch::Merge(&patch))
+        .await?;
+    tracing::info!(%context, %name, %policy, dry_run, "reclaim policy set");
+    Ok(())
+}
+
 fn ensure_scalable(kind: &KindRef) -> Result<()> {
     if is_scalable_workload(kind) {
         Ok(())
@@ -373,6 +437,20 @@ mod tests {
         let err = save_data(&nowhere(), &gate, "acme-uat", &deployment(), "apps", "app", "1", &change, false).await.unwrap_err();
         assert!(matches!(err, Error::Message(_)));
         let err = set_hpa_range(&nowhere(), &gate, "acme-uat", &hpa, "apps", "api", 5, 2, false).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
+    }
+
+    #[tokio::test]
+    async fn storage_changes_are_checked_and_gated() {
+        let gate = SafetyGate::default();
+        let err = expand_claim(&nowhere(), &gate, "acme-prd", "shop", "data", "20Gi", false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+        let err = set_reclaim_policy(&nowhere(), &gate, "acme-prd", "pvc-1", "Retain", false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+        // Bad input is refused before the gate or the network.
+        let err = expand_claim(&nowhere(), &gate, "acme-prd", "shop", "data", "lots", false).await.unwrap_err();
+        assert!(matches!(err, Error::Message(m) if m.contains("isn't a size")));
+        let err = set_reclaim_policy(&nowhere(), &gate, "acme-prd", "pvc-1", "Recycle", false).await.unwrap_err();
         assert!(matches!(err, Error::Message(_)));
     }
 

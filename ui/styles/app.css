@@ -84,8 +84,8 @@ button, input, select { font: inherit; color: inherit; }
 .kinds { overflow-y: auto; padding: 0 6px 12px; }
 .kind-section-title {
   display: flex; align-items: center; gap: 6px; width: 100%;
-  margin-top: 8px; padding: 4px 8px; border: none; background: none; cursor: pointer;
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+  margin-top: 10px; padding: 5px 8px; border: none; background: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted);
 }
 .kind-section-title:hover { color: var(--text); }
 .kind-section { border-top: 2px solid transparent; border-radius: 4px; }
@@ -96,7 +96,8 @@ button, input, select { font: inherit; color: inherit; }
 .chevron.open { transform: rotate(90deg); }
 .kind-section-title:hover .chevron, .dsection-title:hover .chevron { opacity: 1; }
 .nav-icon { flex-shrink: 0; width: 16px; height: 16px; opacity: 0.85; }
-.kind-section-title .nav-icon { width: 15px; height: 15px; }
+.kind-section-title .nav-icon { width: 18px; height: 18px; }
+.kind-section-title .section-count { font-size: 12px; letter-spacing: 0; }
 .kind-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-count { margin-left: auto; font-weight: 400; }
 .kind-group-title {
@@ -110,7 +111,9 @@ button, input, select { font: inherit; color: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .top-level-kinds { margin-top: 4px; }
-.top-level-kinds .kind { padding-left: 10px; font-weight: 500; }
+/* Top-level items read a step larger than the kinds inside sections. */
+.top-level-kinds .kind { padding: 5px 10px; font-size: 14px; font-weight: 500; }
+.top-level-kinds .nav-icon { width: 19px; height: 19px; }
 .kind:hover { background: var(--row-hover); }
 .kind.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
@@ -492,7 +495,7 @@ button.link { padding: 0; border: none; background: none; color: var(--accent); 
 button.link:hover { text-decoration: underline; }
 .itable { margin-top: 6px; }
 .itable th { position: static; padding: 4px 6px; font-size: 12px; }
-.itable td { padding: 4px 6px; white-space: normal; overflow-wrap: anywhere; }
+.itable td { padding: 4px 6px; white-space: normal; overflow-wrap: break-word; }
 .itable td.num, .itable th.num { text-align: right; white-space: nowrap; }
 .itable tbody tr { cursor: default; }
 .itable tbody tr.clickable { cursor: pointer; }
@@ -523,3 +526,20 @@ button.link:hover { text-decoration: underline; }
 .badge-no-endpoints, .badge-no-ready-endpoints, .badge-backend-missing, .badge-denies-all { background: var(--danger-soft); color: var(--danger); }
 .badge-external-name, .badge-allows-listed, .badge-default { color: var(--muted); }
 .url-row { display: inline-flex; align-items: center; gap: 8px; }
+.badge-bound, .badge-attached { color: var(--ok); }
+.badge-released, .badge-resizing, .badge-attaching, .badge-detaching { background: var(--warn-bg); color: var(--warn-text); }
+.badge-lost { background: var(--danger-soft); color: var(--danger); }
+.size-input { width: 120px; }
+.badge-sensitive { background: var(--warn-bg); color: var(--warn-text); }
+.badge-full-access, .badge-everyone, .badge-role-missing { background: var(--danger-soft); color: var(--danger); }
+.access-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.access-field { display: flex; flex-direction: column; gap: 2px; }
+.access-field .confirm-input { width: 170px; padding: 3px 6px; }
+.access-field select { padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.access-answer { margin: 10px 0 4px; }
+.modal { max-width: calc(100vw - 32px); box-sizing: border-box; }
+.modal.wide { width: 580px; }
+.rollback-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.rollback-select { width: 100%; box-sizing: border-box; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.check-row { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+.itable td.age { white-space: nowrap; }

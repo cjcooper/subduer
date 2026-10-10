@@ -315,6 +315,65 @@ pub async fn set_hpa_range(
         .map_err(|e| e.user_message())
 }
 
+/// Grows a PersistentVolumeClaim, checked like `delete_resource`.
+#[tauri::command]
+pub async fn expand_claim(
+    state: State<'_, AppState>,
+    context: String,
+    namespace: String,
+    name: String,
+    size: String,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "changed").await?;
+    actions::expand_claim(&client, &state.gate, &context, &namespace, &name, &size, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Sets a PersistentVolume's reclaim policy, checked like `delete_resource`.
+#[tauri::command]
+pub async fn set_reclaim_policy(state: State<'_, AppState>, context: String, name: String, policy: String) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "changed").await?;
+    actions::set_reclaim_policy(&client, &state.gate, &context, &name, &policy, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Whether a ServiceAccount may do something (a SubjectAccessReview). A
+/// question to the API server: nothing is changed, so it isn't gated.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_access(
+    state: State<'_, AppState>,
+    account_namespace: String,
+    account: String,
+    verb: String,
+    resource: String,
+    namespace: String,
+    name: String,
+) -> CmdResult<subduer_core::types::AccessCheck> {
+    let client = connected_client(&state).await?;
+    subduer_core::rbac::check_access(&client, &account_namespace, &account, &verb, &resource, &namespace, &name)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Rolls a Helm release back with the helm CLI, checked like
+/// `delete_resource`. Returns Helm's output.
+#[tauri::command]
+pub async fn helm_rollback(
+    state: State<'_, AppState>,
+    context: String,
+    namespace: String,
+    name: String,
+    revision: i64,
+    wait: bool,
+) -> CmdResult<String> {
+    client_for_change(&state, &context, "rolled back").await?;
+    subduer_core::helm::rollback(&state.gate, &context, &namespace, &name, revision, wait, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Opens an Ingress URL in the browser. Only plain http(s) addresses are
 /// accepted.
 #[tauri::command]
