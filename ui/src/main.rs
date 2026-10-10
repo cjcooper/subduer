@@ -14,6 +14,7 @@ mod prefs;
 mod tauri;
 mod upload;
 mod workload;
+mod object_detail;
 mod workload_detail;
 
 fn main() {

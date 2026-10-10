@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::cluster::dynamic_api;
 use crate::safety::SafetyGate;
-use crate::types::{KindRef, Replicas, is_batch_workload, is_scalable_workload};
+use crate::types::{DataChange, KindRef, Replicas, has_editable_data, is_batch_workload, is_scalable_workload};
 use crate::{Error, Result};
 
 /// The annotation `kubectl rollout restart` sets on the pod template.
@@ -199,6 +199,84 @@ fn manual_job_name(cron_job: &str, now: jiff::Timestamp) -> String {
     format!("{}-manual-{suffix}", prefix.trim_end_matches(['-', '.']))
 }
 
+/// Saves edits to a ConfigMap's or Secret's data as one merge patch. The
+/// patch carries the `resource_version` the edit started from, so a change
+/// made meanwhile by someone else is refused rather than overwritten. Keys not
+/// in `changes` are left as they are. Values are never logged.
+#[allow(clippy::too_many_arguments)]
+pub async fn save_data(
+    client: &Client,
+    gate: &SafetyGate,
+    context: &str,
+    kind: &KindRef,
+    namespace: &str,
+    name: &str,
+    resource_version: &str,
+    changes: &[DataChange],
+    dry_run: bool,
+) -> Result<()> {
+    if !has_editable_data(kind) {
+        return Err(Error::Message(format!("{} data can't be edited here", kind.kind)));
+    }
+    if changes.is_empty() {
+        return Err(Error::Message("nothing to save".into()));
+    }
+    if let Some(bad) = changes.iter().find(|c| !crate::config::valid_key(&c.key)) {
+        return Err(Error::Message(format!(
+            "{:?} isn't a valid key: use letters, digits, '-', '_' and '.'",
+            bad.key
+        )));
+    }
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    let patch = crate::config::data_patch(kind.kind == "Secret", resource_version, changes);
+    let params = PatchParams { dry_run, ..PatchParams::default() };
+    match dynamic_api(client, kind, Some(namespace)).patch(name, &params, &Patch::Merge(&patch)).await {
+        Err(kube::Error::Api(status)) if status.code == 409 => {
+            return Err(Error::Message(format!(
+                "{} {name} was changed by someone else since you started editing. Cancel, and edit it again to start from the current version.",
+                kind.kind
+            )));
+        }
+        other => other?,
+    };
+    let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
+    tracing::info!(%context, kind = %kind.key(), %namespace, %name, ?keys, dry_run, "data saved");
+    Ok(())
+}
+
+/// Sets an HPA's replica range.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_hpa_range(
+    client: &Client,
+    gate: &SafetyGate,
+    context: &str,
+    kind: &KindRef,
+    namespace: &str,
+    name: &str,
+    min: i32,
+    max: i32,
+    dry_run: bool,
+) -> Result<()> {
+    if kind.key() != "autoscaling/HorizontalPodAutoscaler" {
+        return Err(Error::Message(format!("{} has no replica range", kind.kind)));
+    }
+    if min < 1 || max < min {
+        return Err(Error::Message("the range needs 1 ≤ min ≤ max".into()));
+    }
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    let patch = json!({ "spec": { "minReplicas": min, "maxReplicas": max } });
+    let params = PatchParams { dry_run, ..PatchParams::default() };
+    dynamic_api(client, kind, Some(namespace))
+        .patch(name, &params, &Patch::Merge(&patch))
+        .await?;
+    tracing::info!(%context, %namespace, %name, min, max, dry_run, "hpa range set");
+    Ok(())
+}
+
 fn ensure_scalable(kind: &KindRef) -> Result<()> {
     if is_scalable_workload(kind) {
         Ok(())
@@ -272,6 +350,29 @@ mod tests {
         let err = set_suspended(&nowhere(), &gate, "acme-uat", &deployment(), "apps", "api", true, false)
             .await
             .unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
+    }
+
+    #[tokio::test]
+    async fn saves_and_ranges_are_gated_and_checked() {
+        let gate = SafetyGate::default();
+        let cm = KindRef { group: String::new(), version: "v1".into(), kind: "ConfigMap".into(), plural: "configmaps".into(), namespaced: true };
+        let change = [DataChange { key: "a".into(), value: Some("1".into()) }];
+        let err = save_data(&nowhere(), &gate, "acme-prd", &cm, "apps", "app", "1", &change, false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+        let hpa = KindRef { group: "autoscaling".into(), version: "v2".into(), kind: "HorizontalPodAutoscaler".into(), plural: "horizontalpodautoscalers".into(), namespaced: true };
+        let err = set_hpa_range(&nowhere(), &gate, "acme-prd", &hpa, "apps", "api", 2, 5, false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+
+        gate.set_unlocked("acme-uat", true);
+        let bad = [DataChange { key: "a/b".into(), value: Some("1".into()) }];
+        let err = save_data(&nowhere(), &gate, "acme-uat", &cm, "apps", "app", "1", &bad, false).await.unwrap_err();
+        assert!(matches!(err, Error::Message(m) if m.contains("valid key")));
+        let err = save_data(&nowhere(), &gate, "acme-uat", &cm, "apps", "app", "1", &[], false).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
+        let err = save_data(&nowhere(), &gate, "acme-uat", &deployment(), "apps", "app", "1", &change, false).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
+        let err = set_hpa_range(&nowhere(), &gate, "acme-uat", &hpa, "apps", "api", 5, 2, false).await.unwrap_err();
         assert!(matches!(err, Error::Message(_)));
     }
 

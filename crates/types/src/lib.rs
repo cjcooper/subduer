@@ -509,6 +509,174 @@ pub struct WorkloadDetails {
     pub events: Vec<EventSummary>,
 }
 
+/// Everything shown in the Details tab of a Config-section kind (ConfigMap,
+/// Secret, HPA, PDB, quotas, admission webhooks and policies, …): one generic
+/// shape, rendered by one view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectDetails {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+    /// Badge text, e.g. `Active`, `Blocking`, `Held`.
+    pub status: Option<String>,
+    /// Rows of the kind's own section, in display order.
+    pub info: Vec<InfoRow>,
+    pub created: Option<String>,
+    pub labels: Vec<(String, String)>,
+    /// Without `kubectl.kubernetes.io/last-applied-configuration`.
+    pub annotations: Vec<(String, String)>,
+    pub conditions: Vec<Condition>,
+    /// A ConfigMap's or Secret's data.
+    pub data: Option<DataSet>,
+    /// Further sections after the kind's own one.
+    pub sections: Vec<InfoSection>,
+    /// Newest first; only for namespaced objects.
+    pub events: Vec<EventSummary>,
+}
+
+/// Another object, opened in its own list when clicked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectLink {
+    /// `group/Kind`, e.g. `apps/Deployment`, `core/Pod`.
+    pub kind: String,
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoRow {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub mono: bool,
+    /// RFC 3339; shown as `5m ago` or `in 4h` beside it.
+    #[serde(default)]
+    pub time: bool,
+    #[serde(default)]
+    pub link: Option<ObjectLink>,
+}
+
+impl InfoRow {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { key: key.into(), value: value.into(), mono: false, time: false, link: None }
+    }
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+    pub fn time(mut self) -> Self {
+        self.time = true;
+        self
+    }
+    pub fn link(mut self, link: ObjectLink) -> Self {
+        self.link = Some(link);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoSection {
+    /// Remembers the collapsed state, e.g. `webhook:check.acme.io`.
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub rows: Vec<InfoRow>,
+    pub table: Option<InfoTable>,
+    /// Shown when there are no rows and no table rows.
+    #[serde(default)]
+    pub empty: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InfoTable {
+    pub columns: Vec<String>,
+    /// Right-aligned columns.
+    #[serde(default)]
+    pub numeric: Vec<usize>,
+    /// Monospaced columns.
+    #[serde(default)]
+    pub mono: Vec<usize>,
+    pub rows: Vec<InfoTableRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoTableRow {
+    pub cells: Vec<String>,
+    #[serde(default)]
+    pub link: Option<ObjectLink>,
+    /// 0..=1, drawn as a bar after the cells, e.g. quota used of hard.
+    #[serde(default)]
+    pub fill: Option<f64>,
+    #[serde(default)]
+    pub warn: bool,
+}
+
+impl InfoTableRow {
+    pub fn new(cells: Vec<String>) -> Self {
+        Self { cells, link: None, fill: None, warn: false }
+    }
+}
+
+/// A ConfigMap's or Secret's keys. Secret values are never included: they're
+/// fetched on Show, or all at once when editing starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataSet {
+    pub secret: bool,
+    /// For the save's optimistic concurrency check.
+    pub resource_version: String,
+    /// Why it can't be edited here (immutable, a Helm release record, …).
+    pub read_only: Option<String>,
+    /// Edits are allowed but may be undone, e.g. by Helm or an owning controller.
+    pub warning: Option<String>,
+    pub entries: Vec<DataEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataEntry {
+    pub key: String,
+    /// A ConfigMap's text value. Always `None` for Secrets and binary values.
+    pub value: Option<String>,
+    pub size: usize,
+    /// Not UTF-8 (a ConfigMap's `binaryData`, or such a Secret value): kept
+    /// as is when saving, but can be removed.
+    pub binary: bool,
+}
+
+/// One key's new value in a save; `None` removes the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataChange {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+/// A Secret's values for editing; `None` for binary values.
+pub type SecretValues = Vec<(String, Option<String>)>;
+
+/// Config-section kinds with an [`ObjectDetails`] Details tab.
+pub fn has_object_details(kind: &KindRef) -> bool {
+    matches!(
+        kind.key().as_str(),
+        "core/ConfigMap"
+            | "core/Secret"
+            | "autoscaling/HorizontalPodAutoscaler"
+            | "policy/PodDisruptionBudget"
+            | "core/ResourceQuota"
+            | "core/LimitRange"
+            | "scheduling.k8s.io/PriorityClass"
+            | "node.k8s.io/RuntimeClass"
+            | "coordination.k8s.io/Lease"
+            | "admissionregistration.k8s.io/MutatingWebhookConfiguration"
+            | "admissionregistration.k8s.io/ValidatingWebhookConfiguration"
+            | "admissionregistration.k8s.io/ValidatingAdmissionPolicy"
+            | "admissionregistration.k8s.io/ValidatingAdmissionPolicyBinding"
+    )
+}
+
+/// ConfigMaps and Secrets: their data can be edited and saved.
+pub fn has_editable_data(kind: &KindRef) -> bool {
+    matches!(kind.key().as_str(), "core/ConfigMap" | "core/Secret")
+}
+
 /// One Job of a CronJob, for its Jobs table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRun {

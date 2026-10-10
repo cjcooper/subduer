@@ -17,6 +17,9 @@ pub(crate) enum DetailTab {
     Yaml,
 }
 
+/// Backend event: closing the window or quitting was held for unsaved edits.
+const UNSAVED_CLOSE: &str = "unsaved-close";
+
 /// Seconds between background refreshes of the selected pod's details.
 const POD_REFRESH: Duration = Duration::from_secs(15);
 
@@ -80,6 +83,17 @@ pub(crate) struct Store {
     pub(crate) pod: RwSignal<Option<Result<PodDetails, String>>>,
     /// Details of the selected Deployment or StatefulSet (loading shares `pod_loading`).
     pub(crate) workload: RwSignal<Option<Result<subduer_types::WorkloadDetails, String>>>,
+    /// Details of the selected Config-section object (loading shares `pod_loading`).
+    pub(crate) object: RwSignal<Option<Result<subduer_types::ObjectDetails, String>>>,
+    /// A ConfigMap or Secret is being edited: background refreshes pause so
+    /// they don't replace the draft.
+    pub(crate) editing: RwSignal<bool>,
+    /// What has unsaved edits, e.g. `ConfigMap app-config`; `None` when
+    /// nothing would be lost. Leaving goes through [`guard`].
+    pub(crate) dirty: RwSignal<Option<String>>,
+    /// The discard prompt is open, and what to do if the user discards.
+    pub(crate) discard_prompt: RwSignal<bool>,
+    pub(crate) discard_then: StoredValue<Option<Box<dyn FnOnce()>>, LocalStorage>,
     /// Row id to select once the next table arrives (jumping to a workload's pod).
     pub(crate) pending_select: RwSignal<Option<String>>,
     pub(crate) pod_loading: RwSignal<bool>,
@@ -135,6 +149,11 @@ impl Store {
             detail_tab: RwSignal::new(DetailTab::Yaml),
             pod: RwSignal::new(None),
             workload: RwSignal::new(None),
+            object: RwSignal::new(None),
+            editing: RwSignal::new(false),
+            dirty: RwSignal::new(None),
+            discard_prompt: RwSignal::new(false),
+            discard_then: StoredValue::new_local(None),
             pending_select: RwSignal::new(None),
             pod_loading: RwSignal::new(false),
             pod_history: RwSignal::new(None),
@@ -234,6 +253,19 @@ pub fn App() -> impl IntoView {
         })
         .await;
         listen::<Vec<ForwardInfo>>(subduer_types::forward_events::CHANGED, move |list| store.forwards.set(list)).await;
+        // Closing the window or quitting was held for unsaved edits.
+        listen::<bool>(UNSAVED_CLOSE, move |quit| {
+            guard(store, move || {
+                #[derive(Serialize)]
+                struct Args {
+                    quit: bool,
+                }
+                spawn_local(async move {
+                    let _ = invoke::<_, ()>("close_discarding", &Args { quit }).await;
+                });
+            });
+        })
+        .await;
         crate::forward::load(store);
         store.refresh_contexts().await;
         if let Some(ctx) = store.context.get_untracked() {
@@ -242,6 +274,20 @@ pub fn App() -> impl IntoView {
     });
 
     set_interval(move || store.now.set(js_sys::Date::now()), Duration::from_secs(5));
+    // The backend holds window close and quit while there are unsaved edits.
+    Effect::new(move |was: Option<bool>| {
+        #[derive(Serialize)]
+        struct Args {
+            unsaved: bool,
+        }
+        let unsaved = store.dirty.with(Option::is_some);
+        if was != Some(unsaved) {
+            spawn_local(async move {
+                let _ = invoke::<_, ()>("set_unsaved", &Args { unsaved }).await;
+            });
+        }
+        unsaved
+    });
     crate::overview::start_refresh(store);
     set_interval(
         move || {
@@ -305,6 +351,7 @@ pub fn App() -> impl IntoView {
             <UnlockDialog store=store />
             <crate::delete::DeleteDialog store=store />
             <crate::workload::WorkloadDialog store=store />
+            <DiscardDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
             <crate::download::DownloadDialog store=store />
@@ -317,13 +364,25 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn TopBar(store: Store) -> impl IntoView {
+    // A change held by the discard prompt shows the old choice until the
+    // user discards.
     let on_context = move |ev: leptos::ev::Event| {
-        let ctx = event_target_value(&ev);
-        spawn_local(store.connect(ctx));
+        let select = event_target::<web_sys::HtmlSelectElement>(&ev);
+        let ctx = select.value();
+        select.set_value(&store.context.get_untracked().unwrap_or_default());
+        guard(store, move || {
+            select.set_value(&ctx);
+            spawn_local(store.connect(ctx));
+        });
     };
     let on_namespace = move |ev: leptos::ev::Event| {
-        let ns = event_target_value(&ev);
-        store.namespace.set((!ns.is_empty()).then_some(ns));
+        let select = event_target::<web_sys::HtmlSelectElement>(&ev);
+        let ns = select.value();
+        select.set_value(&store.namespace.get_untracked().unwrap_or_default());
+        guard(store, move || {
+            select.set_value(&ns);
+            store.namespace.set((!ns.is_empty()).then_some(ns));
+        });
     };
 
     view! {
@@ -529,10 +588,10 @@ fn Sidebar(store: Store) -> impl IntoView {
                         <button
                             class="kind"
                             class:active=move || store.overview_open.get() && !store.forwards_open.get()
-                            on:click=move |_| {
+                            on:click=move |_| guard(store, move || {
                                 store.forwards_open.set(false);
                                 store.overview_open.set(true);
-                            }
+                            })
                         ><crate::icons::ClusterIcon /><span class="kind-label">"Cluster"</span></button>
                     </Show>
                     <Show when=move || kind_matches_text("Port Forwards", &store.kind_filter.get().to_lowercase())>
@@ -540,10 +599,10 @@ fn Sidebar(store: Store) -> impl IntoView {
                             class="kind"
                             class:active=move || store.forwards_open.get()
                             title="Running port-forwards"
-                            on:click=move |_| {
+                            on:click=move |_| guard(store, move || {
                                 store.selected.set(None);
                                 store.forwards_open.set(true);
-                            }
+                            })
                         >
                             <crate::icons::ForwardIcon />
                             <span class="kind-label">"Port Forwards"</span>
@@ -684,9 +743,12 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                     class:active=active
                     title=title
                     on:click=move |_| {
-                        store.overview_open.set(false);
-                        store.forwards_open.set(false);
-                        store.kind.set(Some(k.clone()));
+                        let k = k.clone();
+                        guard(store, move || {
+                            store.overview_open.set(false);
+                            store.forwards_open.set(false);
+                            store.kind.set(Some(k));
+                        })
                     }
                 >{icon}<span class="kind-label">{label}</span></button>
             }
@@ -794,7 +856,10 @@ fn ResourceView(store: Store) -> impl IntoView {
                                         .filter_map(|(i, c)| row.cells.get(i).map(|v| cell_view(store, c.kind, v.clone())))
                                         .collect_view();
                                     view! {
-                                        <tr class:selected=selected on:click=move |_| select_row(store, clicked.clone())>
+                                        <tr class:selected=selected on:click=move |_| {
+                                            let row = clicked.clone();
+                                            guard(store, move || select_row(store, row));
+                                        }>
                                             {cells}
                                         </tr>
                                     }
@@ -917,25 +982,104 @@ pub(crate) fn selected_is_pod(store: Store) -> bool {
     store.kind.with_untracked(|k| k.as_ref().is_some_and(|k| k.key() == "core/Pod"))
 }
 
-/// Pods, Deployments, StatefulSets, Jobs and CronJobs get a Details tab besides YAML.
+/// Pods, workloads and the Config section's kinds get a Details tab besides YAML.
 fn selected_has_details(store: Store) -> bool {
-    selected_is_pod(store) || store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::has_workload_details))
+    selected_is_pod(store)
+        || store.kind.with_untracked(|k| {
+            k.as_ref().is_some_and(|k| subduer_types::has_workload_details(k) || subduer_types::has_object_details(k))
+        })
+}
+
+/// Runs `then` now, or, if there are unsaved edits, once the user chooses to
+/// discard them. Edits are never saved on the way out: only Save saves. A
+/// clean edit in progress just ends.
+pub(crate) fn guard(store: Store, then: impl FnOnce() + 'static) {
+    if store.dirty.with_untracked(Option::is_some) {
+        store.discard_then.set_value(Some(Box::new(then)));
+        store.discard_prompt.set(true);
+    } else {
+        store.editing.set(false);
+        then();
+    }
+}
+
+/// "Discard unsaved changes?", shown by [`guard`].
+#[component]
+fn DiscardDialog(store: Store) -> impl IntoView {
+    let keep = move |_| {
+        store.discard_then.set_value(None);
+        store.discard_prompt.set(false);
+    };
+    let discard = move |_| {
+        store.discard_prompt.set(false);
+        store.dirty.set(None);
+        store.editing.set(false);
+        let then = store.discard_then.try_update_value(Option::take).flatten();
+        if let Some(then) = then {
+            then();
+        }
+    };
+    move || {
+        store.discard_prompt.get().then(|| {
+            let what = store.dirty.get_untracked().unwrap_or_else(|| "this object".into());
+            view! {
+                <div class="modal-backdrop">
+                    <div class="modal">
+                        <h2>"Discard unsaved changes?"</h2>
+                        <p>"Your edits to "<strong class="mono">{what}</strong>" haven't been saved."</p>
+                        <p>"If you continue, they're lost. Nothing is saved unless you click "<strong>"Save…"</strong></p>
+                        <div class="modal-actions">
+                            <button class="danger" on:click=discard>"Discard changes"</button>
+                            <button class="primary" autofocus on:click=keep>"Keep editing"</button>
+                        </div>
+                    </div>
+                </div>
+            }
+        })
+    }
+}
+
+pub(crate) fn selected_is_object(store: Store) -> bool {
+    store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::has_object_details))
 }
 
 /// Switches to the Pod list and selects one pod once it's listed.
 pub(crate) fn open_pod(store: Store, namespace: String, name: String) {
-    open_object(store, "core/Pod", namespace, name);
+    open_object(store, "core/Pod", Some(namespace), name);
 }
 
 /// Switches to the list of `kind_key` (e.g. `batch/Job`) and selects one
 /// object once it's listed.
-pub(crate) fn open_object(store: Store, kind_key: &str, namespace: String, name: String) {
+pub(crate) fn open_object(store: Store, kind_key: &str, namespace: Option<String>, name: String) {
+    let kind_key = kind_key.to_owned();
+    guard(store, move || open_object_now(store, &kind_key, namespace, name));
+}
+
+fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name: String) {
     let Some(kind) = store.cluster.with_untracked(|c| c.as_ref().and_then(|c| find_kind(&c.kinds, kind_key))) else {
+        store.error.set(Some(format!("{kind_key} isn't listed on this cluster")));
         return;
     };
-    store.pending_select.set(Some(format!("{namespace}/{name}")));
+    let id = match &namespace {
+        Some(ns) => format!("{ns}/{name}"),
+        None => name,
+    };
     store.overview_open.set(false);
     store.forwards_open.set(false);
+    // A namespace filter that hides the object is widened to its namespace.
+    if let (Some(ns), Some(filter)) = (&namespace, store.namespace.get_untracked())
+        && *ns != filter
+    {
+        store.namespace.set(Some(ns.clone()));
+    }
+    let same_list = store.kind.with_untracked(|k| k.as_ref() == Some(&kind)) && store.namespace.with_untracked(|f| {
+        f.is_none() || f.as_ref() == namespace.as_ref()
+    });
+    if same_list && let Some(row) = store.table.with_untracked(|t| t.as_ref().and_then(|t| t.rows.iter().find(|r| r.id == id).cloned())) {
+        select_row(store, row);
+        return;
+    }
+    store.pending_select.set(Some(id));
     store.kind.set(Some(kind));
 }
 
@@ -943,6 +1087,8 @@ pub(crate) fn select_row(store: Store, row: ResourceRow) {
     store.yaml.set(None);
     store.pod.set(None);
     store.workload.set(None);
+    store.object.set(None);
+    store.editing.set(false);
     store.pod_history.set(None);
     store.revealed.set(HashMap::new());
     store.selected.set(Some(row));
@@ -1019,13 +1165,23 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
     let close = move |_| {
-        store.selected.set(None);
-        store.revealed.set(HashMap::new());
+        guard(store, move || {
+            store.selected.set(None);
+            store.revealed.set(HashMap::new());
+        })
     };
     let show_tab = move |tab: DetailTab| {
-        store.detail_tab.set(tab);
-        if tab == DetailTab::Yaml && store.yaml.with_untracked(Option::is_none) {
-            load_yaml(store);
+        let switch = move || {
+            store.detail_tab.set(tab);
+            if tab == DetailTab::Yaml && store.yaml.with_untracked(Option::is_none) {
+                load_yaml(store);
+            }
+        };
+        // Leaving Details drops an edit in progress.
+        if tab == DetailTab::Yaml {
+            guard(store, switch);
+        } else {
+            switch();
         }
     };
     view! {
@@ -1065,7 +1221,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                                 <button
                                     class="btn small"
                                     prop:disabled=move || store.pod_loading.get()
-                                    on:click=move |_| crate::pod_detail::load(store, true)
+                                    on:click=move |_| guard(store, move || crate::pod_detail::load(store, true))
                                 >"Refresh"</button>
                             })}
                         </div>
@@ -1074,6 +1230,8 @@ fn DetailPanel(store: Store) -> impl IntoView {
                         {move || if store.detail_tab.get() == DetailTab::Details && has_details {
                             if selected_is_pod(store) {
                                 view! { <crate::pod_detail::PodDetailView store=store /> }.into_any()
+                            } else if selected_is_object(store) {
+                                view! { <crate::object_detail::ObjectDetailView store=store /> }.into_any()
                             } else {
                                 view! { <crate::workload_detail::WorkloadDetailView store=store /> }.into_any()
                             }

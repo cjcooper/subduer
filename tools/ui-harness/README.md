@@ -26,6 +26,7 @@ python3 -m http.server 8765 &
 | `execstub.js` | A shell window (xterm) | `exec=<label>`, `exit=1` |
 | `workloadstub.js` | Deployment/StatefulSet Details tab, Restart and Scale dialogs | `rolling=1`, `local=1`, `collapse=resources,pods,…`, `scroll=<px>`, `openpod=1`, `op=restart\|scale`, `sts=1`, `ctx=prod`, `typed=1`, `locked=1`, `to=<n>`, `go=1` (the sent args land in the page title; read with `--dump-dom`) |
 | `batchstub.js` | CronJob/Job Details tab, Run now and Suspend/Resume dialogs | `job=1` (a Job; default a CronJob), `failed=1`, `suspended=1`, `op=run\|suspend\|resume`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `openjob=1`, `collapse=…`, `scroll=<px>` |
+| `configstub.js` | Config-section Details tabs, ConfigMap/Secret editing and Save, HPA Edit range | `kind=cm\|secret\|hpa\|quota\|webhook\|pdb\|lease`, `show=1`, `edit=1`, `change=1`, `add=1`, `badkey=1`, `remove=1`, `save=1`, `range=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>`, `leave=row\|close\|yaml\|kind\|refresh\|link\|ns\|context\|cancel\|window\|quit` with `keep=1` or `discard=1` (the title then reports unsaved, prompt, editing, selection, tab, namespace and close) |
 | `ov.js` | Cluster page | needs `ov.json`: `cargo run -p subduer-core --example overview -- <context> --json`, with node and namespace names replaced by generic ones |
 
 The stubs grew one feature at a time, so they're scrappy. Fixtures use generic

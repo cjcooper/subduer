@@ -7,14 +7,14 @@ mod shell_env;
 mod upload;
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::sync::Arc;
 
 use subduer_core::history::HistoryStore;
 use subduer_core::kube::Client;
 use subduer_core::safety::SafetyGate;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri::async_runtime::JoinHandle;
 
 /// The cluster the window is currently connected to.
@@ -35,7 +35,14 @@ pub struct AppState {
     pub logs: logs::LogWindows,
     pub shells: exec::ShellWindows,
     pub forwards: forward::Forwards,
+    /// The UI holds edits that haven't been saved: closing the window or
+    /// quitting asks it first (event `UNSAVED_CLOSE`).
+    pub unsaved: AtomicBool,
 }
+
+/// Sent to the main window when a close or quit is held for unsaved edits;
+/// the payload is `true` for quitting the app.
+pub const UNSAVED_CLOSE: &str = "unsaved-close";
 
 impl AppState {
     pub fn stop_watch(&self) {
@@ -63,10 +70,16 @@ pub fn run() {
             // Logs and shell windows belong to the main window; they close with it.
             if let Some(main) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
-                main.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Destroyed = event {
-                        logs::close_all(&handle);
+                let window = main.clone();
+                main.on_window_event(move |event| match event {
+                    tauri::WindowEvent::CloseRequested { api, .. }
+                        if handle.state::<AppState>().unsaved.load(Ordering::SeqCst) =>
+                    {
+                        api.prevent_close();
+                        let _ = window.emit_to("main", UNSAVED_CLOSE, false);
                     }
+                    tauri::WindowEvent::Destroyed => logs::close_all(&handle),
+                    _ => {}
                 });
             }
             Ok(())
@@ -89,6 +102,10 @@ pub fn run() {
             commands::scale_workload,
             commands::suspend_workload,
             commands::run_cron_job,
+            commands::object_details,
+            commands::secret_values,
+            commands::save_config_data,
+            commands::set_hpa_range,
             logs::open_logs,
             logs::logs_start,
             exec::open_exec,
@@ -105,7 +122,19 @@ pub fn run() {
             upload::download_file,
             upload::reveal_download,
             commands::secret_value,
+            commands::set_unsaved,
+            commands::close_discarding,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Cmd+Q with unsaved edits: ask the UI first. `app.exit` from
+            // `close_discarding` clears the flag before exiting.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event
+                && app.state::<AppState>().unsaved.load(Ordering::SeqCst)
+            {
+                api.prevent_exit();
+                let _ = app.emit_to("main", UNSAVED_CLOSE, true);
+            }
+        });
 }

@@ -1,12 +1,15 @@
-//! Restart and Scale for Deployments and StatefulSets, Run now for CronJobs,
-//! and Suspend/Resume for Jobs and CronJobs: the header buttons and their
-//! confirmation dialog. Gated like Delete, and production-like contexts need
-//! the object's name typed out.
+//! Changes confirmed in one dialog: Restart and Scale for Deployments and
+//! StatefulSets, Run now for CronJobs, Suspend/Resume for Jobs and CronJobs,
+//! Edit range for HPAs, and saving a ConfigMap's or Secret's edited data.
+//! Gated like Delete, and production-like contexts need the object's name
+//! typed out.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{ContextInfo, KindRef, Replicas, ResourceRow, has_workload_details, is_scalable_workload};
+use subduer_types::{
+    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, has_workload_details, is_scalable_workload,
+};
 
 use crate::app::Store;
 use crate::tauri::invoke;
@@ -19,6 +22,10 @@ pub enum Op {
     Run,
     Suspend,
     Resume,
+    /// An HPA's min and max replicas.
+    Range,
+    /// Edited ConfigMap or Secret data.
+    Save,
 }
 
 impl Op {
@@ -29,6 +36,8 @@ impl Op {
             Op::Run => "Run now",
             Op::Suspend => "Suspend",
             Op::Resume => "Resume",
+            Op::Range => "Edit range",
+            Op::Save => "Save",
         }
     }
 
@@ -41,6 +50,8 @@ impl Op {
             (Op::Suspend, _) => "Stop its running pods until resumed",
             (Op::Resume, "CronJob") => "Start Jobs on its schedule again",
             (Op::Resume, _) => "Start its pods again",
+            (Op::Range, _) => "Change its min and max replicas",
+            (Op::Save, _) => "Save the edited data",
         }
     }
 }
@@ -53,6 +64,18 @@ pub struct WorkloadTarget {
     pub namespace: String,
     pub name: String,
     pub op: Op,
+    /// What a Save writes.
+    pub save: Option<SaveData>,
+}
+
+/// A data edit ready to save, with its summary for the dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaveData {
+    pub resource_version: String,
+    pub changes: Vec<DataChange>,
+    pub added: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -71,13 +94,30 @@ struct Change<'a> {
     replicas: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     suspend: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changes: Option<&'a [DataChange]>,
 }
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
 fn request(store: Store, kind: KindRef, row: &ResourceRow, op: Op) {
-    let Some(context) = store.current_context_untracked() else { return };
     let Some(namespace) = row.namespace.clone() else { return };
-    let target = WorkloadTarget { context: context.clone(), kind, namespace, name: row.name.clone(), op };
+    open(store, kind, namespace, row.name.clone(), op, None);
+}
+
+/// Asks to save edited data of the selected ConfigMap or Secret.
+pub(crate) fn request_save(store: Store, kind: KindRef, namespace: String, name: String, save: SaveData) {
+    open(store, kind, namespace, name, Op::Save, Some(save));
+}
+
+fn open(store: Store, kind: KindRef, namespace: String, name: String, op: Op, save: Option<SaveData>) {
+    let Some(context) = store.current_context_untracked() else { return };
+    let target = WorkloadTarget { context: context.clone(), kind, namespace, name, op, save };
     if context.unlocked {
         store.workload_prompt.set(Some(target));
     } else {
@@ -93,7 +133,10 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
     let selected = row.clone();
     let ops = move || {
         let row = &selected;
-        let kind = store.kind.get().filter(has_workload_details)?;
+        let kind = store
+            .kind
+            .get()
+            .filter(|k| has_workload_details(k) || k.key() == "autoscaling/HorizontalPodAutoscaler")?;
         let allowed = |key: &str, verb: &str| {
             store.cluster.with(|c| {
                 c.iter()
@@ -103,7 +146,11 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
         };
         let patch = allowed(&kind.key(), "patch");
         let mut ops = Vec::new();
-        if is_scalable_workload(&kind) {
+        if kind.kind == "HorizontalPodAutoscaler" {
+            if patch {
+                ops.push(Op::Range);
+            }
+        } else if is_scalable_workload(&kind) {
             if patch {
                 ops.extend([Op::Restart, Op::Scale]);
             }
@@ -172,6 +219,14 @@ fn run_note(store: Store, name: &str) -> Option<&'static str> {
     }
 }
 
+/// An info row of the selected object's details, e.g. an HPA's `Min replicas`.
+fn object_row(store: Store, name: &str, key: &str) -> Option<String> {
+    store.object.with_untracked(|o| match o {
+        Some(Ok(d)) if d.name == name => d.info.iter().find(|r| r.key == key).map(|r| r.value.clone()),
+        _ => None,
+    })
+}
+
 fn suspend_note(kind: &KindRef, suspend: bool) -> &'static str {
     match (kind.kind.as_str(), suspend) {
         ("CronJob", true) => "No new Jobs start until it's resumed. Jobs already running carry on.",
@@ -206,6 +261,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     let error = RwSignal::new(None::<String>);
     let current = RwSignal::new(None::<Replicas>);
     let wanted = RwSignal::new(String::new());
+    let (min, max) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
     let close = move || {
         typed.set(String::new());
         error.set(None);
@@ -215,9 +271,15 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
         store.workload_prompt.set(None);
     };
 
-    // The Scale dialog starts from the live replica count.
+    // The Scale dialog starts from the live replica count, Edit range from
+    // the HPA's current range.
     Effect::new(move |_| {
         let Some(target) = store.workload_prompt.get() else { return };
+        if target.op == Op::Range {
+            min.set(object_row(store, &target.name, "Min replicas").unwrap_or_default());
+            max.set(object_row(store, &target.name, "Max replicas").unwrap_or_default());
+            return;
+        }
         if target.op != Op::Scale {
             return;
         }
@@ -239,15 +301,27 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
 
     move || {
         store.workload_prompt.get().map(|target| {
-            let WorkloadTarget { context, kind, namespace, name, op } = target.clone();
+            let WorkloadTarget { context, kind, namespace, name, op, save } = target.clone();
             let prod = context.prod_like;
             let replicas = move || wanted.get().trim().parse::<i32>().ok().filter(|n| *n >= 0);
+            let range = move || {
+                let parse = |s: RwSignal<String>| s.get().trim().parse::<i32>().ok();
+                parse(min).zip(parse(max)).filter(|(lo, hi)| *lo >= 1 && hi >= lo)
+            };
+            let range_now = {
+                let name = name.clone();
+                move || {
+                    let get = |k: &str| object_row(store, &name, k).and_then(|v| v.parse::<i32>().ok());
+                    get("Min replicas").zip(get("Max replicas"))
+                }
+            };
             let ok = {
                 let name = name.clone();
                 move || {
                     let typed_ok = !prod || typed.get().trim() == name;
                     let scale_ok = match op {
                         Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
+                        Op::Range => range().is_some_and(|r| Some(r) != range_now()),
                         _ => true,
                     };
                     !busy.get() && typed_ok && scale_ok
@@ -258,6 +332,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 move |_| {
                     let target = target.clone();
                     let replicas = replicas();
+                    let range = range();
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
@@ -267,17 +342,26 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             Op::Run => ("run_cron_job", None, None),
                             Op::Suspend => ("suspend_workload", None, Some(true)),
                             Op::Resume => ("suspend_workload", None, Some(false)),
+                            Op::Range => ("set_hpa_range", None, None),
+                            Op::Save => ("save_config_data", None, None),
                         };
                         let args = Change {
                             context: &target.context.name,
                             target: Target { kind: &target.kind, namespace: &target.namespace, name: &target.name },
                             replicas,
                             suspend,
+                            min: range.map(|r| r.0),
+                            max: range.map(|r| r.1),
+                            resource_version: target.save.as_ref().map(|s| s.resource_version.as_str()),
+                            changes: target.save.as_ref().map(|s| s.changes.as_slice()),
                         };
                         // Run now answers with the new Job's name; the others with nothing.
                         match invoke::<_, Option<String>>(command, &args).await {
                             Ok(_) => {
                                 close();
+                                if target.op == Op::Save {
+                                    store.editing.set(false);
+                                }
                                 crate::pod_detail::load(store, true);
                             }
                             Err(e) => {
@@ -310,6 +394,54 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     view! {
                         <p>{what}{verb}</p>
                         <p>{suspend_note(&kind, op == Op::Suspend)}</p>
+                    }
+                    .into_any()
+                }
+                Op::Range => {
+                    let owner = object_row(store, &name, "Controlled by");
+                    let input = |label: &'static str, value: RwSignal<String>| view! {
+                        <label class="replicas">
+                            {label}
+                            <input
+                                class="confirm-input replicas-input"
+                                type="number"
+                                min="1"
+                                prop:value=move || value.get()
+                                on:input=move |ev| value.set(event_target_value(&ev))
+                            />
+                        </label>
+                    };
+                    view! {
+                        <p>"Change the replica range of "{what}"."</p>
+                        {input("Min ", min)}
+                        {input("Max ", max)}
+                        {move || range().is_none().then(|| view! { <p class="warn-text">"Min must be at least 1, and max at least min."</p> })}
+                        {owner.map(|o| view! {
+                            <p class="warn-text">{format!("It's controlled by {o}, which sets the range itself: change it there, or this edit is undone.")}</p>
+                        })}
+                    }
+                    .into_any()
+                }
+                Op::Save => {
+                    let save = save.clone().unwrap_or_else(|| SaveData {
+                        resource_version: String::new(),
+                        changes: Vec::new(),
+                        added: Vec::new(),
+                        changed: Vec::new(),
+                        removed: Vec::new(),
+                    });
+                    let line = |label: &'static str, keys: &[String]| {
+                        (!keys.is_empty()).then(|| view! { <li>{label}" "<span class="mono">{keys.join(", ")}</span></li> })
+                    };
+                    let note = "Pods that read it as environment variables keep the old values until they restart; mounted files update within about a minute (not subPath mounts).";
+                    view! {
+                        <p>"Save changes to "{what}"?"</p>
+                        <ul class="change-list">
+                            {line("Changed:", &save.changed)}
+                            {line("Added:", &save.added)}
+                            {line("Removed:", &save.removed)}
+                        </ul>
+                        <p class="muted">{note}</p>
                     }
                     .into_any()
                 }
@@ -349,12 +481,16 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 Op::Run => (format!("Run {} now?", kind.kind), "Starting…"),
                 Op::Suspend => (format!("Suspend {}?", kind.kind), "Suspending…"),
                 Op::Resume => (format!("Resume {}?", kind.kind), "Resuming…"),
+                Op::Range => ("Edit HPA range?".to_owned(), "Saving…"),
+                Op::Save => (format!("Save {}?", kind.kind), "Saving…"),
             };
             let label = move || {
                 if busy.get() {
                     doing.to_owned()
                 } else if op == Op::Scale {
                     replicas().map_or_else(|| "Scale".to_owned(), |n| format!("Scale to {n}"))
+                } else if op == Op::Range {
+                    range().map_or_else(|| "Save".to_owned(), |(lo, hi)| format!("Set {lo}–{hi}"))
                 } else {
                     op.label().to_owned()
                 }
@@ -375,7 +511,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         })}
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| close()>"Cancel"</button>
+                            // Leaving the Save dialog never saves; it goes back to the edit.
+                            <button on:click=move |_| close()>{if op == Op::Save { "Back to editing" } else { "Cancel" }}</button>
                             <button class="primary" prop:disabled=move || !ok() on:click=confirm.clone()>{label}</button>
                         </div>
                     </div>

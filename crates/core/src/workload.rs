@@ -565,7 +565,7 @@ fn with_common_rows(mut w: Workload) -> Workload {
 }
 
 /// Any kind's status conditions; they share these fields.
-fn conditions<T: serde::Serialize>(list: Option<&[T]>) -> Vec<Condition> {
+pub(crate) fn conditions<T: serde::Serialize>(list: Option<&[T]>) -> Vec<Condition> {
     let text = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or_default().to_owned();
     list.unwrap_or_default()
         .iter()

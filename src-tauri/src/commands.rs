@@ -2,8 +2,11 @@
 
 use std::sync::atomic::Ordering;
 
-use subduer_core::types::{ClusterInfo, ClusterOverview, ContextList, KindRef, PodDetails, PodHistory, Replicas, WorkloadDetails, events};
-use subduer_core::{actions, cluster, contexts, overview, pod_details, watch, workload};
+use subduer_core::types::{
+    ClusterInfo, ClusterOverview, ContextList, DataChange, KindRef, ObjectDetails, PodDetails, PodHistory, Replicas,
+    SecretValues, WorkloadDetails, events,
+};
+use subduer_core::{actions, cluster, config, contexts, overview, pod_details, watch, workload};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{AppState, Session};
@@ -252,6 +255,82 @@ async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdRe
         return Err(format!("connected to {} now, not {context}; nothing was {done}", session.context));
     }
     Ok(session.client.clone())
+}
+
+/// Details tab of a Config-section kind (ConfigMap, Secret, HPA, PDB, …).
+#[tauri::command]
+pub async fn object_details(
+    state: State<'_, AppState>,
+    kind: KindRef,
+    namespace: Option<String>,
+    name: String,
+) -> CmdResult<ObjectDetails> {
+    let client = connected_client(&state).await?;
+    config::object_details(&client, &kind, namespace.as_deref(), &name)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Every value of a Secret, when the user starts editing it. Returned to the
+/// UI only; never logged.
+#[tauri::command]
+pub async fn secret_values(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<SecretValues> {
+    let client = connected_client(&state).await?;
+    tracing::info!(%namespace, secret = %name, "secret values revealed for editing");
+    pod_details::secret_values(&client, &namespace, &name).await.map_err(err)
+}
+
+/// Saves edited ConfigMap or Secret data, checked like `delete_resource`.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn save_config_data(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    resource_version: String,
+    changes: Vec<DataChange>,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "saved").await?;
+    actions::save_data(&client, &state.gate, &context, &kind, &namespace, &name, &resource_version, &changes, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Sets an HPA's min and max replicas, checked like `delete_resource`.
+#[tauri::command]
+pub async fn set_hpa_range(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    min: i32,
+    max: i32,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "changed").await?;
+    actions::set_hpa_range(&client, &state.gate, &context, &kind, &namespace, &name, min, max, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// The UI reports whether it holds unsaved edits, so closing the window or
+/// quitting can ask first.
+#[tauri::command]
+pub fn set_unsaved(state: State<'_, AppState>, unsaved: bool) {
+    state.unsaved.store(unsaved, Ordering::SeqCst);
+}
+
+/// Closes the main window (or quits) after the user chose to discard edits.
+#[tauri::command]
+pub fn close_discarding(app: AppHandle, state: State<'_, AppState>, quit: bool) {
+    state.unsaved.store(false, Ordering::SeqCst);
+    if quit {
+        app.exit(0);
+    } else if let Some(main) = tauri::Manager::get_webview_window(&app, "main") {
+        let _ = main.close();
+    }
 }
 
 /// Reveals one Secret value on explicit user request. The value is returned

@@ -15,10 +15,13 @@ use crate::chart::{ChartData, LineChart, RefLine, Scale, clock};
 use crate::overview::{fmt_bytes, fmt_cpu};
 use crate::tauri::invoke;
 
-/// Re-fetches the selected object's Details tab: a pod's, or a workload's.
+/// Re-fetches the selected object's Details tab: a pod's, a workload's, or a
+/// Config-section object's.
 pub fn load(store: Store, quiet: bool) {
     if crate::app::selected_is_pod(store) {
         load_pod(store, quiet);
+    } else if crate::app::selected_is_object(store) {
+        crate::object_detail::load(store, quiet);
     } else {
         crate::workload_detail::load(store, quiet);
     }
@@ -501,7 +504,15 @@ fn env_value(store: Store, value: &EnvValue, namespace: &str) -> AnyView {
 
 /// Masked until "Show" is clicked; then fetched on demand and shown until "Hide".
 #[component]
-fn SecretValue(store: Store, namespace: String, secret: String, key: String) -> impl IntoView {
+pub(crate) fn SecretValue(
+    store: Store,
+    namespace: String,
+    secret: String,
+    key: String,
+    /// Leave out the "Secret x · key" line, where the secret is obvious.
+    #[prop(optional)]
+    bare: bool,
+) -> impl IntoView {
     #[derive(Serialize)]
     struct Args {
         namespace: String,
@@ -562,7 +573,7 @@ fn SecretValue(store: Store, namespace: String, secret: String, key: String) -> 
             }
             .into_any(),
         }}
-        <span class="env-ref">{source}</span>
+        {(!bare).then(|| view! { <span class="env-ref">{source}</span> })}
     }
 }
 

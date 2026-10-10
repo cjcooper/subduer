@@ -137,7 +137,7 @@ fn is_time(key: &str) -> bool {
 }
 
 /// `5m ago` or `in 12m`.
-fn relative(now_ms: f64, time: &str) -> String {
+pub(crate) fn relative(now_ms: f64, time: &str) -> String {
     let then = js_sys::Date::parse(time);
     if then > now_ms {
         format!("in {}", format_span(((then - now_ms) / 1000.0) as u64))
@@ -150,7 +150,7 @@ fn ready_all(ready: &str) -> bool {
     ready.split_once('/').is_some_and(|(r, t)| r == t && t != "0")
 }
 
-fn badge_class(status: &str) -> String {
+pub(crate) fn badge_class(status: &str) -> String {
     let slug = status
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -224,13 +224,13 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
 }
 
 /// Most conditions are good when true; these report a problem when true.
-fn healthy(c: &Condition) -> bool {
+pub(crate) fn healthy(c: &Condition) -> bool {
     let bad_when_true = matches!(c.type_.as_str(), "Failed" | "FailureTarget" | "ReplicaFailure");
     (c.status == "True") != bad_when_true
 }
 
 #[component]
-fn ConditionList(store: Store, conditions: Vec<Condition>) -> impl IntoView {
+pub(crate) fn ConditionList(store: Store, conditions: Vec<Condition>) -> impl IntoView {
     conditions
         .into_iter()
         .map(|c| {
@@ -334,7 +334,7 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
             };
             let (ns, name) = (namespace.clone(), j.name.clone());
             view! {
-                <tr title=format!("Open Job {}", j.name) on:click=move |_| crate::app::open_object(store, "batch/Job", ns.clone(), name.clone())>
+                <tr title=format!("Open Job {}", j.name) on:click=move |_| crate::app::open_object(store, "batch/Job", Some(ns.clone()), name.clone())>
                     <td class="name">
                         {j.name.clone()}
                         {j.manual.then(|| view! { <span class="chip" title="Started by hand, not on schedule">"manual"</span> })}

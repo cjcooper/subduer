@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod catalog;
 pub mod cluster;
+pub mod config;
 pub mod contexts;
 pub mod cron;
 pub mod download;

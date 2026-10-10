@@ -325,6 +325,18 @@ pub async fn secret_value(client: &Client, namespace: &str, name: &str, key: &st
     })
 }
 
+/// Every value of a Secret, for editing; `None` for values that aren't
+/// UTF-8. Called only when the user starts editing; never logged or cached.
+pub async fn secret_values(client: &Client, namespace: &str, name: &str) -> Result<crate::types::SecretValues> {
+    let secret = Api::<Secret>::namespaced(client.clone(), namespace).get(name).await?;
+    Ok(secret
+        .data
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| (k, String::from_utf8(v.0).ok()))
+        .collect())
+}
+
 /// Container name → (cpu millicores, memory bytes), from metrics-server or,
 /// without it, the kubelet's stats on the pod's node. `None` if neither works.
 pub(crate) async fn pod_usage(
