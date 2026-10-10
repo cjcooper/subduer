@@ -1,7 +1,9 @@
 //! Server-side dry run only, never changes anything:
-//! `cargo run -p subduer-core --example workload_dry_run -- <context> <apps/Deployment|apps/StatefulSet> <namespace> <name> [replicas]`
-//! Reads the replicas, then checks that the API server would accept a rollout
-//! restart and, given a count, a scale (RBAC, admission, existence).
+//! `cargo run -p subduer-core --example workload_dry_run -- <context> <group/Kind> <namespace> <name> [replicas]`
+//! Deployments and StatefulSets: reads the replicas, then checks that the API
+//! server would accept a rollout restart and, given a count, a scale.
+//! Jobs and CronJobs: checks a suspend (or resume, if suspended) and, for a
+//! CronJob, a Run now. Each check covers RBAC, admission and existence.
 
 use subduer_core::safety::SafetyGate;
 use subduer_core::{actions, cluster, contexts};
@@ -25,10 +27,30 @@ async fn main() -> subduer_core::Result<()> {
         std::process::exit(2);
     };
     let kind = &info.kind;
-    let r = actions::replicas(&client, kind, namespace, name).await?;
-    println!("replicas: {} desired, {} running", r.desired, r.current);
     // A fresh gate is locked; dry runs don't need it unlocked.
     let gate = SafetyGate::default();
+    if subduer_core::types::is_batch_workload(kind) {
+        let d = subduer_core::workload::workload_details(&client, kind, namespace, name).await?;
+        let suspend = d.suspended != Some(true);
+        println!("{}: {} (suspended: {:?})", d.kind, d.status, d.suspended);
+        match actions::set_suspended(&client, &gate, context, kind, namespace, name, suspend, true).await {
+            Ok(()) => println!("{} dry run OK", if suspend { "suspend" } else { "resume" }),
+            Err(e) => println!("suspend dry run refused: {}", e.user_message()),
+        }
+        if kind.kind == "CronJob" {
+            match actions::run_cron_job(&client, &gate, context, namespace, name, true).await {
+                Ok(job) => println!("run now dry run OK: would create Job {job}"),
+                Err(e) => println!("run now dry run refused: {}", e.user_message()),
+            }
+            let gated = actions::run_cron_job(&client, &gate, context, namespace, name, false).await;
+            println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        }
+        let gated = actions::set_suspended(&client, &gate, context, kind, namespace, name, suspend, false).await;
+        println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        return Ok(());
+    }
+    let r = actions::replicas(&client, kind, namespace, name).await?;
+    println!("replicas: {} desired, {} running", r.desired, r.current);
     match actions::restart(&client, &gate, context, kind, namespace, name, true).await {
         Ok(()) => println!("restart dry run OK"),
         Err(e) => println!("restart dry run refused: {}", e.user_message()),

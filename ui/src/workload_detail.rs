@@ -1,14 +1,15 @@
-//! The Details tab for a selected Deployment or StatefulSet, laid out like a
-//! pod's: resources summed over its pods, the workload itself (status,
-//! replicas, strategy, conditions), its pods, the pod template's containers,
-//! and events. Sections collapse like the pod ones.
+//! The Details tab for a selected Deployment, StatefulSet, Job or CronJob,
+//! laid out like a pod's: resources summed over its pods, the workload itself
+//! (status, replicas or completions, strategy or schedule, conditions), a
+//! CronJob's Jobs, its pods, the pod template's containers, and events.
+//! Sections collapse like the pod ones.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{Condition, KindRef, TemplateContainer, Usage, WorkloadDetails, WorkloadPod};
+use subduer_types::{Condition, JobRun, KindRef, TemplateContainer, Usage, WorkloadDetails, WorkloadPod};
 
-use crate::app::{ContainerIcon, Store, format_age};
+use crate::app::{ContainerIcon, Store, format_age, format_span};
 use crate::overview::{fmt_bytes, fmt_cpu};
 use crate::pod_detail::{EnvTable, EventList, HistoryNote, Resource, Section, UsageChart};
 use crate::tauri::invoke;
@@ -65,15 +66,35 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 #[component]
 fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
     let pod_count = d.pods.len();
+    // Jobs keep their finished pods; only running ones use resources.
+    let live = d.pods.iter().filter(|p| !p.finished).count();
     let ready = d.pods.iter().filter(|p| ready_all(&p.ready)).count();
-    let pods_summary = if pod_count == 0 { "none".to_owned() } else { format!("{pod_count} · {ready} ready") };
+    let pods_summary = match (pod_count, d.replicas.is_some()) {
+        (0, _) => "none".to_owned(),
+        (n, true) => format!("{n} · {ready} ready"),
+        (n, false) => format!("{n} · {live} running"),
+    };
     let rolling = d.status == "Rolling out";
     let containers = d
         .containers
         .clone()
         .into_iter()
-        .map(|c| view! { <TemplateSection store=store c=c pods=pod_count namespace=d.namespace.clone() /> })
+        .map(|c| view! { <TemplateSection store=store c=c pods=live namespace=d.namespace.clone() /> })
         .collect_view();
+    let jobs = (d.kind == "CronJob").then(|| {
+        let (jobs, ns) = (d.jobs.clone(), d.namespace.clone());
+        let failed = jobs.iter().filter(|j| j.status == "Failed").count();
+        let summary = match (jobs.len(), failed) {
+            (0, _) => "none".to_owned(),
+            (n, 0) => format!("{n}"),
+            (n, f) => format!("{n} · {f} failed"),
+        };
+        view! {
+            <Section store=store id="jobs" title="Jobs".to_owned() summary=summary>
+                <JobTable store=store jobs=jobs.clone() namespace=ns.clone() />
+            </Section>
+        }
+    });
     let events = d.events.clone();
     let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
     let events_summary = match (events.len(), warnings) {
@@ -81,7 +102,11 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
         (n, 0) => format!("{n}"),
         (n, w) => format!("{n} · ⚠ {}", plural(w, "warning", "warnings")),
     };
-    let resources_summary = if pod_count == 0 { String::new() } else { format!("total of {}", plural(pod_count, "pod", "pods")) };
+    let resources_summary = match (live, d.replicas.is_some()) {
+        (0, false) => "none running · request and limit per pod".to_owned(),
+        (0, true) => String::new(),
+        (n, _) => format!("total of {}", plural(n, "pod", "pods")),
+    };
     let kind_id = d.kind.to_lowercase();
     let (cpu, memory) = (d.cpu, d.memory);
     let (pods, namespace) = (d.pods.clone(), d.namespace.clone());
@@ -95,6 +120,7 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
         <Section store=store id=kind_id title=title summary=status>
             <WorkloadInfo store=store d=d.clone() />
         </Section>
+        {jobs}
         <Section store=store id="pods" title="Pods".to_owned() summary=pods_summary>
             <PodTable store=store pods=pods.clone() namespace=namespace.clone() rolling=rolling />
         </Section>
@@ -102,6 +128,21 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
         <Section store=store id="events" title="Events".to_owned() summary=events_summary>
             <EventList store=store events=events.clone() empty="No events for this workload or its pods." />
         </Section>
+    }
+}
+
+/// Info rows holding an RFC 3339 time, shown relative to now.
+fn is_time(key: &str) -> bool {
+    matches!(key, "Started" | "Finished" | "Last scheduled" | "Last successful" | "Next run" | "Last restart")
+}
+
+/// `5m ago` or `in 12m`.
+fn relative(now_ms: f64, time: &str) -> String {
+    let then = js_sys::Date::parse(time);
+    if then > now_ms {
+        format!("in {}", format_span(((then - now_ms) / 1000.0) as u64))
+    } else {
+        format!("{} ago", format_age(now_ms, time))
     }
 }
 
@@ -121,12 +162,17 @@ fn badge_class(status: &str) -> String {
 
 #[component]
 fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
-    let r = d.replicas;
-    let replicas = format!(
-        "{} desired · {} ready · {} up to date · {} available",
-        r.desired, r.ready, r.updated, r.available
-    );
-    let extra = (r.current > r.desired).then(|| format!(" · {} running during rollout", r.current));
+    let replicas = d.replicas.map(|r| {
+        let extra = (r.current > r.desired).then(|| format!(" · {} running during rollout", r.current));
+        format!(
+            "{} desired · {} ready · {} up to date · {} available{}",
+            r.desired,
+            r.ready,
+            r.updated,
+            r.available,
+            extra.unwrap_or_default()
+        )
+    });
     let created = d.created.clone().unwrap_or_default();
     let created_text = {
         let created = created.clone();
@@ -136,8 +182,16 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
         .info
         .iter()
         .map(|(k, v)| {
-            let mono = matches!(k.as_str(), "Selector" | "Revision" | "Last restart");
-            view! { <dt>{k.clone()}</dt><dd class:mono=mono>{v.clone()}</dd> }
+            if is_time(k) && !js_sys::Date::parse(v).is_nan() {
+                let v = v.clone();
+                let text = {
+                    let v = v.clone();
+                    move || format!("{} · {v}", relative(store.now.get(), &v))
+                };
+                return view! { <dt>{k.clone()}</dt><dd>{text}</dd> }.into_any();
+            }
+            let mono = matches!(k.as_str(), "Selector" | "Revision" | "Schedule");
+            view! { <dt>{k.clone()}</dt><dd class:mono=mono>{v.clone()}</dd> }.into_any()
         })
         .collect_view();
     let labels = d
@@ -146,18 +200,17 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
         .map(|(k, v)| view! { <span class="chip">{format!("{k}={v}")}</span> })
         .collect_view();
     let conditions = d.conditions.clone();
-    let unhealthy = conditions.iter().filter(|c| c.status != "True").count();
+    let unhealthy = conditions.iter().filter(|c| !healthy(c)).count();
     let conditions_summary = match (conditions.len(), unhealthy) {
         (0, _) => "none".to_owned(),
         (n, 0) => format!("{n}"),
-        (n, u) => format!("{n} · {u} not true"),
+        (n, u) => format!("{n} · {u} unhealthy"),
     };
     view! {
         <dl class="kv">
             <dt>"Status"</dt>
             <dd><span class=badge_class(&d.status)>{d.status.clone()}</span></dd>
-            <dt>"Replicas"</dt>
-            <dd>{replicas}{extra}</dd>
+            {replicas.map(|r| view! { <dt>"Replicas"</dt><dd>{r}</dd> })}
             {info}
             {(!created.is_empty()).then(|| view! { <dt>"Created"</dt><dd>{created_text}</dd> })}
             {(!d.labels.is_empty()).then(|| view! { <dt>"Labels"</dt><dd class="chips">{labels}</dd> })}
@@ -170,12 +223,18 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
     }
 }
 
+/// Most conditions are good when true; these report a problem when true.
+fn healthy(c: &Condition) -> bool {
+    let bad_when_true = matches!(c.type_.as_str(), "Failed" | "FailureTarget" | "ReplicaFailure");
+    (c.status == "True") != bad_when_true
+}
+
 #[component]
 fn ConditionList(store: Store, conditions: Vec<Condition>) -> impl IntoView {
     conditions
         .into_iter()
         .map(|c| {
-            let badge = if c.status == "True" { "badge badge-ready" } else { "badge badge-warning" };
+            let badge = if healthy(&c) { "badge badge-ready" } else { "badge badge-warning" };
             let when = c.last_transition.clone().map(|t| {
                 move || format!("{} ago", format_age(store.now.get(), &t))
             });
@@ -238,6 +297,64 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
                     <th class="num">"Restarts"</th>
                     <th class="num">"CPU"</th>
                     <th class="num">"Memory"</th>
+                    <th>"Age"</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>
+    }
+    .into_any()
+}
+
+/// Seconds-precise under an hour (`2m 18s`), then like ages.
+fn run_time(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
+        s => format_span(s),
+    }
+}
+
+#[component]
+fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView {
+    if jobs.is_empty() {
+        return view! { <p class="muted">"No Jobs kept."</p> }.into_any();
+    }
+    let rows = jobs
+        .into_iter()
+        .map(|j| {
+            let created = j.created.clone().unwrap_or_default();
+            let age = move || format_age(store.now.get(), &created);
+            let (started, finished) = (j.started.clone(), j.finished.clone());
+            // Ticks while it runs.
+            let duration = move || {
+                let start = js_sys::Date::parse(started.as_deref()?);
+                let end = finished.as_deref().map_or_else(|| store.now.get(), js_sys::Date::parse);
+                (!start.is_nan() && !end.is_nan()).then(|| run_time(((end - start) / 1000.0).max(0.0) as u64))
+            };
+            let (ns, name) = (namespace.clone(), j.name.clone());
+            view! {
+                <tr title=format!("Open Job {}", j.name) on:click=move |_| crate::app::open_object(store, "batch/Job", ns.clone(), name.clone())>
+                    <td class="name">
+                        {j.name.clone()}
+                        {j.manual.then(|| view! { <span class="chip" title="Started by hand, not on schedule">"manual"</span> })}
+                    </td>
+                    <td><span class=badge_class(&j.status)>{j.status.clone()}</span></td>
+                    <td class="num">{j.completions.clone()}</td>
+                    <td class="num">{move || duration().unwrap_or_else(|| "—".into())}</td>
+                    <td class="age">{age}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    view! {
+        <table class="resources wpods">
+            <thead>
+                <tr>
+                    <th>"Name"</th>
+                    <th>"Status"</th>
+                    <th class="num">"Done"</th>
+                    <th class="num">"Duration"</th>
                     <th>"Age"</th>
                 </tr>
             </thead>

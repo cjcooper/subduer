@@ -1,11 +1,12 @@
-//! Restart and Scale for Deployments and StatefulSets: the header buttons and
-//! their confirmation dialog. Gated like Delete, and production-like contexts
-//! need the object's name typed out.
+//! Restart and Scale for Deployments and StatefulSets, Run now for CronJobs,
+//! and Suspend/Resume for Jobs and CronJobs: the header buttons and their
+//! confirmation dialog. Gated like Delete, and production-like contexts need
+//! the object's name typed out.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{ContextInfo, KindRef, Replicas, ResourceRow};
+use subduer_types::{ContextInfo, KindRef, Replicas, ResourceRow, has_workload_details, is_scalable_workload};
 
 use crate::app::Store;
 use crate::tauri::invoke;
@@ -14,6 +15,34 @@ use crate::tauri::invoke;
 pub enum Op {
     Restart,
     Scale,
+    /// Start a Job from a CronJob now.
+    Run,
+    Suspend,
+    Resume,
+}
+
+impl Op {
+    fn label(self) -> &'static str {
+        match self {
+            Op::Restart => "Restart",
+            Op::Scale => "Scale",
+            Op::Run => "Run now",
+            Op::Suspend => "Suspend",
+            Op::Resume => "Resume",
+        }
+    }
+
+    fn hint(self, kind: &KindRef) -> &'static str {
+        match (self, kind.kind.as_str()) {
+            (Op::Restart, _) => "Rollout restart",
+            (Op::Scale, _) => "Scale",
+            (Op::Run, _) => "Start a Job from its template now",
+            (Op::Suspend, "CronJob") => "Stop starting new Jobs",
+            (Op::Suspend, _) => "Stop its running pods until resumed",
+            (Op::Resume, "CronJob") => "Start Jobs on its schedule again",
+            (Op::Resume, _) => "Start its pods again",
+        }
+    }
 }
 
 /// What the dialog acts on, captured when it opens.
@@ -40,6 +69,8 @@ struct Change<'a> {
     target: Target<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     replicas: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspend: Option<bool>,
 }
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
@@ -55,46 +86,98 @@ fn request(store: Store, kind: KindRef, row: &ResourceRow, op: Op) {
     }
 }
 
-/// Restart and Scale header buttons; hidden for other kinds and when the API
-/// doesn't allow patching this kind.
+/// The header buttons for the selected workload. Each is hidden when the API
+/// doesn't allow it; Suspend/Resume wait for the details to know which applies.
 #[component]
 pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
-    let kind = move || {
-        let kind = store.kind.get().filter(subduer_types::is_scalable_workload)?;
-        let allowed = store.cluster.with(|c| {
-            c.iter()
-                .flat_map(|c| &c.kinds)
-                .any(|k| k.kind == kind && k.verbs.iter().any(|v| v == "patch"))
-        });
-        allowed.then_some(kind)
+    let selected = row.clone();
+    let ops = move || {
+        let row = &selected;
+        let kind = store.kind.get().filter(has_workload_details)?;
+        let allowed = |key: &str, verb: &str| {
+            store.cluster.with(|c| {
+                c.iter()
+                    .flat_map(|c| &c.kinds)
+                    .any(|k| k.kind.key() == key && k.verbs.iter().any(|v| v == verb))
+            })
+        };
+        let patch = allowed(&kind.key(), "patch");
+        let mut ops = Vec::new();
+        if is_scalable_workload(&kind) {
+            if patch {
+                ops.extend([Op::Restart, Op::Scale]);
+            }
+        } else {
+            if kind.kind == "CronJob" && allowed("batch/Job", "create") {
+                ops.push(Op::Run);
+            }
+            let state = store.workload.with(|w| match w {
+                Some(Ok(d)) if d.name == row.name && row.namespace.as_ref() == Some(&d.namespace) && d.kind == kind.kind => {
+                    Some((d.suspended, d.status.clone()))
+                }
+                _ => None,
+            });
+            // A finished Job has nothing left to suspend.
+            if let Some((Some(suspended), status)) = state
+                && patch
+                && !(kind.kind == "Job" && matches!(status.as_str(), "Complete" | "Failed"))
+            {
+                ops.push(if suspended { Op::Resume } else { Op::Suspend });
+            }
+        }
+        Some((kind, ops))
     };
     move || {
-        kind().map(|kind| {
+        ops().map(|(kind, ops)| {
             let locked = move || store.current_context().is_some_and(|c| !c.unlocked);
-            let title = move |label: &'static str| {
-                move || {
-                    if locked() {
-                        format!("{label}… (asks to allow changes first: the context is read-only)")
-                    } else {
-                        format!("{label}…")
+            ops.into_iter()
+                .map(|op| {
+                    let hint = op.hint(&kind);
+                    let title = move || {
+                        if locked() {
+                            format!("{hint}… (asks to allow changes first: the context is read-only)")
+                        } else {
+                            format!("{hint}…")
+                        }
+                    };
+                    let (kind, row) = (kind.clone(), row.clone());
+                    view! {
+                        <button class="btn small" title=title on:click=move |_| request(store, kind.clone(), &row, op)>
+                            {op.label()}
+                        </button>
                     }
-                }
-            };
-            let (restart_kind, restart_row) = (kind.clone(), row.clone());
-            let scale_row = row.clone();
-            view! {
-                <button
-                    class="btn small"
-                    title=title("Rollout restart")
-                    on:click=move |_| request(store, restart_kind.clone(), &restart_row, Op::Restart)
-                >"Restart"</button>
-                <button
-                    class="btn small"
-                    title=title("Scale")
-                    on:click=move |_| request(store, kind.clone(), &scale_row, Op::Scale)
-                >"Scale"</button>
-            }
+                })
+                .collect_view()
         })
+    }
+}
+
+/// The selected CronJob's concurrency policy and whether a Job is running.
+fn cron_state(store: Store, name: &str) -> Option<(String, bool)> {
+    store.workload.with_untracked(|w| match w {
+        Some(Ok(d)) if d.name == name && d.kind == "CronJob" => {
+            let policy = d.info.iter().find(|(k, _)| k == "Concurrency").map(|(_, v)| v.clone())?;
+            Some((policy, d.status == "Running"))
+        }
+        _ => None,
+    })
+}
+
+fn run_note(store: Store, name: &str) -> Option<&'static str> {
+    match cron_state(store, name)? {
+        (p, _) if p == "Forbid" => Some("Scheduled runs are skipped while this Job runs (concurrency: Forbid)."),
+        (p, true) if p == "Replace" => Some("Its running Job is not replaced; but the next scheduled run replaces this one if it's still running."),
+        (p, false) if p == "Replace" => Some("The next scheduled run replaces this Job if it's still running (concurrency: Replace)."),
+        _ => None,
+    }
+}
+
+fn suspend_note(kind: &KindRef, suspend: bool) -> &'static str {
+    match (kind.kind.as_str(), suspend) {
+        ("CronJob", true) => "No new Jobs start until it's resumed. Jobs already running carry on.",
+        ("CronJob", false) => "Jobs start on its schedule again. If a run was missed while suspended, one may start right away.",
+        (_, true) => "Its running pods are stopped. Pods that already succeeded still count when it's resumed.",
+        (_, false) => "New pods start for the work that's left.",
     }
 }
 
@@ -164,8 +247,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 move || {
                     let typed_ok = !prod || typed.get().trim() == name;
                     let scale_ok = match op {
-                        Op::Restart => true,
                         Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
+                        _ => true,
                     };
                     !busy.get() && typed_ok && scale_ok
                 }
@@ -178,17 +261,25 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
-                        let (command, replicas) = match target.op {
-                            Op::Restart => ("restart_workload", None),
-                            Op::Scale => ("scale_workload", replicas),
+                        let (command, replicas, suspend) = match target.op {
+                            Op::Restart => ("restart_workload", None, None),
+                            Op::Scale => ("scale_workload", replicas, None),
+                            Op::Run => ("run_cron_job", None, None),
+                            Op::Suspend => ("suspend_workload", None, Some(true)),
+                            Op::Resume => ("suspend_workload", None, Some(false)),
                         };
                         let args = Change {
                             context: &target.context.name,
                             target: Target { kind: &target.kind, namespace: &target.namespace, name: &target.name },
                             replicas,
+                            suspend,
                         };
-                        match invoke::<_, ()>(command, &args).await {
-                            Ok(()) => close(),
+                        // Run now answers with the new Job's name; the others with nothing.
+                        match invoke::<_, Option<String>>(command, &args).await {
+                            Ok(_) => {
+                                close();
+                                crate::pod_detail::load(store, true);
+                            }
                             Err(e) => {
                                 busy.set(false);
                                 error.set(Some(e));
@@ -208,6 +299,20 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     <p>{restart_note(&kind)}</p>
                 }
                 .into_any(),
+                Op::Run => view! {
+                    <p>"A Job is started now from the template of "{what}", outside its schedule."</p>
+                    <p class="muted">"It's named "<span class="mono">{format!("{name}-manual-…")}</span>" and listed with its other Jobs."</p>
+                    {run_note(store, &name).map(|n| view! { <p class="warn-text">{n}</p> })}
+                }
+                .into_any(),
+                Op::Suspend | Op::Resume => {
+                    let verb = if op == Op::Suspend { " will be suspended." } else { " will be resumed." };
+                    view! {
+                        <p>{what}{verb}</p>
+                        <p>{suspend_note(&kind, op == Op::Suspend)}</p>
+                    }
+                    .into_any()
+                }
                 Op::Scale => {
                     let kind = kind.clone();
                     view! {
@@ -238,9 +343,12 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     .into_any()
                 }
             };
-            let (title, action, doing) = match op {
-                Op::Restart => (format!("Restart {}?", kind.kind), "Restart".to_owned(), "Restarting…"),
-                Op::Scale => (format!("Scale {}?", kind.kind), String::new(), "Scaling…"),
+            let (title, doing) = match op {
+                Op::Restart => (format!("Restart {}?", kind.kind), "Restarting…"),
+                Op::Scale => (format!("Scale {}?", kind.kind), "Scaling…"),
+                Op::Run => (format!("Run {} now?", kind.kind), "Starting…"),
+                Op::Suspend => (format!("Suspend {}?", kind.kind), "Suspending…"),
+                Op::Resume => (format!("Resume {}?", kind.kind), "Resuming…"),
             };
             let label = move || {
                 if busy.get() {
@@ -248,7 +356,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 } else if op == Op::Scale {
                     replicas().map_or_else(|| "Scale".to_owned(), |n| format!("Scale to {n}"))
                 } else {
-                    action.clone()
+                    op.label().to_owned()
                 }
             };
             view! {

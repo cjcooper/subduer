@@ -4,6 +4,7 @@ pub mod actions;
 pub mod catalog;
 pub mod cluster;
 pub mod contexts;
+pub mod cron;
 pub mod download;
 pub mod exec;
 pub mod forward;

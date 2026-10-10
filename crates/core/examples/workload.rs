@@ -1,4 +1,4 @@
-//! Read-only: `cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet> <namespace> <name>`
+//! Read-only: `cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <namespace> <name>`
 //! Prints the Details tab data and where its usage history comes from.
 //! Environment values are not printed, and Secret values are never fetched.
 
@@ -21,18 +21,21 @@ async fn main() -> subduer_core::Result<()> {
     };
     let d = workload::workload_details(&client, &info.kind, namespace, name).await?;
     println!("{} {}/{}: {}", d.kind, d.namespace, d.name, d.status);
-    println!("replicas: {:?}", d.replicas);
+    println!("replicas: {:?} suspended: {:?}", d.replicas, d.suspended);
     for (k, v) in &d.info {
         println!("  {k}: {v}");
     }
     for c in &d.conditions {
         println!("  condition {} = {} ({})", c.type_, c.status, c.reason);
     }
+    for j in &d.jobs {
+        println!("  job {} {} {} manual={} started {:?} finished {:?}", j.name, j.status, j.completions, j.manual, j.started, j.finished);
+    }
     println!("cpu: {:?}\nmemory: {:?}\nmetrics: {}", d.cpu, d.memory, d.metrics_available);
     for p in &d.pods {
         println!(
-            "  pod {} {} ready {} restarts {} updated {} cpu {:?} mem {:?}",
-            p.name, p.status, p.ready, p.restarts, p.updated, p.cpu, p.memory
+            "  pod {} {} ready {} restarts {} updated {} finished {} cpu {:?} mem {:?}",
+            p.name, p.status, p.ready, p.restarts, p.updated, p.finished, p.cpu, p.memory
         );
     }
     for c in &d.containers {

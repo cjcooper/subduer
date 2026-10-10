@@ -218,6 +218,31 @@ pub async fn scale_workload(
         .map_err(|e| e.user_message())
 }
 
+/// Suspends or resumes a Job or CronJob, checked like `delete_resource`.
+#[tauri::command]
+pub async fn suspend_workload(
+    state: State<'_, AppState>,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    suspend: bool,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, if suspend { "suspended" } else { "resumed" }).await?;
+    actions::set_suspended(&client, &state.gate, &context, &kind, &namespace, &name, suspend, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Starts a Job from a CronJob now, checked like `delete_resource`. Returns the Job's name.
+#[tauri::command]
+pub async fn run_cron_job(state: State<'_, AppState>, context: String, namespace: String, name: String) -> CmdResult<String> {
+    let client = client_for_change(&state, &context, "started").await?;
+    actions::run_cron_job(&client, &state.gate, &context, &namespace, &name, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// The connected client, provided `context` (what a confirmation dialog
 /// showed) is still the connected one. `done` names the change for the error.
 async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {

@@ -474,15 +474,21 @@ pub struct PodDetails {
     pub events: Vec<EventSummary>,
 }
 
-/// Everything shown in a selected Deployment's or StatefulSet's Details tab.
+/// Everything shown in a selected Deployment's, StatefulSet's, Job's or
+/// CronJob's Details tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkloadDetails {
     pub kind: String,
     pub name: String,
     pub namespace: String,
-    /// e.g. `Available`, `Rolling out`, `Degraded`, `Paused`, `Scaled to 0`.
+    /// e.g. `Available`, `Rolling out`, `Degraded`, `Paused`, `Scaled to 0`,
+    /// `Running`, `Complete`, `Failed`, `Suspended`, `Scheduled`.
     pub status: String,
-    pub replicas: ReplicaCounts,
+    /// Deployments and StatefulSets only.
+    pub replicas: Option<ReplicaCounts>,
+    /// Jobs and CronJobs: whether `spec.suspend` is set.
+    #[serde(default)]
+    pub suspended: Option<bool>,
     /// Kind-specific facts in display order, e.g. `("Strategy", "RollingUpdate …")`.
     pub info: Vec<(String, String)>,
     pub created: Option<String>,
@@ -496,8 +502,26 @@ pub struct WorkloadDetails {
     /// The pod template's containers, init containers first. Usage is
     /// summed over the pods; requests and limits are per pod.
     pub containers: Vec<TemplateContainer>,
-    /// The workload's, its ReplicaSets' and its pods' events, newest first.
+    /// A CronJob's Jobs, newest first.
+    #[serde(default)]
+    pub jobs: Vec<JobRun>,
+    /// The workload's, its ReplicaSets' (or Jobs') and its pods' events, newest first.
     pub events: Vec<EventSummary>,
+}
+
+/// One Job of a CronJob, for its Jobs table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobRun {
+    pub name: String,
+    /// `Running`, `Complete`, `Failed`, `Suspended` or `Pending`.
+    pub status: String,
+    /// e.g. `1/1`.
+    pub completions: String,
+    /// Started by hand (Run now / `kubectl create job --from`) rather than on schedule.
+    pub manual: bool,
+    pub created: Option<String>,
+    pub started: Option<String>,
+    pub finished: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +558,9 @@ pub struct WorkloadPod {
     pub created: Option<String>,
     /// Runs the latest pod template.
     pub updated: bool,
+    /// Succeeded or failed: no longer running.
+    #[serde(default)]
+    pub finished: bool,
     pub cpu: Option<f64>,
     pub memory: Option<f64>,
 }
@@ -631,6 +658,16 @@ pub fn has_workload_logs(kind: &KindRef) -> bool {
 /// Kinds that get Restart (a new rollout of the pod template) and Scale.
 pub fn is_scalable_workload(kind: &KindRef) -> bool {
     matches!((kind.group.as_str(), kind.kind.as_str()), ("apps", "Deployment" | "StatefulSet"))
+}
+
+/// Kinds that get Suspend/Resume.
+pub fn is_batch_workload(kind: &KindRef) -> bool {
+    matches!((kind.group.as_str(), kind.kind.as_str()), ("batch", "Job" | "CronJob"))
+}
+
+/// Kinds with a Details tab built from [`WorkloadDetails`].
+pub fn has_workload_details(kind: &KindRef) -> bool {
+    is_scalable_workload(kind) || is_batch_workload(kind)
 }
 
 /// A workload's scale subresource: replicas asked for and replicas running.

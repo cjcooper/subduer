@@ -155,6 +155,8 @@ table.resources { width: 100%; border-collapse: collapse; }
 .badge-available { color: var(--ok); }
 .badge-rolling-out { background: var(--warn-bg); color: var(--warn-text); }
 .badge-degraded { background: var(--danger-soft); color: var(--danger); }
+.badge-complete, .badge-scheduled { color: var(--ok); }
+.badge-suspended { background: var(--warn-bg); color: var(--warn-text); }
 
 .warn { margin: 0 16px 8px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }
 .error-bar {

@@ -917,14 +917,20 @@ pub(crate) fn selected_is_pod(store: Store) -> bool {
     store.kind.with_untracked(|k| k.as_ref().is_some_and(|k| k.key() == "core/Pod"))
 }
 
-/// Pods, Deployments and StatefulSets get a Details tab besides YAML.
+/// Pods, Deployments, StatefulSets, Jobs and CronJobs get a Details tab besides YAML.
 fn selected_has_details(store: Store) -> bool {
-    selected_is_pod(store) || store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::is_scalable_workload))
+    selected_is_pod(store) || store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::has_workload_details))
 }
 
 /// Switches to the Pod list and selects one pod once it's listed.
 pub(crate) fn open_pod(store: Store, namespace: String, name: String) {
-    let Some(kind) = store.cluster.with_untracked(|c| c.as_ref().and_then(|c| find_kind(&c.kinds, "core/Pod"))) else {
+    open_object(store, "core/Pod", namespace, name);
+}
+
+/// Switches to the list of `kind_key` (e.g. `batch/Job`) and selects one
+/// object once it's listed.
+pub(crate) fn open_object(store: Store, kind_key: &str, namespace: String, name: String) {
+    let Some(kind) = store.cluster.with_untracked(|c| c.as_ref().and_then(|c| find_kind(&c.kinds, kind_key))) else {
         return;
     };
     store.pending_select.set(Some(format!("{namespace}/{name}")));
@@ -1091,7 +1097,11 @@ pub(crate) fn format_age(now_ms: f64, created: &str) -> String {
     if then.is_nan() {
         return String::new();
     }
-    let secs = ((now_ms - then) / 1000.0).max(0.0) as u64;
+    format_span(((now_ms - then) / 1000.0).max(0.0) as u64)
+}
+
+/// A length of time the way ages are shown: 45s, 12m, 5h, 3d, 2y.
+pub(crate) fn format_span(secs: u64) -> String {
     match secs {
         s if s < 120 => format!("{s}s"),
         s if s < 2 * 3600 => format!("{}m", s / 60),

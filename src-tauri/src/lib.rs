@@ -87,6 +87,8 @@ pub fn run() {
             commands::workload_history,
             commands::restart_workload,
             commands::scale_workload,
+            commands::suspend_workload,
+            commands::run_cron_job,
             logs::open_logs,
             logs::logs_start,
             exec::open_exec,

@@ -2,24 +2,16 @@
 
 How to pick this project back up. It covers what exists, how to run and verify it, the decisions behind it, and what's next. `README.md` is the short user-facing summary; this file is the working notes.
 
-_Last updated: 2026-10-10 (end of session)._
+_Last updated: 2026-10-10 (Jobs and CronJobs)._
 
 ## 0. Where things stand (read first)
 
-- **Nothing from this session is committed.** The user runs git. Everything since `eeab0e7` (sidebar sections) is in the working tree, along with the earlier uncommitted icon and core changes. A natural commit split, in the order things were built:
-  1. Pod usage: kubelet fallback, node ceiling, then last-hour line charts (Prometheus or local samples).
-  2. Delete, with the safety gate.
-  3. Sidebar icons, Helm group, cloud sections (AWS, Google Cloud, Azure), and `resources_by_stability` discovery.
-  4. About panel, MIT license.
-  5. Cluster page usage and history from Prometheus.
-  6. Logs windows; Shell (exec) windows with vendored xterm.js; port-forwarding.
-  7. File upload (with the folder browser) and download.
-  8. Restart and Scale for Deployments and StatefulSets.
-  9. Details tab for Deployments and StatefulSets.
-- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (29 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+- **Committed up to `22df4e7`** (workload Details tab); the user commits. Not yet committed:
+  - **Jobs and CronJobs:** a Details tab for both, Run now and Suspend/Resume on CronJobs, and Suspend/Resume on Jobs. Files: `crates/core/src/cron.rs` (new), `crates/core/src/workload.rs`, `crates/core/src/actions.rs`, the types, the commands, the `workload` and `workload_dry_run` examples, `ui/src/workload.rs`, `ui/src/workload_detail.rs`, `ui/src/app.rs`, CSS, `tools/ui-harness/batchstub.js` (new) and docs.
+- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (41 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
-- **Restart/Scale and workload Details not yet checked on UAT:** the AWS SSO token had expired. After `aws sso login --profile uat`, run `examples/workload_dry_run.rs` and `examples/workload.rs` against a UAT Deployment and StatefulSet (section 3). The harness checks passed.
+- **Checked on UAT (2026-10-10):** `workload` and `workload_dry_run` against a Deployment, a StatefulSet, two CronJobs (one with `timeZone: America/New_York`) and completed and failed Jobs. Every dry run was accepted, and the locked gate refused each real call. UAT's Prometheus has no series for the short CronJob pods, so their history falls back to local samples; Deployment and StatefulSet history come from Prometheus.
 - **Open questions for the user:**
   - Should port-forwards on prod contexts require unlocking? (Currently not gated.)
   - Should revealing secrets require unlocking?
@@ -32,7 +24,7 @@ A macOS-first desktop app for browsing and controlling Kubernetes clusters. It's
 
 - **Stack:** Rust everywhere, using a Tauri v2 shell, a `kube-rs` backend and a Leptos 0.8 UI built to WASM with Trunk. Use another language only where the OS forces it.
 - **Navigation:** by kind, with a namespace filter that persists across kinds.
-- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Shell, Upload) are behind the safety gate.
+- **Safety:** read-only by default. Mutations (Delete, Restart, Scale, Run now, Suspend/Resume, Shell, Upload) are behind the safety gate.
 
 ## 2. Getting set up
 
@@ -65,8 +57,8 @@ cargo run -p subduer-core --example pod      -- <context> <ns> <pod>     # Pod D
 cargo run -p subduer-core --example history  -- <context> <ns> <pod>     # last-hour CPU/memory; shows which Prometheus it found
 cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm release summary (no values/manifest)
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
-cargo run -p subduer-core --example workload -- <context> apps/Deployment <ns> <name>   # workload Details data + history source; no env values or secrets
-cargo run -p subduer-core --example workload_dry_run -- <context> apps/Deployment <ns> <name> [replicas]   # replicas, then dry-run restart (and scale); checks the gate refuses
+cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <ns> <name>   # Details data + history source; no env values or secrets
+cargo run -p subduer-core --example workload_dry_run -- <context> <group/Kind> <ns> <name> [replicas]   # dry-run restart/scale, or suspend/resume and (CronJob) Run now; checks the gate refuses
 ```
 
 - Use **`eg-uat-uat-v2`** for real-cluster checks. Docker Desktop's Kubernetes is usually off.
@@ -109,7 +101,8 @@ crates/core    all cluster logic, no UI deps
   watch.rs       watch -> full snapshot, throttled to 250 ms
   overview.rs    Cluster page: nodes, pods, requests/limits, usage (metrics-server → Prometheus → kubelet), last-hour history, warnings (1h)
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
-  workload.rs    Deployment/StatefulSet Details tab: status, owned pods, template containers, events
+  workload.rs    Deployment/StatefulSet/Job/CronJob Details tab: status, owned pods (and a CronJob's Jobs), template containers, events
+  cron.rs        a CronJob schedule's next run (five fields, names, steps, @shorthands, time zones), on jiff
   actions.rs     mutations; each checks SafetyGate first (delete, restart, scale)
   exec.rs        interactive shells (kubectl exec -it) over the websocket; callers check the gate
   logs.rs        container log streams: one container, or a workload's pods merged (stern-style)
@@ -125,7 +118,7 @@ ui             Leptos CSR app
   app.rs         Store (all signals), top bar, sidebar, resource table, detail panel, container icons
   overview.rs    Cluster page + Node page (shared NodeTable), refresh loop
   pod_detail.rs  Pod Details tab (collapsible sections, bullet bars, env + secret reveal, events)
-  workload_detail.rs  Deployment/StatefulSet Details tab, reusing pod_detail's sections, charts, env and events
+  workload_detail.rs  Deployment/StatefulSet/Job/CronJob Details tab, reusing pod_detail's sections, charts, env and events
   columns.rs     resizable columns (localStorage)
   prefs.rs       localStorage helpers (sidebar section order)
   tauri.rs       invoke/listen bindings to window.__TAURI__
@@ -143,10 +136,11 @@ ui             Leptos CSR app
 | `cluster_overview` | Cluster page and Node page data |
 | `pod_details` | Pod Details tab data |
 | `pod_history` | Last hour of pod and container CPU/memory, polled every 15 s |
-| `workload_details` / `workload_history` | Deployment/StatefulSet Details tab, and its last hour summed over its pods |
+| `workload_details` / `workload_history` | Deployment/StatefulSet/Job/CronJob Details tab, and its last hour summed over its pods |
 | `delete_resource` | Deletes one object; needs the context unlocked and still connected |
 | `get_replicas` | Desired and current replicas (scale subresource), for the Scale dialog |
 | `restart_workload` / `scale_workload` | Rollout restart, set replicas; checked like `delete_resource` |
+| `suspend_workload` / `run_cron_job` | Set a Job's or CronJob's `spec.suspend`; start a Job from a CronJob now (returns its name); checked like `delete_resource` |
 | `open_logs` | Opens (or focuses) a logs window bound to the current cluster |
 | `logs_start` | Called by a logs window: (re)starts its stream, events on the window's own name |
 | `open_exec` | Opens a shell window (needs the context unlocked) |
@@ -186,8 +180,18 @@ ui             Leptos CSR app
   - **Pods:** the pods the workload controls (via its ReplicaSets for a Deployment), sorted by StatefulSet ordinal. Container icons, status, restarts, live CPU and memory, and age. Pods on the previous template get an "old" chip during a rollout. Clicking a row switches to the Pod list and selects that pod (`open_pod` with `pending_select`, applied when the Pod table arrives).
   - **One section per template container:** charts summed over the pods with per-pod limits scaled by pod count (none for init containers that run to completion), then image, per-pod request and limit, ports and environment (shared `EnvTable`, so secret reveal works the same).
   - **Events:** the workload's, its ReplicaSets' and its current pods' events, each labelled with its object. Events of pods already replaced are dropped.
+- **Job/CronJob Details tab** (same files): the same layout, built from the same `WorkloadDetails`. `replicas` is `None`, `suspended` is set, and for CronJobs so is `jobs`.
+  - **Job:** status Complete, Failed, Suspended, Running or Pending, from its conditions (`SuccessCriteriaMet` and `FailureTarget` count too). Rows include completions, active pods, failed pods against the retry limit, parallelism, indexed progress, started, finished, duration, active deadline and clean-up TTL. A failed Job has no `completionTime`, so its finish time is when the Failed condition was set. Failed, FailureTarget and ReplicaFailure conditions show red when True.
+  - **CronJob:** status Suspended, Running or Scheduled. Rows include:
+    - Schedule and time zone.
+    - Next run (`cron::next_run`). Without a `timeZone` it assumes UTC, the usual controller default.
+    - Last scheduled and last successful.
+    - Concurrency policy, starting deadline and history limits.
+  - **CronJob Jobs table:** its Jobs, newest first, with status, completions, duration and age. Run now Jobs get a "manual" chip. Clicking a Job opens it in the Job list (`open_object`).
+  - **Pods:** a Job's pods, or all pods of a CronJob's Jobs (selector `job-name in (…)`), newest first, finished ones included. Resources totals cover running pods; with none running, the template's per-pod request and limit are shown instead.
+  - Time rows (Started, Finished, Next run and so on) show "5m ago" or "in 4h" next to the timestamp.
 - **Pod containers** get action buttons: Forward (needs declared ports), Upload, Download, Shell (Upload and Shell are gated, and all four need the container running), and Logs.
-- **Workloads** (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, ReplicationController) get merged Logs; Deployments and StatefulSets also get Restart and Scale (gated). Services get Forward. Every kind with the `delete` verb gets Delete (gated).
+- **Workloads** (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, ReplicationController) get merged Logs. Deployments and StatefulSets also get Restart and Scale, CronJobs get Run now, and Jobs and CronJobs get Suspend/Resume (all gated). Services get Forward. Every kind with the `delete` verb gets Delete (gated).
 - **Separate windows** for logs and shells, listed under the Window menu. **Port Forwards** page at the top of the sidebar.
 - **App icon:** `src-tauri/icons/make_icon.py` generates `icon.svg`, a 7-spoke helm inside a control dial. Regeneration steps are in the script's header.
 
@@ -212,7 +216,16 @@ ui             Leptos CSR app
   - Scale patches the `scale` subresource, like `kubectl scale`. The dialog reads the live counts (`get_replicas`) and defaults to the desired one; Scale is disabled until the number changes. It warns when scaling to 0, and when scaling a StatefulSet down (highest ordinals go, PVCs stay).
   - Production-like contexts need the name typed, as with Delete. Commands re-check that the dialog's context is still connected (`client_for_change`, shared with delete).
   - DaemonSet restart and ReplicaSet/CRD scaling would be small additions but weren't asked for. No HPA awareness: an HPA will undo a manual scale.
-  - Checked in the headless harness (`workloadstub.js`) only; not yet dry-run on UAT.
+  - Checked in the headless harness (`workloadstub.js`) and by server-side dry run on UAT.
+- **Run now and Suspend/Resume** (`actions::run_cron_job`/`set_suspended`, same dialog):
+  - **Run now** works like `kubectl create job --from=cronjob/<name>`:
+    - The Job copies the job template's labels and annotations and adds `cronjob.kubernetes.io/instantiate: manual`.
+    - A controller owner reference to the CronJob puts it among its Jobs, so it counts for the concurrency policy.
+    - Its name is `<cronjob>-manual-<5 base-36 characters from the time>`, kept within 63 characters.
+    - It needs `create` on `batch/Job`.
+    - The dialog warns that Forbid skips scheduled runs while it runs, and that Replace may replace it.
+  - **Suspend/Resume** merge-patches `spec.suspend` and needs `patch`. The button shows Suspend or Resume based on the loaded details, so it appears only once they've loaded. It's hidden for Complete or Failed Jobs.
+  - After any of these dialogs succeeds, the Details tab refreshes.
 - **Helm** (`helm.rs`):
   - Releases are a virtual kind, `helm.sh/Release`, listed only if any `owner=helm` Secret exists. Verbs are list/watch/get, so there's no Delete: deleting the Secret isn't `helm uninstall`.
   - The list is a metadata-only watch, one row per release at its latest revision.
@@ -272,7 +285,7 @@ ui             Leptos CSR app
   - Output streams to `<name>.part` in Downloads and is renamed on success (removed on failure), so it's never held in memory. `unique_path` picks `name (1).ext` like browsers do and sanitises the name.
   - "Show in Finder" runs `open -R`, restricted to the Downloads folder.
   - Tested on UAT with `examples/download_check.rs` (read-only): `/etc/os-release` and `/bin/sh` (130 KB) matched `wc -c`, a repeat was numbered, and `/etc` and a missing path gave clear errors. Multi-MB files weren't checked end to end.
-- **Workload history** (`HistoryStore::workload_history`): Prometheus queries match pods by name pattern (`<deploy>-<hash>-<5>` or `<sts>-<ordinal>`), so pods replaced during the hour still count; queries are `sum by (container) (max by (pod, container) …)`. Without Prometheus it records summed samples of the current pods, keyed by kind, namespace and name.
+- **Workload history** (`HistoryStore::workload_history`): Prometheus queries match pods by name pattern (`<deploy>-<hash>-<5>`, `<sts>-<ordinal>`, `<job>[-<index>]-<5>`, or `<cronjob>-<minute>|manual-<x>[-<index>]-<5>`), so pods replaced during the hour still count; queries are `sum by (container) (max by (pod, container) …)`. Without Prometheus it records summed samples of the current pods, keyed by kind, namespace and name.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
 - **Cloud sections** (`Category::cloud_for_group`):
@@ -292,7 +305,7 @@ ui             Leptos CSR app
 These are the v1 actions the user asked for at the start. All must go through the safety gate and be tested on docker-desktop or UAT, never prod:
 
 1. ~~**Delete**~~ done: detail-panel button for any kind with the `delete` verb (see section 6).
-2. ~~**Scale / restart.**~~ done for Deployments and StatefulSets (see section 6); still needs the UAT dry run.
+2. ~~**Scale / restart.**~~ done for Deployments and StatefulSets, plus Run now and Suspend/Resume for CronJobs and Jobs (see section 6).
 3. **Edit YAML and apply,** using CodeMirror in the webview with a diff before applying and server-side apply.
 4. ~~**Logs / exec / port-forward**~~ done.
 
@@ -305,9 +318,10 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
-- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
+- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
 - Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
 - Port-forward from workloads (pick a pod), and optional gating for prod.
+- Jobs and CronJobs: merged Logs for a CronJob (its latest Job's pods), and Rerun for finished Jobs (a copy without the generated selector and labels).
 - Upload/download of folders (tar), and a progress indicator for big files.
 - Clean up unused icons that `cargo tauri icon` generated (`android/`, `ios/`, `Square*.png`, `StoreLogo.png`, `icon.ico`). The user hadn't approved deleting them.
 - `response.json` at the repo root (`{"status":"success"}`) has an unknown origin and wasn't created during this work.

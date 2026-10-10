@@ -36,11 +36,13 @@ cargo run -p subduer-core --example smoke -- <context>   # read-only CLI check
 - **Pod containers.** The Init and Ready columns show one icon per init container and app container respectively: ✓ running, ◐ starting, ■ stopped, ✕ failed. Hover for details.
 - **Pod details.** Selecting a pod opens a Details tab (YAML is still one click away), refreshed every 15 s. It shows pod resources (used, requested and limit), pod info, and each container with its resources, state, ports and environment, then events. Every section collapses. Secret-backed variables stay masked until you click Show, which fetches that one value.
 - **Deployment and StatefulSet details.** The same layout for workloads: usage summed over their pods (last hour), status, replicas, rollout strategy and conditions, a pods table (click a pod to open it), each template container with its per-pod resources and environment, and the events of the workload, its ReplicaSets and its pods.
+- **Job and CronJob details.** The same layout again. Jobs show completions, failures against the retry limit, start, finish and duration. CronJobs show the schedule and time zone, the next run, the last scheduled and last successful runs, and a table of their Jobs (click one to open it).
 - **Container actions.** Logs (also merged across a workload's pods) and Shell open in their own windows, listed under the Window menu. Port-forward pods and Services (Port Forwards page). Upload files into, and download files out of, containers, with a folder browser that shows writable locations.
 - **Delete** any object whose kind allows it, after a confirmation that names the context.
 - **Restart** (rollout restart) and **Scale** Deployments and StatefulSets, after the same kind of confirmation.
+- **Run now** a CronJob (like `kubectl create job --from=cronjob/…`), and **Suspend/Resume** CronJobs and Jobs, after the same kind of confirmation.
 - **Live tables.** Each table is backed by a Kubernetes watch, with snapshots throttled to 250 ms.
-- **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name. All mutations go through `SafetyGate::ensure_writable`: Delete, Restart, Scale, Shell and Upload ask to unlock first.
+- **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name. All mutations go through `SafetyGate::ensure_writable`: Delete, Restart, Scale, Run now, Suspend/Resume, Shell and Upload ask to unlock first.
 
 ## License
 
