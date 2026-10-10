@@ -1,4 +1,4 @@
-//! The Details tab for the Config section's kinds, built from the generic
+//! The Details tab for the Config and Network sections' kinds, built from the generic
 //! `ObjectDetails`: the kind's own rows, then its sections and tables, then
 //! events. ConfigMaps and Secrets also get a Data section that can be edited
 //! and saved; Secret values stay masked until Show, or until editing starts.
@@ -153,12 +153,40 @@ fn InfoRowView(store: Store, r: InfoRow) -> impl IntoView {
     let value = if r.time && !js_sys::Date::parse(&r.value).is_nan() {
         let v = r.value.clone();
         view! { <span>{move || format!("{} · {v}", relative(store.now.get(), &v))}</span> }.into_any()
+    } else if let Some(url) = r.url.clone() {
+        view! { <OpenUrl store=store url=url /> }.into_any()
     } else if let Some(link) = r.link.clone() {
         view! { <Link store=store link=link text=r.value.clone() /> }.into_any()
     } else {
         view! { <span>{r.value.clone()}</span> }.into_any()
     };
     view! { <dt>{r.key.clone()}</dt><dd class:mono=r.mono>{value}</dd> }
+}
+
+/// An address with a button that opens it in the browser.
+#[component]
+fn OpenUrl(store: Store, url: String) -> impl IntoView {
+    #[derive(Serialize)]
+    struct Args {
+        url: String,
+    }
+    let open = {
+        let url = url.clone();
+        move |_| {
+            let args = Args { url: url.clone() };
+            spawn_local(async move {
+                if let Err(e) = invoke::<_, ()>("open_url", &args).await {
+                    store.error.set(Some(e));
+                }
+            });
+        }
+    };
+    view! {
+        <span class="url-row">
+            <span class="mono">{url.clone()}</span>
+            <button class="btn small" title="Open in your browser" on:click=open>"Open"</button>
+        </span>
+    }
 }
 
 /// Opens another object in its own list.

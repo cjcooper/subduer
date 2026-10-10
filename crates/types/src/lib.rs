@@ -554,11 +554,14 @@ pub struct InfoRow {
     pub time: bool,
     #[serde(default)]
     pub link: Option<ObjectLink>,
+    /// An http(s) address the row offers to open in the browser.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl InfoRow {
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { key: key.into(), value: value.into(), mono: false, time: false, link: None }
+        Self { key: key.into(), value: value.into(), mono: false, time: false, link: None, url: None }
     }
     pub fn mono(mut self) -> Self {
         self.mono = true;
@@ -570,6 +573,10 @@ impl InfoRow {
     }
     pub fn link(mut self, link: ObjectLink) -> Self {
         self.link = Some(link);
+        self
+    }
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
         self
     }
 }
@@ -652,7 +659,7 @@ pub struct DataChange {
 /// A Secret's values for editing; `None` for binary values.
 pub type SecretValues = Vec<(String, Option<String>)>;
 
-/// Config-section kinds with an [`ObjectDetails`] Details tab.
+/// Config- and Network-section kinds with an [`ObjectDetails`] Details tab.
 pub fn has_object_details(kind: &KindRef) -> bool {
     matches!(
         kind.key().as_str(),
@@ -669,6 +676,12 @@ pub fn has_object_details(kind: &KindRef) -> bool {
             | "admissionregistration.k8s.io/ValidatingWebhookConfiguration"
             | "admissionregistration.k8s.io/ValidatingAdmissionPolicy"
             | "admissionregistration.k8s.io/ValidatingAdmissionPolicyBinding"
+            | "core/Service"
+            | "networking.k8s.io/Ingress"
+            | "networking.k8s.io/IngressClass"
+            | "networking.k8s.io/NetworkPolicy"
+            | "discovery.k8s.io/EndpointSlice"
+            | "core/Endpoints"
     )
 }
 

@@ -9,10 +9,13 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
 - **Committed up to `22df4e7`** (workload Details tab); the user commits. Not yet committed:
   - **Jobs and CronJobs:** a Details tab for both, Run now and Suspend/Resume on CronJobs, and Suspend/Resume on Jobs. Files: `crates/core/src/cron.rs` (new), `crates/core/src/workload.rs`, `crates/core/src/actions.rs`, the types, the commands, the `workload` and `workload_dry_run` examples, `ui/src/workload.rs`, `ui/src/workload_detail.rs`, `ui/src/app.rs`, CSS, `tools/ui-harness/batchstub.js` (new) and docs.
   - **Config section:** Details tabs for all 13 Config kinds; editable ConfigMap and Secret data with Save; Edit range on HPAs. Files: `crates/core/src/config.rs` (new), `actions.rs` (`save_data`, `set_hpa_range`), `pod_details.rs` (`secret_values`), the types, the commands, `examples/config.rs` and `examples/config_dry_run.rs` (new), `ui/src/object_detail.rs` (new), `ui/src/workload.rs` (Save and Edit range in the shared dialog), `ui/src/app.rs`, `ui/src/pod_detail.rs`, CSS, `tools/ui-harness/configstub.js` (new) and docs.
-- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (49 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+  - **Unsaved-edit guard:** `app::guard`, the discard prompt, `set_unsaved`/`close_discarding` and the window close and Cmd+Q hold in `src-tauri/src/lib.rs`.
+  - **Network section:** Details tabs for Service, Ingress, IngressClass, NetworkPolicy, EndpointSlice and Endpoints; Open buttons for Ingress URLs. Files: `crates/core/src/network.rs` (new), `config.rs` (dispatch), the types (`InfoRow.url`, `has_object_details`), `open_url` in the commands (`forward::open_in_browser` shared), `ui/src/object_detail.rs`, CSS, `tools/ui-harness/networkstub.js` (new) and docs.
+- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (53 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): the unsaved-edits hold on window close and Cmd+Q, logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
 - **Checked on UAT (2026-10-10):** `workload` and `workload_dry_run` against a Deployment, a StatefulSet, two CronJobs (one with `timeZone: America/New_York`) and completed and failed Jobs. Every dry run was accepted, and the locked gate refused each real call. UAT's Prometheus has no series for the short CronJob pods, so their history falls back to local samples; Deployment and StatefulSet history come from Prometheus.
+- **Network section checked on UAT (2026-10-10):** `config` read a NodePort Service, a headless Service, an EndpointSlice, Endpoints and the `alb` IngressClass; endpoints, links and statuses matched `kubectl`. UAT has no Ingresses or NetworkPolicies, so those are covered by unit tests and the harness only.
 - **Config section checked on UAT (2026-10-10):** `config` read an HPA (KEDA-owned, external metric), the coredns PDB, a Helm-managed ConfigMap, a Secret (sizes only), a webhook configuration, a Lease and a PriorityClass. `config_dry_run` was accepted for a ConfigMap save, a Secret save and an HPA range. A save from a stale resourceVersion was refused with the "changed by someone else" message, and the locked gate refused the real calls. Nothing was written. The dry-run key was not persisted.
 - **Open questions for the user:**
   - Should port-forwards on prod contexts require unlocking? (Currently not gated.)
@@ -61,7 +64,7 @@ cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm 
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
 cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <ns> <name>   # Details data + history source; no env values or secrets
 cargo run -p subduer-core --example workload_dry_run -- <context> <group/Kind> <ns> <name> [replicas]   # dry-run restart/scale, or suspend/resume and (CronJob) Run now; checks the gate refuses
-cargo run -p subduer-core --example config -- <context> <group/Kind> <ns|-> <name>   # Config-section Details data; ConfigMap values by size only, Secret values never fetched
+cargo run -p subduer-core --example config -- <context> <group/Kind> <ns|-> <name>   # Config- and Network-section Details data; ConfigMap values by size only, Secret values never fetched
 cargo run -p subduer-core --example config_dry_run -- <context> <core/ConfigMap|core/Secret|autoscaling/HorizontalPodAutoscaler> <ns> <name>   # dry-run save (adds key subduer-dry-run) or HPA range; checks stale versions and the gate
 ```
 
@@ -107,6 +110,7 @@ crates/core    all cluster logic, no UI deps
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   workload.rs    Deployment/StatefulSet/Job/CronJob Details tab: status, owned pods (and a CronJob's Jobs), template containers, events
   config.rs      Config-section Details tabs: one generic ObjectDetails (info rows, sections, tables) per kind, read as JSON at the served version; ConfigMap/Secret data and the pods using them
+  network.rs     Network-section Details tabs on config's shape: Service endpoints and routes, Ingress backend health/TLS/URLs, NetworkPolicy in words
   cron.rs        a CronJob schedule's next run (five fields, names, steps, @shorthands, time zones), on jiff
   actions.rs     mutations; each checks SafetyGate first (delete, restart, scale)
   exec.rs        interactive shells (kubectl exec -it) over the websocket; callers check the gate
@@ -145,7 +149,8 @@ ui             Leptos CSR app
 | `delete_resource` | Deletes one object; needs the context unlocked and still connected |
 | `get_replicas` | Desired and current replicas (scale subresource), for the Scale dialog |
 | `restart_workload` / `scale_workload` | Rollout restart, set replicas; checked like `delete_resource` |
-| `object_details` | Details tab of a Config-section kind |
+| `object_details` | Details tab of a Config- or Network-section kind |
+| `open_url` | Opens an http(s) address (Ingress URLs) in the browser; anything else is refused |
 | `secret_values` | Every value of a Secret, when editing starts (logged without values) |
 | `save_config_data` / `set_hpa_range` | Save edited ConfigMap/Secret data (with its resourceVersion); set an HPA's min/max; checked like `delete_resource` |
 | `suspend_workload` / `run_cron_job` | Set a Job's or CronJob's `spec.suspend`; start a Job from a CronJob now (returns its name); checked like `delete_resource` |
@@ -236,6 +241,13 @@ ui             Leptos CSR app
   - **PriorityClass, RuntimeClass, Lease:** their fields; a Lease is Held, Expired (renew time plus duration has passed) or Free.
   - **Webhook configurations:** a section per webhook: what it calls (a service link or URL), failure policy in plain words, timeout, side effects, match policy, reinvocation, selectors, match conditions, and a rules table.
   - **ValidatingAdmissionPolicy:** failure policy, params, selectors; Applies to, Excludes, Validations, Variables, Match conditions, Audit annotations and Type warnings tables; Bindings (links), flagged "not enforced" when none. **Binding:** policy link, actions, param ref, narrowing rules.
+- **Network section Details** (`crates/core/src/network.rs`, rendered by `object_detail.rs`):
+  - **Service:** type, cluster IP (headless explained), load balancer address (status Pending address until one appears), external IPs, selector (or "none: endpoints managed by hand"), session affinity, external/internal traffic policy, IP families. Ports table. Endpoints from its EndpointSlices (`kubernetes.io/service-name`), deduplicated across IPv4/IPv6 slices, with pod links; status Ready, Partly ready, No ready endpoints or No endpoints. Routed from: Ingress rules and default backends that point at it. Forward stays in the header.
+  - **Ingress:** class (link), load balancer address, default backend. Rules table with each backend's ready endpoints, or "no such service" (warn rows); status Backend missing, Backend not ready, No address or Ready. TLS table with secret links, marked "(missing)" when the Secret doesn't exist (checked with a metadata-only list: no Secret data is read). **URLs** with Open buttons: https for TLS hosts, http otherwise; wildcard hosts use the load balancer address; regex paths are skipped.
+  - **IngressClass:** controller, default class, parameters; the Ingresses using it across namespaces (including class-less ones when it's the default).
+  - **NetworkPolicy:** what it applies to; Incoming and Outgoing in words (not restricted, only the rules below, or all blocked), following the `policyTypes` defaulting rules; rule tables with peers in words ("pods app=web in this namespace", "addresses 10.0.0.0/8 except …") and ports (with `endPort` ranges); the pods it currently selects. Status Denies all, Denies incoming, Denies outgoing or Allows listed.
+  - **EndpointSlice / Endpoints:** service link, address type, ports, and each endpoint's state (ready, serving, terminating, not ready), target pod, node and zone. Endpoints notes it's deprecated.
+  - **Open URL** (`open_url`): only `http://`/`https://` addresses without whitespace or control characters, passed to `open` as one argument.
 - **ConfigMap/Secret editing** (`DataSection` in `object_detail.rs`, `actions::save_data`):
   - **Edit** turns each key into a key field and a value textarea; keys can be added, renamed and removed. Binary values can only be kept or removed. Keys are checked as you type (letters, digits, `-`, `_`, `.`; no duplicates).
   - Secret values appear only after **Show** on one key, or **Edit (shows values)**, which fetches them all (`secret_values`). The draft lives only in the component: Cancel, Save, or a new selection drops it.
@@ -348,9 +360,10 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
-- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
+- The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
 - Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
 - Port-forward from workloads (pick a pod), and optional gating for prod.
+- Network follow-ups: Gateway API kinds (HTTPRoute, Gateway) when installed; port-forward from an Ingress backend.
 - Config follow-ups: TLS Secrets could show the certificate's subject and expiry (needs an X.509 parser); "restart the workloads using it" after a save; a PriorityClass's pod count.
 - Jobs and CronJobs: merged Logs for a CronJob (its latest Job's pods), and Rerun for finished Jobs (a copy without the generated selector and labels).
 - Upload/download of folders (tar), and a progress indicator for big files.

@@ -12,6 +12,7 @@ pub mod forward;
 pub mod helm;
 pub mod history;
 pub mod logs;
+pub mod network;
 pub mod overview;
 pub mod pod_details;
 pub mod quantity;

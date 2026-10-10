@@ -40,7 +40,7 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
         "admissionregistration.k8s.io/ValidatingAdmissionPolicy" => {
             d.sections.push(policy_bindings(client, kind, name).await?);
         }
-        _ => {}
+        key => crate::network::related(client, key, ns, name, &v, &mut d).await?,
     }
     if let Some(ns) = namespace {
         let fields = format!("involvedObject.kind={},involvedObject.name={name}", kind.kind);
@@ -50,7 +50,7 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
 }
 
 /// Everything that comes from the object itself.
-fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDetails {
+pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDetails {
     let meta = &v["metadata"];
     let pairs = |m: &Value| -> Vec<(String, String)> {
         m.as_object()
@@ -90,7 +90,7 @@ fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDetails {
         "admissionregistration.k8s.io/ValidatingWebhookConfiguration" => webhooks(&mut d, v, false),
         "admissionregistration.k8s.io/ValidatingAdmissionPolicy" => policy(&mut d, v),
         "admissionregistration.k8s.io/ValidatingAdmissionPolicyBinding" => binding(&mut d, v),
-        _ => {}
+        key => crate::network::describe(key, &mut d, v),
     }
     // Owner rows last, like workloads.
     if let Some(owner) = v["metadata"]["ownerReferences"]
@@ -947,7 +947,7 @@ fn rules_table(rules: &[Value]) -> InfoTable {
     }
 }
 
-fn table_section(id: &str, title: &str, table: InfoTable, empty: &str) -> InfoSection {
+pub(crate) fn table_section(id: &str, title: &str, table: InfoTable, empty: &str) -> InfoSection {
     InfoSection {
         id: id.into(),
         title: title.into(),
@@ -961,7 +961,7 @@ fn table_section(id: &str, title: &str, table: InfoTable, empty: &str) -> InfoSe
 // ---- helpers ----
 
 /// A string, number or bool at `key`, as text.
-fn str_at(v: &Value, key: &str) -> Option<String> {
+pub(crate) fn str_at(v: &Value, key: &str) -> Option<String> {
     match &v[key] {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -970,12 +970,12 @@ fn str_at(v: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn int_at(v: &Value, key: &str) -> Option<i64> {
+pub(crate) fn int_at(v: &Value, key: &str) -> Option<i64> {
     v[key].as_i64()
 }
 
 /// kubectl selector syntax, or `None` for a missing or empty selector.
-fn label_selector(v: &Value) -> Option<String> {
+pub(crate) fn label_selector(v: &Value) -> Option<String> {
     let selector: LabelSelector = serde_json::from_value(v.clone()).ok()?;
     Some(selector_string(&selector)).filter(|s| !s.is_empty())
 }
@@ -993,7 +993,7 @@ fn size_text(bytes: usize) -> String {
     }
 }
 
-fn plural(n: usize, one: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
 }
 

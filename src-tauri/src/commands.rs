@@ -315,6 +315,19 @@ pub async fn set_hpa_range(
         .map_err(|e| e.user_message())
 }
 
+/// Opens an Ingress URL in the browser. Only plain http(s) addresses are
+/// accepted.
+#[tauri::command]
+pub fn open_url(url: String) -> CmdResult<()> {
+    let ok = (url.starts_with("http://") || url.starts_with("https://"))
+        && url.len() < 2048
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    if !ok {
+        return Err(format!("not an http(s) address: {url:?}"));
+    }
+    crate::forward::open_in_browser(&url)
+}
+
 /// The UI reports whether it holds unsaved edits, so closing the window or
 /// quitting can ask first.
 #[tauri::command]

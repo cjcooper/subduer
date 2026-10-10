@@ -123,6 +123,7 @@ pub fn run() {
             upload::reveal_download,
             commands::secret_value,
             commands::set_unsaved,
+            commands::open_url,
             commands::close_discarding,
         ])
         .build(tauri::generate_context!())

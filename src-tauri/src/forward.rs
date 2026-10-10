@@ -109,7 +109,13 @@ pub fn stop_forward(app: AppHandle, state: State<'_, AppState>, id: u64) {
 #[tauri::command]
 pub fn open_forward(state: State<'_, AppState>, id: u64) -> Result<(), String> {
     let port = state.forwards.forwards.lock().unwrap().get(&id).map(|f| f.local_port).ok_or("no such forward")?;
-    let url = format!("http://127.0.0.1:{port}/");
+    open_in_browser(&format!("http://127.0.0.1:{port}/"))
+}
+
+/// Opens an http(s) address in the default browser, passed as a single
+/// argument (no shell).
+pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
+    let url = url.to_owned();
     let opener = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(target_os = "windows") {
