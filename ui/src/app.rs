@@ -4,7 +4,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{Category, ClusterInfo, ClusterOverview, PodDetails, PodHistory, Column, ColumnKind, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
+use subduer_types::{Category, ClusterInfo, ClusterOverview, ForwardInfo, PodDetails, PodHistory, Column, ColumnKind, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
 
 use subduer_types::containers::{self, State};
 
@@ -53,8 +53,15 @@ pub(crate) struct Store {
     pub(crate) delete_prompt: RwSignal<Option<crate::delete::DeleteTarget>>,
     /// Delete to confirm once the unlock prompt succeeds.
     pub(crate) pending_delete: RwSignal<Option<crate::delete::DeleteTarget>>,
+    /// Shell to open once the unlock prompt succeeds: (context, target).
+    pub(crate) pending_exec: RwSignal<Option<(String, subduer_types::ExecTarget)>>,
     /// Showing the Cluster page instead of a kind's table.
     pub(crate) overview_open: RwSignal<bool>,
+    /// Showing the Port Forwards page.
+    pub(crate) forwards_open: RwSignal<bool>,
+    /// Running port-forwards, kept current by backend events.
+    pub(crate) forwards: RwSignal<Vec<ForwardInfo>>,
+    pub(crate) forward_prompt: RwSignal<Option<crate::forward::ForwardPrompt>>,
     pub(crate) overview: RwSignal<Option<ClusterOverview>>,
     pub(crate) overview_error: RwSignal<Option<String>>,
     pub(crate) overview_loading: RwSignal<bool>,
@@ -99,7 +106,11 @@ impl Store {
             unlock_prompt: RwSignal::new(None),
             delete_prompt: RwSignal::new(None),
             pending_delete: RwSignal::new(None),
+            pending_exec: RwSignal::new(None),
             overview_open: RwSignal::new(true),
+            forwards_open: RwSignal::new(false),
+            forwards: RwSignal::new(vec![]),
+            forward_prompt: RwSignal::new(None),
             overview: RwSignal::new(None),
             overview_error: RwSignal::new(None),
             overview_loading: RwSignal::new(false),
@@ -198,6 +209,8 @@ pub fn App() -> impl IntoView {
             }
         })
         .await;
+        listen::<Vec<ForwardInfo>>(subduer_types::forward_events::CHANGED, move |list| store.forwards.set(list)).await;
+        crate::forward::load(store);
         store.refresh_contexts().await;
         if let Some(ctx) = store.context.get_untracked() {
             store.connect(ctx).await;
@@ -255,7 +268,9 @@ pub fn App() -> impl IntoView {
             <div class="body">
                 <Sidebar store=store />
                 <main class="main">
-                    {move || if store.overview_open.get() {
+                    {move || if store.forwards_open.get() {
+                        view! { <crate::forward::ForwardsPage store=store /> }.into_any()
+                    } else if store.overview_open.get() {
                         view! { <crate::overview::Overview store=store /> }.into_any()
                     } else {
                         view! { <ResourceView store=store /> }.into_any()
@@ -265,6 +280,7 @@ pub fn App() -> impl IntoView {
             </div>
             <UnlockDialog store=store />
             <crate::delete::DeleteDialog store=store />
+            <crate::forward::ForwardDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
@@ -378,6 +394,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 typed.set(String::new());
                 store.unlock_prompt.set(None);
                 store.pending_delete.set(None);
+                store.pending_exec.set(None);
             };
             let confirm = {
                 let name = name.clone();
@@ -395,6 +412,12 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                             store.delete_prompt.set(Some(target));
                         }
                         store.pending_delete.set(None);
+                        if let Some((context, target)) = store.pending_exec.get_untracked()
+                            && context == name
+                        {
+                            crate::exec::open(store, target);
+                        }
+                        store.pending_exec.set(None);
                     });
                 }
             };
@@ -463,9 +486,30 @@ fn Sidebar(store: Store) -> impl IntoView {
                     <Show when=move || kind_matches_text("Cluster", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
-                            class:active=move || store.overview_open.get()
-                            on:click=move |_| store.overview_open.set(true)
+                            class:active=move || store.overview_open.get() && !store.forwards_open.get()
+                            on:click=move |_| {
+                                store.forwards_open.set(false);
+                                store.overview_open.set(true);
+                            }
                         ><crate::icons::ClusterIcon /><span class="kind-label">"Cluster"</span></button>
+                    </Show>
+                    <Show when=move || kind_matches_text("Port Forwards", &store.kind_filter.get().to_lowercase())>
+                        <button
+                            class="kind"
+                            class:active=move || store.forwards_open.get()
+                            title="Running port-forwards"
+                            on:click=move |_| {
+                                store.selected.set(None);
+                                store.forwards_open.set(true);
+                            }
+                        >
+                            <crate::icons::ForwardIcon />
+                            <span class="kind-label">"Port Forwards"</span>
+                            {move || {
+                                let n = store.forwards.with(Vec::len);
+                                (n > 0).then(|| view! { <span class="count">{n}</span> })
+                            }}
+                        </button>
                     </Show>
                     {move || kind_list(store, Category::TopLevel, in_category(Category::TopLevel))}
                 </div>
@@ -583,7 +627,9 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                     }
                 });
             let key = k.key();
-            let active = move || !store.overview_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key);
+            let active = move || {
+                !store.overview_open.get() && !store.forwards_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key)
+            };
             let label = k.kind.clone();
             let title = format!("{} ({})", k.plural, k.api_version());
             let icon = view! {
@@ -597,6 +643,7 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                     title=title
                     on:click=move |_| {
                         store.overview_open.set(false);
+                        store.forwards_open.set(false);
                         store.kind.set(Some(k.clone()));
                     }
                 >{icon}<span class="kind-label">{label}</span></button>
@@ -866,6 +913,44 @@ fn load_yaml(store: Store) {
     });
 }
 
+/// Starts a port-forward to a Service; hidden for other kinds.
+#[component]
+fn ServiceForwardButton(store: Store, row: ResourceRow) -> impl IntoView {
+    move || {
+        store.kind.get().filter(|k| k.key() == "core/Service")?;
+        let namespace = row.namespace.clone()?;
+        let source = subduer_types::ForwardSource::Service { service: row.name.clone() };
+        Some(view! {
+            <button
+                class="btn small"
+                title="Forward a local port to this service"
+                on:click=move |_| crate::forward::request(store, namespace.clone(), source.clone())
+            >"Forward"</button>
+        })
+    }
+}
+
+/// Opens merged logs for a workload's pods; hidden for other kinds.
+#[component]
+fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
+    move || {
+        let kind = store.kind.get().filter(subduer_types::has_workload_logs)?;
+        let namespace = row.namespace.clone()?;
+        let title = format!("Open logs from every pod of {} {} in a new window", kind.kind, row.name);
+        let target = subduer_types::LogTarget {
+            namespace,
+            source: subduer_types::LogSource::Workload { kind, name: row.name.clone() },
+        };
+        Some(view! {
+            <button
+                class="btn small"
+                title=title
+                on:click=move |_| crate::logs::open(target.clone(), move |e| store.error.set(Some(e)))
+            >"Logs"</button>
+        })
+    }
+}
+
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
     let close = move |_| {
@@ -889,6 +974,8 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <div class="muted">{row.namespace.clone().unwrap_or_default()}</div>
                         </div>
                         <div class="detail-actions">
+                            <ServiceForwardButton store=store row=row.clone() />
+                            <WorkloadLogsButton store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
                             <button class="close" title="Close" on:click=close>"×"</button>
                         </div>

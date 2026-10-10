@@ -86,6 +86,9 @@ crates/core    all cluster logic, no UI deps
   overview.rs    Cluster page: nodes, pods, requests/limits, usage (metrics-server → Prometheus → kubelet), last-hour history, warnings (1h)
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   actions.rs     mutations; each checks SafetyGate first (delete so far)
+  exec.rs        interactive shells (kubectl exec -it) over the websocket; callers check the gate
+  logs.rs        container log streams: one container, or a workload's pods merged (stern-style)
+  forward.rs     port-forwarding: 127.0.0.1 listener, one portforward stream per connection; services resolve to a ready pod
   helm.rs        Helm releases as a virtual kind (helm.sh/Release) from owner=helm Secrets
   usage.rs       kubelet /stats/summary helpers (per pod, per node totals)
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
@@ -113,6 +116,11 @@ ui             Leptos CSR app
 | `pod_details` | Pod Details tab data |
 | `pod_history` | Last hour of pod and container CPU/memory, polled every 15 s |
 | `delete_resource` | Deletes one object; needs the context unlocked and still connected |
+| `open_logs` | Opens (or focuses) a logs window bound to the current cluster |
+| `logs_start` | Called by a logs window: (re)starts its stream, events on the window's own name |
+| `open_exec` | Opens a shell window (needs the context unlocked) |
+| `exec_start` / `exec_input` / `exec_resize` | Called by a shell window: (re)connect (re-checks the gate), keystrokes, terminal size |
+| `forward_ports` / `start_forward` / `list_forwards` / `stop_forward` / `open_forward` | Port-forward dialog, start, list, stop, open in browser; changes arrive as `port-forwards` events |
 | `secret_value` | One Secret value, on explicit click |
 
 ### How things fit together
@@ -169,6 +177,33 @@ ui             Leptos CSR app
   - On UAT, Prometheus misses about 17 of 50 nodes: Fargate nodes holding only finished Job pods, plus the node running Prometheus itself.
   - The last-hour charts (step 30 s, matching the page refresh) come from Prometheus only, so they exclude nodes it doesn't scrape. Expect them to sit a little below the "Used" meter (about 0.8 GiB on UAT).
   - The charts have no request or allocatable lines: at cluster scale those flatten the trend. The header shows the hour's peak instead.
+- **Logs windows** (`src-tauri/src/logs.rs`, `ui/src/logs.rs`, `crates/core/src/logs.rs`):
+  - Pods get a Logs button per container section. Workloads (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, ReplicationController) get one in the detail header, which merges every container of up to 20 selected pods. Pods started later aren't added.
+  - Each is a native `WebviewWindow` labelled `logs-N`, loading `index.html?logs=logs-N`. `main.rs` mounts `LogsApp` for that query. Capabilities grant `main` and `logs-*`.
+  - Opening the same target on the same context focuses the existing window.
+  - The window keeps the client of the cluster it was opened from, so switching context in the main window doesn't affect it.
+  - Once listening, the window calls `logs_start`. Batches arrive on an event named after the window label, because the JS global `listen` hears all windows' events.
+  - The stream stops when the window is destroyed. Closing the main window closes all logs windows.
+  - The stream keeps the tail (1000 lines, or 200 per container when merged), follows, adds timestamps and strips ANSI. Merged batches are sorted by time.
+  - The window shows filter, Wrap, Time (local), Previous (last terminated container) and Reload. It keeps 10k lines, auto-follows, and scrolling up pauses following.
+  - `menu.rs` marks the "Window" submenu as macOS's windows menu, so open windows (main and logs) are listed there with their titles.
+- **Shell windows** (`src-tauri/src/exec.rs`, `ui/src/exec.rs`, `crates/core/src/exec.rs`):
+  - Container sections get a Shell button, only while the container is running. It's gated like Delete: a locked context opens the unlock prompt, then the shell opens.
+  - `open_exec` and every `exec_start` (reconnect) call `ensure_writable`.
+  - Windows are labelled `exec-N` and load `index.html?exec=exec-N`; capabilities grant `exec-*`. Each click opens a new session; repeats get a number in the title.
+  - When the shell process exits (`exit`, Ctrl-D, even with a non-zero code: status `Success` or reason `NonZeroExitCode`), the backend closes the window. Any other ending (no shell, dropped connection, gate) leaves the window open with the message and Reconnect. Checked on UAT for `exit`, `false; exit` and a distroless image.
+  - The command is `/bin/sh -c 'exec bash, else sh'`. Distroless images report "This image has no shell".
+  - Output is base64 in `ExecOutput::Data` (chunks can split UTF-8). Input goes one invoke per keystroke chunk; resizes go through the fit add-on.
+  - Terminal: xterm.js 5.5.0 and addon-fit 0.10.0, vendored in `ui/vendor/xterm` (integrity-checked, MIT; see its README) and loaded as plain scripts in `index.html`. The light theme darkens the ANSI palette.
+  - Tested on UAT with `examples/exec_check.rs`, which echoes, runs `uname` and exits, and refuses prod-like contexts. The datadog cluster-agent got a bash session; keda-operator is distroless.
+- **Port-forwarding** (`crates/core/src/forward.rs`, `src-tauri/src/forward.rs`, `ui/src/forward.rs`):
+  - Forward buttons on running pod containers that declare ports, and on Service detail panels. The dialog lists TCP ports and takes a local port (default the same, 0 for any).
+  - Listens on 127.0.0.1 only. Each connection opens its own kube `portforward`, and kubelet errors (e.g. "connection refused") land in Last error.
+  - Services resolve like kubectl: a Ready pod matching the selector, with named target ports looked up in the pod. They re-resolve after a failed connection.
+  - Forwards live in `AppState.forwards`, keep their own client (they survive context switches), and stop on Stop or app quit. Changes push the whole list to the main window as `port-forwards` events.
+  - Open uses the OS opener (`open`, `xdg-open`, `start`) on `http://127.0.0.1:<port>/`; Copy uses `navigator.clipboard`.
+  - **Not gated:** a forward changes nothing in the cluster. Writes made through it come from the user's own client.
+  - Tested on UAT with `examples/forward_check.rs` (read-only HTTP GET): Prometheus 9090 gave 200, and 8080 resolved the named target port.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
 - **Cloud sections** (`Category::cloud_for_group`):
@@ -190,7 +225,7 @@ These are the v1 actions the user asked for at the start. All must go through th
 1. ~~**Delete**~~ done: detail-panel button for any kind with the `delete` verb (see section 6).
 2. **Scale / restart.** Patch replicas; restart by setting a `kubectl.kubernetes.io/restartedAt` annotation.
 3. **Edit YAML and apply,** using CodeMirror in the webview with a diff before applying and server-side apply.
-4. **Logs / exec / port-forward.** Use kube `ws` (already enabled); xterm.js for exec.
+4. ~~**Logs / exec / port-forward**~~ done.
 
 Smaller items that have come up:
 

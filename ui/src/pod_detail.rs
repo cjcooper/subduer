@@ -5,7 +5,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{ContainerDetails, EnvValue, EnvVar, EventSummary, HistorySource, PodDetails, PodHistory, Usage, UsageHistory};
+use subduer_types::{
+    ContainerDetails, EnvValue, EnvVar, EventSummary, ExecTarget, HistorySource, LogSource, LogTarget, PodDetails, PodHistory, Usage,
+    UsageHistory,
+};
 
 use crate::app::{ContainerIcon, Store, format_age};
 use crate::chart::{ChartData, LineChart, RefLine, Scale, clock};
@@ -88,8 +91,8 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
         .clone()
         .into_iter()
         .map(|c| {
-            let ns = namespace.clone();
-            view! { <ContainerSection store=store c=c namespace=ns /> }
+            let (ns, pod) = (namespace.clone(), d.name.clone());
+            view! { <ContainerSection store=store c=c pod=pod namespace=ns /> }
         })
         .collect_view();
     let events = d.events.clone();
@@ -130,6 +133,9 @@ fn Section(
     summary: String,
     #[prop(optional)] icon: Option<AnyView>,
     #[prop(optional)] nested: bool,
+    /// Buttons beside the title (outside it, so they don't toggle the section).
+    #[prop(optional)]
+    actions: Option<AnyView>,
     children: ChildrenFn,
 ) -> impl IntoView {
     let open = {
@@ -150,12 +156,15 @@ fn Section(
     let chevron_open = Signal::derive(open.clone());
     view! {
         <section class="dsection" class:nested=nested>
+            <div class="dsection-head">
             <button class="dsection-title" on:click=toggle aria-expanded=expanded>
                 <crate::icons::Chevron open=chevron_open />
                 {icon}
                 <span class="dsection-name">{title}</span>
                 <span class="dsection-summary">{summary}</span>
             </button>
+                {actions}
+            </div>
             <Show when=open>
                 <div class="dsection-body">{children()}</div>
             </Show>
@@ -328,7 +337,7 @@ fn PodInfo(store: Store, d: PodDetails) -> impl IntoView {
 }
 
 #[component]
-fn ContainerSection(store: Store, c: ContainerDetails, namespace: String) -> impl IntoView {
+fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: String) -> impl IntoView {
     let kind = match (c.init, c.sidecar) {
         (true, true) => "Sidecar · ",
         (true, false) => "Init · ",
@@ -348,8 +357,42 @@ fn ContainerSection(store: Store, c: ContainerDetails, namespace: String) -> imp
     .into_any();
     let started = c.started.clone();
     let info = c.clone();
+    let logs_target = LogTarget {
+        namespace: namespace.clone(),
+        source: LogSource::Container { pod: pod.clone(), container: c.name.clone() },
+    };
+    // A shell needs a running container.
+    let running = c.state == subduer_types::containers::State::Running;
+    let exec_target = ExecTarget { namespace: namespace.clone(), pod: pod.clone(), container: c.name.clone() };
+    let has_ports = !c.ports.is_empty();
+    let forward_ns = namespace.clone();
+    let forward_source = subduer_types::ForwardSource::Pod { pod: pod.clone() };
+    let actions = view! {
+        <div class="dsection-actions">
+            {(running && has_ports).then(|| view! {
+                <button
+                    class="btn small"
+                    title="Forward a local port to this pod"
+                    on:click=move |_| crate::forward::request(store, forward_ns.clone(), forward_source.clone())
+                >"Forward"</button>
+            })}
+            {running.then(|| view! {
+                <button
+                    class="btn small"
+                    title=format!("Open a shell in {} in a new window (needs changes allowed)", c.name)
+                    on:click=move |_| crate::exec::request(store, exec_target.clone())
+                >"Shell"</button>
+            })}
+            <button
+                class="btn small"
+                title=format!("Open {} logs in a new window", c.name)
+                on:click=move |_| crate::logs::open(logs_target.clone(), move |e| store.error.set(Some(e)))
+            >"Logs"</button>
+        </div>
+    }
+    .into_any();
     view! {
-        <Section store=store id=id title=c.name.clone() summary=summary icon=icon>
+        <Section store=store id=id title=c.name.clone() summary=summary icon=icon actions=actions>
             <UsageChart store=store resource=Resource::Cpu usage=info.cpu container=Some(info.name.clone()) />
             <UsageChart store=store resource=Resource::Memory usage=info.memory container=Some(info.name.clone()) />
             <dl class="kv">

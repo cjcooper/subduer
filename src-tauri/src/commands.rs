@@ -156,7 +156,7 @@ pub async fn secret_value(state: State<'_, AppState>, namespace: String, secret:
     pod_details::secret_value(&client, &namespace, &secret, &key).await.map_err(err)
 }
 
-async fn connected_client(state: &AppState) -> CmdResult<subduer_core::kube::Client> {
+pub(crate) async fn connected_client(state: &AppState) -> CmdResult<subduer_core::kube::Client> {
     state
         .session
         .read()

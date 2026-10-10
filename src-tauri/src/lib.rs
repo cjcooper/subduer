@@ -1,4 +1,7 @@
 mod commands;
+mod exec;
+mod forward;
+mod logs;
 mod menu;
 mod shell_env;
 
@@ -10,6 +13,7 @@ use std::sync::Arc;
 use subduer_core::history::HistoryStore;
 use subduer_core::kube::Client;
 use subduer_core::safety::SafetyGate;
+use tauri::Manager;
 use tauri::async_runtime::JoinHandle;
 
 /// The cluster the window is currently connected to.
@@ -27,6 +31,9 @@ pub struct AppState {
     /// The single live resource watch feeding the table.
     pub watch: Mutex<Option<JoinHandle<()>>>,
     pub next_watch_id: AtomicU64,
+    pub logs: logs::LogWindows,
+    pub shells: exec::ShellWindows,
+    pub forwards: forward::Forwards,
 }
 
 impl AppState {
@@ -50,7 +57,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
-        .setup(|app| Ok(menu::install(app.handle())?))
+        .setup(|app| {
+            menu::install(app.handle())?;
+            // Logs and shell windows belong to the main window; they close with it.
+            if let Some(main) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                main.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Destroyed = event {
+                        logs::close_all(&handle);
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_contexts,
             commands::connect,
@@ -62,6 +81,17 @@ pub fn run() {
             commands::pod_details,
             commands::pod_history,
             commands::delete_resource,
+            logs::open_logs,
+            logs::logs_start,
+            exec::open_exec,
+            exec::exec_start,
+            exec::exec_input,
+            exec::exec_resize,
+            forward::forward_ports,
+            forward::start_forward,
+            forward::list_forwards,
+            forward::stop_forward,
+            forward::open_forward,
             commands::secret_value,
         ])
         .run(tauri::generate_context!())

@@ -239,6 +239,13 @@ pub fn ClusterIcon() -> impl IntoView {
     svg(CLUSTER)
 }
 
+const FORWARD: &str = r#"<path d="M4 8h13M14 4.5L17.5 8 14 11.5"/><path d="M20 16H7M10 12.5L6.5 16l3.5 3.5"/>"#;
+
+#[component]
+pub fn ForwardIcon() -> impl IntoView {
+    svg(FORWARD)
+}
+
 /// Open/closed indicator for collapsible groups; rotates when `open`.
 #[component]
 pub fn Chevron(#[prop(into)] open: Signal<bool>) -> impl IntoView {

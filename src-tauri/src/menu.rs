@@ -38,6 +38,16 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     {
         submenu.insert(&about, position)?;
     }
+    // macOS lists open windows (main and logs) under Window once it knows
+    // which submenu that is; Tauri's default menu doesn't say.
+    #[cfg(target_os = "macos")]
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(sub) = item
+            && sub.text()? == "Window"
+        {
+            sub.set_as_windows_menu_for_nsapp()?;
+        }
+    }
     app.set_menu(menu)?;
     Ok(())
 }

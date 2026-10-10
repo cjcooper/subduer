@@ -4,7 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>k8s-subduer</title>
+    <link data-trunk rel="css" href="vendor/xterm/xterm.css" />
     <link data-trunk rel="css" href="styles/app.css" />
+    <link data-trunk rel="copy-file" href="vendor/xterm/xterm.js" />
+    <link data-trunk rel="copy-file" href="vendor/xterm/addon-fit.js" />
+    <!-- Terminal for shell windows (vendored, see vendor/xterm/README.md). -->
+    <script src="xterm.js"></script>
+    <script src="addon-fit.js"></script>
     <link data-trunk rel="rust" href="Cargo.toml" data-bin="subduer-ui" />
   </head>
   <body></body>

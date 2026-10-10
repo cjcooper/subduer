@@ -509,3 +509,159 @@ pub struct PodHistory {
     pub pod: UsageHistory,
     pub containers: Vec<ContainerHistory>,
 }
+
+/// What a logs window shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogSource {
+    /// One container of one pod.
+    Container { pod: String, container: String },
+    /// Every container of every pod a workload selects, merged.
+    Workload { kind: KindRef, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogTarget {
+    pub namespace: String,
+    pub source: LogSource,
+}
+
+impl LogTarget {
+    /// Window title, e.g. `api · shop/web-7d9f · Logs`.
+    pub fn title(&self, context: &str) -> String {
+        match &self.source {
+            LogSource::Container { pod, container } => {
+                format!("{container} · {}/{pod} · {context} · Logs", self.namespace)
+            }
+            LogSource::Workload { kind, name } => {
+                format!("{} {}/{name} · {context} · Logs", kind.kind, self.namespace)
+            }
+        }
+    }
+}
+
+/// Kinds whose pods can be found from a label selector, so they get a Logs button.
+pub fn has_workload_logs(kind: &KindRef) -> bool {
+    matches!(
+        (kind.group.as_str(), kind.kind.as_str()),
+        ("apps", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet")
+            | ("batch", "Job")
+            | ("", "ReplicationController")
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogLine {
+    /// `pod/container` when several streams are merged.
+    pub source: Option<String>,
+    /// RFC 3339 from the kubelet, when present.
+    pub time: Option<String>,
+    pub text: String,
+}
+
+/// Lines and status messages pushed to one logs window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogBatch {
+    pub lines: Vec<LogLine>,
+    /// Status for the window's footer, e.g. `streaming 3 containers` or an error.
+    pub notices: Vec<String>,
+}
+
+/// Returned to a logs window when it starts streaming.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogSession {
+    pub context: String,
+    pub target: LogTarget,
+    pub title: String,
+    /// Event name this window's batches arrive on.
+    pub event: String,
+}
+
+/// A container to open a shell in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecTarget {
+    pub namespace: String,
+    pub pod: String,
+    pub container: String,
+}
+
+impl ExecTarget {
+    /// Window title, e.g. `app · shop/web-7d9f · acme-uat · Shell`.
+    pub fn title(&self, context: &str) -> String {
+        format!("{} · {}/{} · {context} · Shell", self.container, self.namespace, self.pod)
+    }
+}
+
+/// Pushed to a shell window: terminal output (base64, since output can split
+/// UTF-8 sequences) or the end of the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecOutput {
+    Data(String),
+    Exited(String),
+}
+
+/// Returned to a shell window when it connects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecSession {
+    pub context: String,
+    pub target: ExecTarget,
+    pub title: String,
+    /// Event name this window's output arrives on.
+    pub event: String,
+}
+
+/// What a port-forward connects to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForwardSource {
+    Pod { pod: String },
+    /// Resolved to a ready backing pod, like `kubectl port-forward svc/…`.
+    Service { service: String },
+}
+
+impl ForwardSource {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Pod { pod } => format!("pod/{pod}"),
+            Self::Service { service } => format!("service/{service}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardRequest {
+    pub namespace: String,
+    pub source: ForwardSource,
+    /// Container port for pods, service port for services.
+    pub remote_port: u16,
+    /// 0 picks a free port.
+    pub local_port: u16,
+}
+
+/// A port that can be forwarded, for the start dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortOption {
+    pub port: u16,
+    pub name: Option<String>,
+    /// The container declaring it (pods), or the target port (services).
+    pub detail: Option<String>,
+}
+
+/// A running port-forward, for the Port Forwards page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    pub id: u64,
+    pub context: String,
+    pub namespace: String,
+    pub source: ForwardSource,
+    pub remote_port: u16,
+    pub local_port: u16,
+    /// The pod and port connections currently go to (services resolve to one).
+    pub backend: Option<String>,
+    pub active: usize,
+    pub total: u64,
+    pub last_error: Option<String>,
+}
+
+/// Tauri event carrying the full forward list whenever it changes.
+pub mod forward_events {
+    pub const CHANGED: &str = "port-forwards";
+}

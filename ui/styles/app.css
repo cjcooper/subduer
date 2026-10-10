@@ -305,8 +305,10 @@ table.resources { width: 100%; border-collapse: collapse; }
 /* Collapsible detail sections */
 .dsection { border-bottom: 1px solid var(--border); }
 .dsection.nested { border-bottom: none; margin-top: 10px; border-top: 1px solid var(--border); }
+.dsection-head { display: flex; align-items: center; }
+.dsection-actions { display: flex; gap: 6px; margin-right: 14px; flex-shrink: 0; }
 .dsection-title {
-  display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px;
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 10px 14px;
   border: none; background: none; cursor: pointer; text-align: left;
 }
 .dsection-title:hover { background: var(--row-hover); }
@@ -381,3 +383,52 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .event-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .event-when { margin-left: auto; font-size: 12px; }
 .event-message { margin-top: 3px; overflow-wrap: anywhere; }
+
+/* Logs window */
+.logs-app { display: flex; flex-direction: column; height: 100vh; background: var(--bg); }
+.logs-header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 14px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.logs-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 320px; }
+.logs-heading { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logs-tools { display: flex; align-items: center; gap: 6px; }
+.logs-tools .search { width: 220px; margin: 0; }
+.btn.toggle.on { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.logs-body {
+  flex: 1; overflow: auto; padding: 6px 0;
+  font-family: "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55;
+}
+.log-line { display: flex; gap: 12px; padding: 0 14px; white-space: pre; }
+.log-line:hover { background: var(--row-hover); }
+.logs-body.wrap .log-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-time { flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.log-source {
+  flex-shrink: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; color: var(--accent);
+}
+.log-text { min-width: 0; }
+.logs-footer {
+  display: flex; align-items: center; gap: 12px; padding: 6px 14px; font-size: 12px;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+.logs-notice { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Shell window */
+.exec-app { display: flex; flex-direction: column; height: 100vh; background: var(--panel); }
+.exec-term { flex: 1; min-height: 0; padding: 6px 4px 6px 10px; }
+.exec-term .xterm { height: 100%; }
+.exec-ended { color: var(--muted); font-size: 12px; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Port forwards */
+.modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.modal-actions .primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.port-options { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 14px; }
+.port-option { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.local-port { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.kind .count {
+  margin-left: auto; padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent);
+}
+table.forwards td { vertical-align: middle; }
+.forward-error { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.forward-actions { display: flex; gap: 6px; justify-content: flex-end; padding-right: 4px; }
