@@ -123,5 +123,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     } else {
         ("xdg-open", vec![url])
     };
-    std::process::Command::new(opener.0).args(opener.1).spawn().map(|_| ()).map_err(|e| e.to_string())
+    let mut cmd = std::process::Command::new(opener.0);
+    cmd.args(opener.1);
+    crate::shell_env::hide_console(&mut cmd).spawn().map(|_| ()).map_err(|e| e.to_string())
 }

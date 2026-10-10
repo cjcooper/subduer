@@ -119,3 +119,31 @@ pub fn follow_theme() {
     // Lives as long as the window.
     std::mem::forget(handle);
 }
+
+/// The desktop the app runs on, from the webview's user agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Desktop {
+    Mac,
+    Windows,
+    Linux,
+}
+
+pub fn desktop() -> Desktop {
+    let agent = leptos::prelude::window().navigator().user_agent().unwrap_or_default();
+    if agent.contains("Windows") {
+        Desktop::Windows
+    } else if agent.contains("Mac") {
+        Desktop::Mac
+    } else {
+        Desktop::Linux
+    }
+}
+
+/// The button that shows a downloaded file in the system's file manager.
+pub fn reveal_label() -> &'static str {
+    match desktop() {
+        Desktop::Mac => "Show in Finder",
+        Desktop::Windows => "Show in Explorer",
+        Desktop::Linux => "Show folder",
+    }
+}

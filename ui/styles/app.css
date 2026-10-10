@@ -20,7 +20,8 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   --status-done: #b9b8b1;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+  --mono: "SF Mono", Menlo, Consolas, "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
   font-size: 13px;
   color-scheme: light dark;
 }
@@ -205,7 +206,7 @@ table.resources { width: 100%; border-collapse: collapse; }
 .close { border: none; background: none; font-size: 20px; cursor: pointer; color: var(--muted); }
 .yaml {
   flex: 1; margin: 0; padding: 12px 14px; overflow: auto;
-  font-family: "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5;
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
 }
 
 /* Unlock dialog */
@@ -398,15 +399,15 @@ table.resources { width: 100%; border-collapse: collapse; }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { padding: 1px 7px; border-radius: 9px; background: var(--row-hover); font-size: 12px; overflow-wrap: anywhere; }
-.mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 
 /* Environment */
 table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .env td { padding: 5px 0; border-top: 1px solid var(--border); vertical-align: top; }
-.env-name { width: 42%; padding-right: 12px !important; font-family: "SF Mono", Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.env-name { width: 42%; padding-right: 12px !important; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .env-value { overflow-wrap: anywhere; }
 .env-value .btn { margin-left: 8px; }
-.env-from, .env-ref { display: block; color: var(--muted); font-size: 11px; font-family: -apple-system, sans-serif; }
+.env-from, .env-ref { display: block; color: var(--muted); font-size: 11px; font-family: inherit; }
 .secret-mask { letter-spacing: 0.1em; color: var(--muted); }
 .secret-value { background: var(--warn-bg); border-radius: 3px; padding: 0 3px; }
 .warn-text { color: var(--warn-text); }
@@ -440,7 +441,7 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .btn.toggle.on { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .logs-body {
   flex: 1; overflow: auto; padding: 6px 0;
-  font-family: "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
 }
 .log-line { display: flex; gap: 12px; padding: 0 14px; white-space: pre; }
 .log-line:hover { background: var(--row-hover); }

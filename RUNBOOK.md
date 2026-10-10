@@ -15,6 +15,7 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
   - **Access Control section:** Details tabs for ServiceAccount, Role, RoleBinding, ClusterRole and ClusterRoleBinding; Check access on ServiceAccounts. Files: `crates/core/src/rbac.rs` (new), `config.rs` (dispatch), the types (`AccessCheck`), `check_access` in the commands, `examples/access_check.rs` (new), `ui/src/object_detail.rs` (`CheckAccess`), CSS, `tools/ui-harness/rbacstub.js` (new) and docs.
   - **Helm section:** a Details tab for releases, Rollback and Delete (`helm uninstall`). Files: `crates/core/src/helm.rs` (`release_details`, `manifest_objects`, `rollback`, `uninstall`, `run_helm`), `config.rs` (dispatch), core's tokio `process` feature, the types (`InfoTable.times`), `helm_rollback`/`helm_uninstall` in the commands, `examples/helm_rollback_dry_run.rs` (new; dry-runs both), `ui/src/workload.rs` (`Op::Rollback`, `Op::Uninstall`), `ui/src/object_detail.rs` (time columns, multi-line rows), `ui/src/app.rs` (links to cluster-scoped kinds), CSS, `tools/ui-harness/helmstub.js` (new) and docs.
   - **Settings › Appearance:** a Settings… menu item (⌘, / Ctrl+,) and dialog with Auto (where supported), Light and Dark. Files: `src-tauri/src/menu.rs`, `set_app_theme` in the commands, `ui/src/prefs.rs` (theme), `ui/src/main.rs`, `ui/src/app.rs` (`SettingsDialog`), `ui/src/exec.rs`, CSS, `tools/ui-harness/settingsstub.js` (new) and docs. Also: bigger top-level sidebar items and icons.
+  - **Builds on each system:** per-OS bundle configs (`src-tauri/tauri.{macos,linux,windows}.conf.json`), `icon.ico` bundled, Unix-only login-shell PATH, no console windows on Windows, per-OS reveal label and fonts, and `.github/workflows/build.yml`. Only the macOS build has been run.
 - **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (67 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): the Settings… menu item and the native title bar following the theme, the unsaved-edits hold on window close and Cmd+Q, logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
@@ -32,7 +33,7 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
 
 ## 1. What it is
 
-A macOS-first desktop app for browsing and controlling Kubernetes clusters. It's an it-problems project, so never put employer names in code, config, docs or tests; use generic names like `acme-prd`.
+A desktop app for browsing and controlling Kubernetes clusters: macOS first, and building on Linux and Windows too. It's an it-problems project, so never put employer names in code, config, docs or tests; use generic names like `acme-prd`.
 
 - **Stack:** Rust everywhere, using a Tauri v2 shell, a `kube-rs` backend and a Leptos 0.8 UI built to WASM with Trunk. Use another language only where the OS forces it.
 - **Navigation:** by kind, with a namespace filter that persists across kinds.
@@ -42,7 +43,8 @@ A macOS-first desktop app for browsing and controlling Kubernetes clusters. It's
 
 | Need | How |
 |---|---|
-| Rust via **rustup** (not Homebrew `rust`) | `brew install rustup`. The package is keg-only, so put `/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin` first on `PATH`, then run `rustup default stable`. Homebrew's formula no longer ships `rustup-init`. |
+| Rust via **rustup** (not Homebrew `rust`) | macOS: `brew install rustup`. The package is keg-only, so put `/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin` first on `PATH`, then run `rustup default stable`. Homebrew's formula no longer ships `rustup-init`. Linux and Windows: the installer from rustup.rs. |
+| System build packages | macOS: Xcode Command Line Tools. Linux (Debian/Ubuntu): `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`. Windows: Visual Studio Build Tools ("Desktop development with C++"); WebView2 ships with Windows 10/11. No OpenSSL anywhere: TLS is rustls with ring. |
 | WASM target | `rustup target add wasm32-unknown-unknown` |
 | Tools | `cargo install --locked trunk@0.21.14 tauri-cli@2.12.1` |
 | Icon tools (optional) | `rsvg-convert` (Homebrew `librsvg`) |
@@ -53,12 +55,32 @@ Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 w
 
 ```sh
 cargo tauri dev                       # run the app (Trunk serves the UI on :1420)
-cargo tauri build                     # .app/.dmg in target/release/bundle
+cargo tauri build                     # this system's bundles in target/release/bundle (see "Building on each system")
 cargo test                            # core + types unit tests (backend crates)
 cargo clippy --all-targets            # backend lint, kept at zero warnings
 cargo clippy -p subduer-ui --target wasm32-unknown-unknown   # UI lint, zero warnings
 trunk build                           # UI only, into dist/
 ```
+
+### Building on each system
+
+`cargo tauri build` builds for the system it runs on; Tauri merges `src-tauri/tauri.<os>.conf.json` over `tauri.conf.json` (which says `"targets": "all"`):
+
+| System | Bundles (in `target/release/bundle/`) | Notes |
+|---|---|---|
+| macOS | `macos/k8s-subduer.app`, `dmg/*.dmg` | Minimum macOS 11; category Developer Tools. Built and checked here (2026-10-10, Apple Silicon). Unsigned and not notarized. |
+| Linux | `deb/*.deb`, `rpm/*.rpm`, `appimage/*.AppImage` | Needs WebKitGTK 4.1 (Ubuntu 22.04+, Debian 12+, Fedora 36+). The AppImage step needs FUSE, or `APPIMAGE_EXTRACT_AND_RUN=1`. |
+| Windows | `nsis/*-setup.exe`, `msi/*.msi` | Tauri downloads NSIS and WiX itself. Release builds use the windows subsystem, so no console window. |
+
+You can't cross-build from a Mac: ring compiles C against the target's system headers (checked: `cargo check --target x86_64-pc-windows-msvc` stops in ring's build script). Build Linux and Windows on those systems, or with the CI workflow: `.github/workflows/build.yml` runs `cargo test` and `cargo tauri build` on `macos-latest`, `ubuntu-22.04` and `windows-latest` (on pushes to main, pull requests and by hand) and keeps each system's bundles as artifacts for 14 days. It hasn't run yet; it needs the repo on GitHub.
+
+Platform differences in the code:
+- `shell_env::inherit_login_path` (copying the login shell's `PATH` so `aws`, `helm` and other kubeconfig exec plugins are found) runs on macOS and Linux only; Windows apps already get the user's `PATH`.
+- Commands the app starts (`helm`, the URL opener) don't open console windows on Windows (`CREATE_NO_WINDOW`). Exec auth plugins started by kube-rs might still flash one; not checked.
+- Opening URLs: `open` / `cmd /C start` / `xdg-open`. Revealing a download: Finder / Explorer / the Downloads folder via `xdg-open`, labelled "Show in Finder" / "Show in Explorer" / "Show folder" (`prefs::reveal_label`, from the webview's user agent).
+- Menus: Settings… is in the app menu on macOS, the File menu elsewhere; the Window menu is set up on macOS only.
+- Fonts fall back to Segoe UI / Consolas on Windows and system-ui, Ubuntu, Cantarell, DejaVu Sans Mono on Linux.
+- The headless UI harness and `appearance-previews.sh` assume macOS (Chrome's app path, `sips`).
 
 ### Read-only checks against a real cluster (no GUI)
 

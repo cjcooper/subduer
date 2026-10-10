@@ -612,9 +612,18 @@ pub async fn uninstall(
     result
 }
 
+/// `helm` (`helm.exe` on Windows, found on `PATH`), without a console window.
+fn helm_command() -> tokio::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = tokio::process::Command::new("helm");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
 /// The installed Helm's major version; an error if `helm` can't be run.
 async fn helm_major() -> Result<u32> {
-    let version = tokio::process::Command::new("helm")
+    let version = helm_command()
         .args(["version", "--short"])
         .output()
         .await
@@ -627,7 +636,7 @@ async fn helm_major() -> Result<u32> {
 /// output as the error. Gives up after 6 minutes.
 async fn run_helm(args: &[String]) -> Result<String> {
     let what = format!("helm {}", args.first().map_or("", String::as_str));
-    let run = tokio::process::Command::new("helm").args(args).kill_on_drop(true).output();
+    let run = helm_command().args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(Duration::from_secs(6 * 60), run)
         .await
         .map_err(|_| Error::Message(format!("{what} took more than 6 minutes; check the release's history")))?

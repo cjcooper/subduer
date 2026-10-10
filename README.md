@@ -1,6 +1,6 @@
 # k8s-subduer
 
-Desktop app (macOS first) for browsing and controlling Kubernetes clusters.
+Desktop app for browsing and controlling Kubernetes clusters, on macOS, Linux and Windows.
 Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
 
 ## Layout
@@ -14,17 +14,25 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
 
 ## Prerequisites
 
-- rustup toolchain (not Homebrew `rust`) with `wasm32-unknown-unknown`
+- Rust from rustup (not Homebrew `rust`) with `wasm32-unknown-unknown`
 - `cargo install --locked trunk@0.21.14 tauri-cli@2.12.1`
+- The system's webview build packages (Tauri's prerequisites):
+  - macOS: Xcode Command Line Tools (`xcode-select --install`)
+  - Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`
+  - Windows: Visual Studio Build Tools with "Desktop development with C++"; WebView2 is built into Windows 10 and 11
+- At runtime: `kubectl`-style kubeconfig access, and the `helm` CLI for Helm rollback and delete
 
 ## Run
 
 ```sh
 cargo tauri dev                  # app with hot-reloading UI
-cargo tauri build                # .app / .dmg in target/release/bundle
+cargo tauri build                # bundles for the system you build on, in target/release/bundle:
+                                 #   macOS .app + .dmg · Linux .deb + .rpm + .AppImage · Windows NSIS .exe + .msi
 cargo test -p subduer-core       # unit tests
 cargo run -p subduer-core --example smoke -- <context>   # read-only CLI check
 ```
+
+Each system builds only its own bundles. `.github/workflows/build.yml` builds all three on GitHub's macOS, Ubuntu and Windows runners and keeps the bundles as workflow artifacts. The bundles are unsigned.
 
 ## Behaviour
 

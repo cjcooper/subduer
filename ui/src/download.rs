@@ -120,7 +120,7 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
                         <p>"Saved "{fmt_bytes(r.bytes as f64)}" to "<strong class="mono">{r.saved_to.clone()}</strong>"."</p>
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| reveal(saved.clone())>"Show in Finder"</button>
+                            <button on:click=move |_| reveal(saved.clone())>{crate::prefs::reveal_label()}</button>
                             <button class="primary" on:click=move |_| close()>"Done"</button>
                         </div>
                     }
