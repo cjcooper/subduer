@@ -11,7 +11,7 @@
   const which = params.get('kind') || 'cm';
   let unlocked = params.get('locked') !== '1';
   const listeners = {};
-  const K = (group, version, kind, plural, namespaced, verbs) => ({ kind: { group, version, kind, plural, namespaced }, verbs: verbs || ['list', 'watch', 'get', 'patch', 'delete'], category: 'Config' });
+  const K = (group, version, kind, plural, namespaced, verbs) => ({ kind: { group, version, kind, plural, namespaced }, verbs: verbs || ['list', 'watch', 'get', 'patch', 'update', 'delete'], category: 'Config' });
   const kinds = [
     K('', 'v1', 'ConfigMap', 'configmaps', true), K('', 'v1', 'Secret', 'secrets', true),
     K('autoscaling', 'v2', 'HorizontalPodAutoscaler', 'horizontalpodautoscalers', true),
@@ -103,6 +103,7 @@
       if (cmd === 'secret_values') return secretValues;
       if (cmd === 'set_unsaved') { unsaved = args.unsaved; return null; }
       if (cmd === 'close_discarding') { closed = args.quit ? 'quit' : 'window'; return null; }
+      if (cmd === 'open_editor') { document.title = 'open_editor ' + JSON.stringify(args); return null; }
       if (cmd === 'save_config_data' || cmd === 'set_hpa_range') { document.title = cmd + ' ' + JSON.stringify(args); return null; }
       if (cmd === 'get_yaml') return 'kind: ' + kindName + '\n';
       if (cmd === 'cluster_overview' || cmd === 'stop_watch') return null;
@@ -130,6 +131,10 @@
   const scroll = params.get('scroll');
   if (scroll) setTimeout(() => { const b = document.querySelector('.detail-body'); if (b) b.scrollTop = Number(scroll); }, 3000);
   if (params.get('go')) setTimeout(() => document.querySelector('.modal-actions .primary')?.click(), 3400);
+  if (params.get('yamledit')) {
+    setTimeout(() => btn('.tabs button', 'YAML')?.click(), 2100);
+    setTimeout(() => btn('.yaml-tools button', 'Edit')?.click(), 2600);
+  }
   const leave = params.get('leave');
   const fire = (n, payload) => (listeners[n] || []).forEach((cb) => cb({ payload }));
   const pick = (sel, v) => { const el = document.querySelectorAll('.topbar select')[sel]; if (!el) return; el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };

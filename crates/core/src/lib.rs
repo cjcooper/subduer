@@ -7,6 +7,7 @@ pub mod config;
 pub mod contexts;
 pub mod cron;
 pub mod download;
+pub mod edit;
 pub mod exec;
 pub mod forward;
 pub mod helm;

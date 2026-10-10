@@ -61,11 +61,11 @@ struct Term {
     fit: JsValue,
 }
 
-fn get(obj: &JsValue, key: &str) -> JsValue {
+pub(crate) fn get(obj: &JsValue, key: &str) -> JsValue {
     Reflect::get(obj, &key.into()).unwrap_or(JsValue::UNDEFINED)
 }
 
-fn call(obj: &JsValue, method: &str, args: &[JsValue]) -> JsValue {
+pub(crate) fn call(obj: &JsValue, method: &str, args: &[JsValue]) -> JsValue {
     match get(obj, method).dyn_into::<Function>() {
         Ok(f) => f.apply(obj, &args.iter().collect::<Array>()).unwrap_or(JsValue::UNDEFINED),
         Err(_) => JsValue::UNDEFINED,
@@ -77,7 +77,7 @@ fn construct(ctor: &JsValue, args: &[JsValue]) -> Option<JsValue> {
     Reflect::construct(&ctor, &args.iter().collect::<Array>()).ok()
 }
 
-fn object(pairs: &[(&str, JsValue)]) -> JsValue {
+pub(crate) fn object(pairs: &[(&str, JsValue)]) -> JsValue {
     let obj = Object::new();
     for (k, v) in pairs {
         let _ = Reflect::set(&obj, &(*k).into(), v);

@@ -400,3 +400,57 @@ async fn overview_and_workloads_come_back_from_the_api() {
     let err = commands::workload_details(app.state(), deployment(), "shop".into(), "gone".into()).await.unwrap_err();
     assert!(!err.is_empty());
 }
+
+#[tokio::test]
+async fn edit_windows_load_save_and_guard_unsaved_edits() {
+    use subduer_core::types::EditTarget;
+    let api = MockApi::new();
+    let path = "/api/v1/namespaces/shop/configmaps/app";
+    api.on("GET", path, object("v1", "ConfigMap", Some("shop"), "app", json!({"data": {"a": "1"}})));
+    api.on("PUT", path, object("v1", "ConfigMap", Some("shop"), "app", json!({"data": {"a": "2"}})));
+    let app = connected(&api).await;
+    let cm = kind("", "v1", "ConfigMap", "configmaps", true);
+    let target = EditTarget { kind: cm.clone(), namespace: Some("shop".into()), name: "app".into() };
+
+    // Helm releases aren't editable; opening twice focuses the same window.
+    let helm = EditTarget { kind: subduer_core::helm::release_kind(), namespace: Some("shop".into()), name: "web".into() };
+    assert!(crate::editor::open_editor(app.handle().clone(), app.state(), helm).await.is_err());
+    crate::editor::open_editor(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    crate::editor::open_editor(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    let labels: Vec<String> = app.webview_windows().into_keys().filter(|l| l.starts_with("edit-")).collect();
+    assert_eq!(labels.len(), 1);
+    let window = app.get_webview_window(&labels[0]).unwrap();
+
+    let session = crate::editor::editor_start(window.clone(), app.state()).await.unwrap();
+    assert_eq!(session.title, "ConfigMap shop/app · acme-uat · Edit");
+    assert!(!session.unlocked && session.yaml.contains("a: '1'"));
+    let edited = session.yaml.replace("a: '1'", "a: '2'");
+
+    // A dry run works while locked; a real save needs the context unlocked.
+    let checked = crate::editor::editor_save(window.clone(), app.state(), edited.clone(), true).await.unwrap();
+    assert!(checked.contains("a: '2'"));
+    assert!(api.calls_to("PUT", path).pop().unwrap().query.contains("dryRun=All"));
+    let err = crate::editor::editor_save(window.clone(), app.state(), edited.clone(), false).await.unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+    let err = crate::editor::editor_save(window.clone(), app.state(), "kind: [".into(), true).await.unwrap_err();
+    assert!(err.starts_with("Not valid YAML"), "{err}");
+
+    // Unsaved edits hold closing the main window or quitting.
+    crate::editor::editor_dirty(window.clone(), app.state(), true);
+    assert!(crate::editor::ask_dirty(app.handle()));
+    unlock(&app);
+    crate::editor::editor_save(window.clone(), app.state(), edited, false).await.unwrap();
+    assert!(!api.calls_to("PUT", path).pop().unwrap().query.contains("dryRun"));
+    // Saving clears the unsaved flag.
+    assert!(!crate::editor::ask_dirty(app.handle()));
+    crate::editor::editor_dirty(window.clone(), app.state(), true);
+    crate::editor::editor_close(window.clone(), app.state());
+    assert!(!crate::editor::ask_dirty(app.handle()));
+
+    // A window the app doesn't know about isn't connected; nor is a session-less app.
+    let stray = WebviewWindowBuilder::new(&app, "edit-99", WebviewUrl::default()).build().unwrap();
+    assert!(crate::editor::editor_start(stray.clone(), app.state()).await.is_err());
+    assert!(crate::editor::editor_save(stray, app.state(), String::new(), true).await.is_err());
+    let none = self::app();
+    assert!(crate::editor::open_editor(none.handle().clone(), none.state(), target).await.is_err());
+}

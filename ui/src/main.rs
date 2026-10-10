@@ -4,6 +4,7 @@ mod chart;
 mod columns;
 mod delete;
 mod download;
+mod editor;
 mod exec;
 mod forward;
 mod icons;
@@ -22,9 +23,11 @@ fn main() {
     console_error_panic_hook::set_once();
     // Every window (main, logs, shell) follows the Appearance setting.
     prefs::follow_theme();
-    // The same page serves logs and shell windows: `?logs=<label>`, `?exec=<label>`.
+    // The same page serves logs, edit and shell windows: `?logs=`, `?edit=`, `?exec=<label>`.
     if let Some(label) = logs::label_from_url() {
         leptos::mount::mount_to_body(move || leptos::view! { <logs::LogsApp label=label.clone() /> });
+    } else if let Some(label) = editor::label_from_url() {
+        leptos::mount::mount_to_body(move || leptos::view! { <editor::EditorApp label=label.clone() /> });
     } else if let Some(label) = exec::label_from_url() {
         leptos::mount::mount_to_body(move || leptos::view! { <exec::ExecApp label=label.clone() /> });
     } else {

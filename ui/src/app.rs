@@ -272,6 +272,21 @@ pub fn App() -> impl IntoView {
         .await;
         listen::<Vec<ForwardInfo>>(subduer_types::forward_events::CHANGED, move |list| store.forwards.set(list)).await;
         listen::<()>(OPEN_SETTINGS, move |()| store.settings_open.set(true)).await;
+        // An edit window saved: refresh what's shown of that object, and the
+        // contexts (the edit window may have allowed changes).
+        listen::<subduer_types::EditTarget>(subduer_types::edit_events::SAVED, move |target| {
+            let shown = store.selected.with_untracked(|s| {
+                s.as_ref().is_some_and(|s| s.name == target.name && s.namespace == target.namespace)
+            }) && store.kind.with_untracked(|k| k.as_ref() == Some(&target.kind));
+            if shown {
+                load_yaml(store);
+                if selected_has_details(store) {
+                    crate::pod_detail::load(store, true);
+                }
+            }
+            spawn_local(async move { store.refresh_contexts().await });
+        })
+        .await;
         // Closing the window or quitting was held for unsaved edits.
         listen::<bool>(UNSAVED_CLOSE, move |quit| {
             guard(store, move || {
@@ -1350,7 +1365,13 @@ fn DetailPanel(store: Store) -> impl IntoView {
                         } else {
                             match store.yaml.get() {
                                 None => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
-                                Some(Ok(yaml)) => view! { <pre class="yaml">{yaml}</pre> }.into_any(),
+                                Some(Ok(yaml)) => view! {
+                                    <div class="yaml-tools">
+                                        <crate::editor::EditButton store=store row=row.clone() />
+                                    </div>
+                                    <pre class="yaml">{yaml}</pre>
+                                }
+                                .into_any(),
                                 Some(Err(e)) => view! { <p class="warn">{e}</p> }.into_any(),
                             }
                         }}

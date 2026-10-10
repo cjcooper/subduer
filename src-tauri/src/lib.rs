@@ -1,4 +1,5 @@
 mod commands;
+mod editor;
 mod exec;
 mod forward;
 mod logs;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub logs: logs::LogWindows,
     pub shells: exec::ShellWindows,
     pub forwards: forward::Forwards,
+    pub editors: editor::EditWindows,
     /// The UI holds edits that haven't been saved: closing the window or
     /// quitting asks it first (event `UNSAVED_CLOSE`).
     pub unsaved: AtomicBool,
@@ -72,6 +74,10 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let window = main.clone();
                 main.on_window_event(move |event| match event {
+                    // An edit window with unsaved YAML asks first (and is focused).
+                    tauri::WindowEvent::CloseRequested { api, .. } if editor::ask_dirty(&handle) => {
+                        api.prevent_close();
+                    }
                     tauri::WindowEvent::CloseRequested { api, .. }
                         if handle.state::<AppState>().unsaved.load(Ordering::SeqCst) =>
                     {
@@ -125,6 +131,11 @@ pub fn run() {
             commands::set_unsaved,
             commands::set_app_theme,
             commands::open_url,
+            editor::open_editor,
+            editor::editor_start,
+            editor::editor_save,
+            editor::editor_dirty,
+            editor::editor_close,
             commands::create_namespace,
             commands::helm_rollback,
             commands::helm_uninstall,
@@ -138,11 +149,13 @@ pub fn run() {
         .run(|app, event| {
             // Cmd+Q with unsaved edits: ask the UI first. `app.exit` from
             // `close_discarding` clears the flag before exiting.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event
-                && app.state::<AppState>().unsaved.load(Ordering::SeqCst)
-            {
-                api.prevent_exit();
-                let _ = app.emit_to("main", UNSAVED_CLOSE, true);
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if editor::ask_dirty(app) {
+                    api.prevent_exit();
+                } else if app.state::<AppState>().unsaved.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let _ = app.emit_to("main", UNSAVED_CLOSE, true);
+                }
             }
         });
 }

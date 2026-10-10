@@ -4,7 +4,7 @@ Stubs that fake `window.__TAURI__` so the UI can be rendered and screenshotted
 without the app or a cluster. See RUNBOOK.md section 3 for the full recipe.
 
 `run_e2e.py` turns them into an automated suite: it builds the UI, serves it
-with each stub, runs 108 scenarios in headless Chrome and checks the page title
+with each stub, runs 129 scenarios in headless Chrome and checks the page title
 (where stubs record what the app sent) and text. Run it with
 `python3 tools/ui-harness/run_e2e.py [filter…]`, or `--show <scenario>` to see
 what one scenario saw. Stubs must hand out increasing watch ids, as the app
@@ -33,13 +33,14 @@ python3 -m http.server 8765 &
 | `execstub.js` | A shell window (xterm) | `exec=<label>`, `exit=1` |
 | `workloadstub.js` | Deployment/StatefulSet Details tab, Restart and Scale dialogs | `rolling=1`, `local=1`, `collapse=resources,pods,…`, `scroll=<px>`, `openpod=1`, `op=restart\|scale`, `sts=1`, `ctx=prod`, `typed=1`, `locked=1`, `to=<n>`, `go=1` (the sent args land in the page title; read with `--dump-dom`) |
 | `batchstub.js` | CronJob/Job Details tab, Run now and Suspend/Resume dialogs | `job=1` (a Job; default a CronJob), `failed=1`, `suspended=1`, `op=run\|suspend\|resume`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `openjob=1`, `collapse=…`, `scroll=<px>` |
-| `configstub.js` | Config-section Details tabs, ConfigMap/Secret editing and Save, HPA Edit range | `kind=cm\|secret\|hpa\|quota\|webhook\|pdb\|lease`, `show=1`, `edit=1`, `change=1`, `add=1`, `badkey=1`, `remove=1`, `save=1`, `range=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>`, `leave=row\|close\|yaml\|kind\|refresh\|link\|ns\|context\|cancel\|window\|quit` with `keep=1` or `discard=1` (the title then reports unsaved, prompt, editing, selection, tab, namespace and close) |
+| `configstub.js` | Config-section Details tabs, ConfigMap/Secret editing and Save, HPA Edit range | `kind=cm\|secret\|hpa\|quota\|webhook\|pdb\|lease`, `show=1`, `edit=1`, `change=1`, `add=1`, `badkey=1`, `remove=1`, `save=1`, `range=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>`, `yamledit=1` (YAML tab → Edit; `open_editor` args land in the title), `leave=row\|close\|yaml\|kind\|refresh\|link\|ns\|context\|cancel\|window\|quit` with `keep=1` or `discard=1` (the title then reports unsaved, prompt, editing, selection, tab, namespace and close) |
 | `networkstub.js` | Network-section Details tabs (Service, Ingress, NetworkPolicy, EndpointSlice) | `kind=svc\|ingress\|netpol\|slice`, `open=1` (clicks the first Open; the URL lands in the page title), `link=1`, `collapse=…`, `scroll=<px>` |
 | `storagestub.js` | Storage-section Details tabs, Expand and Reclaim policy | `kind=pvc\|pv\|sc\|va`, `pending=1`, `op=expand\|reclaim`, `size=<new size>`, `ctx=prod`, `typed=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>` |
 | `rbacstub.js` | Access Control Details tabs and Check access | `kind=sa\|role\|binding`, `check=<resource>` (`secrets` is denied, others allowed; args land in the page title), `collapse=…`, `scroll=<px>` |
 | `helmstub.js` | Helm release Details tab, Rollback and Delete | `op=rollback\|delete`, `keep=1` (keep history), `to=<revision>`, `nowait=1`, `fail=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (args land in the page title), `link=1` (follows the ClusterRole link), `collapse=…`, `scroll=<px>`. Watch ids count up, as the app drops tables from older watches. |
 | `settingsstub.js` | Settings dialog and Appearance (preview cards) | `theme=auto\|light\|dark` (saved before start), `pick=auto\|light\|dark`, `open=1`, `noauto=1` (no system appearance). The title reports `data-theme`, the background, what's saved and the `set_app_theme` calls; vary `preferredColorScheme` to play the system. |
 | `nsstub.js` | Namespace Details tab, New namespace, Filter to it | `stuck=1`, `new=1`, `name=<text>`, `go=1`, `locked=1`, `ctx=prod`, `link=1` (Contents → Deployments), `filter=1`. The title reports what was sent, the list opened, or the namespace menu. |
+| `editorstub.js` | A YAML edit window (Ace) | `edit=edit-1`, `change=1` (replicas 2→3), `bad=1` (a syntax error), `save=1`, `confirm=1`, `typed=1`, `locked=1`, `prod=1`, `dryfail=1` (the server rejects the edit), `cancel=1`, `reload=1`, `closereq=1` (the window's close is held), `keep=1` / `discard=1`. The title reports the commands sent, the dirty flag, the open dialog, whether Ace highlighted, its error count and the status bar. Steps are timed from when the YAML is loaded. |
 | `ov.js` | Cluster page | needs `ov.json`: `cargo run -p subduer-core --example overview -- <context> --json`, with node and namespace names replaced by generic ones |
 
 `appearance-previews.sh` regenerates the Appearance preview images in `ui/assets/` from `workloadstub.js`.

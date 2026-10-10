@@ -113,11 +113,15 @@ pub fn logs_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppStat
     Ok(LogSession { context: w.context.clone(), title: w.target.title(&w.context), target: w.target.clone(), event })
 }
 
-/// Closes every logs and shell window, e.g. when the main window goes away.
+/// Closes every logs, shell and edit window, e.g. when the main window goes away.
 pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
     for (label, window) in app.webview_windows() {
-        if label.starts_with(LABEL_PREFIX) || label.starts_with(crate::exec::LABEL_PREFIX) {
-            let _ = window.close();
+        if label.starts_with(LABEL_PREFIX)
+            || label.starts_with(crate::exec::LABEL_PREFIX)
+            || label.starts_with(crate::editor::LABEL_PREFIX)
+        {
+            // Destroyed, not closed: the main window has already asked about unsaved edits.
+            let _ = window.destroy();
         }
     }
 }

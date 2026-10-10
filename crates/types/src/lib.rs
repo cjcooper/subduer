@@ -910,6 +910,44 @@ pub struct LogSession {
     pub event: String,
 }
 
+/// What an edit window edits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditTarget {
+    pub kind: KindRef,
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl EditTarget {
+    /// Window title, e.g. `ConfigMap shop/app · acme-uat · Edit`.
+    pub fn title(&self, context: &str) -> String {
+        let at = match &self.namespace {
+            Some(ns) => format!("{ns}/{}", self.name),
+            None => self.name.clone(),
+        };
+        format!("{} {at} · {context} · Edit", self.kind.kind)
+    }
+}
+
+/// Returned to an edit window when it starts (and on Reload).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditSession {
+    pub context: String,
+    pub prod_like: bool,
+    pub unlocked: bool,
+    pub target: EditTarget,
+    pub title: String,
+    pub yaml: String,
+}
+
+/// Events for edit windows and the main window.
+pub mod edit_events {
+    /// To an edit window whose close was held for unsaved edits.
+    pub const CLOSE_REQUESTED: &str = "edit-close-requested";
+    /// To the main window after a save, with the [`super::EditTarget`].
+    pub const SAVED: &str = "object-saved";
+}
+
 /// A container to open a shell in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecTarget {

@@ -676,3 +676,31 @@ button.link:hover { text-decoration: underline; }
 .stat-tile.warning .stat-note { color: var(--warn-text); }
 .stat-tile.critical .stat-note { color: var(--danger); }
 .stat-tile.good .stat-note { color: var(--ok); }
+
+/* YAML edit window */
+.editor-app { display: flex; flex-direction: column; height: 100vh; background: var(--panel); }
+.editor-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.editor-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 320px; }
+.editor-actions { display: flex; gap: 6px; }
+.editor-host { flex: 1; min-height: 0; }
+.editor-status {
+  display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 4px 12px;
+  border-top: 1px solid var(--border); font-size: 12px; background: var(--bg);
+}
+.editor-status .link { font-size: 12px; }
+.chip.prod-chip { background: var(--danger-soft); color: var(--danger); }
+.yaml-tools { display: flex; justify-content: flex-end; padding: 8px 14px 0; }
+.diff {
+  max-height: 46vh; overflow: auto; margin: 8px 0; padding: 4px 0; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); font-family: var(--mono); font-size: 12px; line-height: 1.5;
+}
+.diff-line { padding: 0 8px; white-space: pre; }
+.diff-mark { display: inline-block; width: 1.4em; color: var(--muted); user-select: none; }
+.diff-add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.diff-add .diff-mark { color: var(--ok); }
+.diff-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.diff-del .diff-mark { color: var(--danger); }
+.diff-skip { padding: 2px 8px; color: var(--muted); font-style: italic; }

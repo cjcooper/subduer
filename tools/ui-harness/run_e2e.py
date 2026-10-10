@@ -15,6 +15,7 @@ Needs Google Chrome and Trunk; macOS paths by default (set CHROME to override).
 import concurrent.futures
 import functools
 import html
+import json
 import http.server
 import os
 import re
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HARNESS = os.path.join(ROOT, "tools", "ui-harness")
@@ -31,10 +33,10 @@ CHROME = os.environ.get("CHROME", "/Applications/Google Chrome.app/Contents/MacO
 LIGHT, DARK = 1, 0
 
 
-def S(id, stub, query, has=(), lacks=(), scheme=LIGHT, budget=8000):
+def S(id, stub, query, has=(), lacks=(), scheme=LIGHT, budget=8000, real_time=False):
     """A scenario. `has`/`lacks`: strings that must (not) appear in the title
     or page text; a string starting with `re:` is a regular expression."""
-    return dict(id=id, stub=stub, query=query, has=list(has), lacks=list(lacks), scheme=scheme, budget=budget)
+    return dict(id=id, stub=stub, query=query, has=list(has), lacks=list(lacks), scheme=scheme, budget=budget, real_time=real_time)
 
 
 SCENARIOS = [
@@ -143,6 +145,37 @@ SCENARIOS = [
     S("settings/saved-dark-restart", "settingsstub.js", "theme=dark", has=["data-theme=dark", "native=dark"]),
     S("settings/back-to-auto", "settingsstub.js", "theme=light&pick=auto", scheme=DARK, has=["data-theme=none", "saved=auto"]),
     S("settings/no-auto", "settingsstub.js", "open=1&noauto=1", has=["buttons=Light*|Dark"], lacks=["Auto"]),
+    # ---- YAML editing ----
+    S("edit/button-opens-editor", "configstub.js", "kind=cm&yamledit=1",
+      has=['open_editor {"target":{"kind":{"group":"","version":"v1","kind":"ConfigMap"', '"name":"acme-api-config"']),
+    S("edit/no-button-for-helm", "helmstub.js", "", lacks=["open_editor"]),
+    S("edit/loads-highlighted", "editorstub.js", "edit=edit-1", has=["calls=start", "highlighted=true", "No changes", "replicas"]),
+    S("edit/change-marks-dirty", "editorstub.js", "edit=edit-1&change=1", has=["dirty=true", "Edited · not saved"]),
+    S("edit/no-changes-no-save", "editorstub.js", "edit=edit-1&save=1", has=["No changes to save."], lacks=["check"]),
+    # Ace checks syntax in a web worker, which needs real time.
+    S("edit/syntax-error-marked", "editorstub.js", "edit=edit-1&bad=1", has=["re: errors=[1-9]"], budget=6000, real_time=True),
+    S("edit/syntax-error-blocks-save", "editorstub.js", "edit=edit-1&bad=1&save=1",
+      has=["Fix the YAML first: line 4", "re: errors=[1-9]"], lacks=["check"], budget=6000, real_time=True),
+    S("edit/save-unlocked", "editorstub.js", "edit=edit-1&change=1&save=1&confirm=1",
+      has=["calls=start,check,save,close", "dirty=false"]),
+    S("edit/save-shows-diff", "editorstub.js", "edit=edit-1&change=1&save=1",
+      has=["modal=Save Deployment?", "1 line added, 1 removed.", "replicas: 3"], lacks=[",save"]),
+    S("edit/locked-asks-to-allow", "editorstub.js", "edit=edit-1&change=1&save=1&locked=1",
+      has=["modal=Allow changes?"], lacks=[",save"]),
+    S("edit/locked-then-saves", "editorstub.js", "edit=edit-1&change=1&save=1&locked=1&confirm=1",
+      has=["unlock:acme-uat", ",save,close"]),
+    S("edit/prod-needs-names", "editorstub.js", "edit=edit-1&prod=1&locked=1&change=1&save=1&confirm=1", lacks=[",save", "unlock:"]),
+    S("edit/prod-typed-saves", "editorstub.js", "edit=edit-1&prod=1&locked=1&change=1&save=1&typed=1&confirm=1",
+      has=["unlock:acme-prd", ",save,close"]),
+    S("edit/server-rejects", "editorstub.js", "edit=edit-1&change=1&save=1&dryfail=1",
+      has=["must be greater than or equal to 0", "modal=none"], lacks=[",save"]),
+    S("edit/cancel-clean-closes", "editorstub.js", "edit=edit-1&cancel=1", has=["calls=start,close"]),
+    S("edit/cancel-dirty-asks", "editorstub.js", "edit=edit-1&change=1&cancel=1", has=["modal=Discard your edits?"], lacks=[",close"]),
+    S("edit/cancel-dirty-keep", "editorstub.js", "edit=edit-1&change=1&cancel=1&keep=1", has=["modal=none", "dirty=true"], lacks=[",close"]),
+    S("edit/cancel-dirty-discard", "editorstub.js", "edit=edit-1&change=1&cancel=1&discard=1", has=["calls=start,close", "dirty=false"]),
+    S("edit/window-close-asks", "editorstub.js", "edit=edit-1&change=1&closereq=1", has=["modal=Discard your edits?"], lacks=[",close"]),
+    S("edit/window-close-clean", "editorstub.js", "edit=edit-1&closereq=1", has=["calls=start,close"]),
+    S("edit/reload-dirty-asks", "editorstub.js", "edit=edit-1&change=1&reload=1&discard=1", has=["calls=start,start", "dirty=false"]),
     # ---- Logs and shell windows ----
     S("logs/window", "logstub.js", "logs=app&merged=1", has=["GET /healthz", "web-7d9f-abcde/app", "Wrap"], lacks=["bad response"]),
     S("exec/window", "execstub.js", "exec=app", has=["Shell"]),
@@ -171,13 +204,74 @@ def serve(directory):
     return server
 
 
+def run_real_time(url, scenario):
+    """Loads the page and waits `budget` ms of real time, then returns its DOM.
+    For web workers (Ace's syntax check), which don't run under virtual time.
+    Talks to Chrome over --remote-debugging-pipe: fd 3 in, fd 4 out, messages
+    are JSON ended by a NUL byte."""
+    to_chrome_r, to_chrome_w = os.pipe()
+    from_chrome_r, from_chrome_w = os.pipe()
+    profile = tempfile.mkdtemp(prefix="subduer-e2e-profile-")
+
+    def child_fds():
+        os.dup2(to_chrome_r, 3)
+        os.dup2(from_chrome_w, 4)
+
+    chrome = subprocess.Popen(
+        [CHROME, "--headless=new", "--disable-gpu", f"--blink-settings=preferredColorScheme={scenario['scheme']}",
+         "--remote-debugging-pipe", f"--user-data-dir={profile}", url],
+        # 3 and 4 too: fds not listed are closed after child_fds runs.
+        pass_fds=(3, 4, to_chrome_r, from_chrome_w), preexec_fn=child_fds,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    os.close(to_chrome_r)
+    os.close(from_chrome_w)
+    reader = os.fdopen(from_chrome_r, "rb")
+    buffered = b""
+    next_id = 0
+
+    def send(method, params=None, session=None):
+        nonlocal next_id, buffered
+        next_id += 1
+        message = {"id": next_id, "method": method, "params": params or {}}
+        if session:
+            message["sessionId"] = session
+        os.write(to_chrome_w, json.dumps(message).encode() + b"\0")
+        while True:
+            while b"\0" not in buffered:
+                chunk = reader.read1(65536)
+                if not chunk:
+                    raise RuntimeError("Chrome closed the debugging pipe")
+                buffered += chunk
+            raw, buffered = buffered.split(b"\0", 1)
+            reply = json.loads(raw)
+            if reply.get("id") == next_id:
+                return reply.get("result", {})
+
+    try:
+        page = next(t for t in send("Target.getTargets")["targetInfos"] if t["type"] == "page")
+        session = send("Target.attachToTarget", {"targetId": page["targetId"], "flatten": True})["sessionId"]
+        time.sleep(scenario["budget"] / 1000)
+        result = send("Runtime.evaluate", {"expression": "document.documentElement.outerHTML"}, session)
+        return result.get("result", {}).get("value", "")
+    finally:
+        chrome.kill()
+        chrome.wait()
+        reader.close()
+        os.close(to_chrome_w)
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def run(port, scenario):
     url = f"http://127.0.0.1:{port}/page-{scenario['stub'][:-3]}.html?{scenario['query']}"
-    dom = subprocess.run(
-        [CHROME, "--headless=new", "--disable-gpu", f"--blink-settings=preferredColorScheme={scenario['scheme']}",
-         f"--virtual-time-budget={scenario['budget']}", "--dump-dom", url],
-        capture_output=True, text=True, timeout=120,
-    ).stdout
+    if scenario["real_time"]:
+        dom = run_real_time(url, scenario)
+    else:
+        dom = subprocess.run(
+            [CHROME, "--headless=new", "--disable-gpu", f"--blink-settings=preferredColorScheme={scenario['scheme']}",
+             f"--virtual-time-budget={scenario['budget']}", "--dump-dom", url],
+            capture_output=True, text=True, timeout=120,
+        ).stdout
     title = html.unescape(m.group(1)) if (m := re.search(r"<title>(.*?)</title>", dom, re.S)) else ""
     body = dom.split("</head>", 1)[-1]
     body = re.sub(r"<script.*?</script>", " ", body, flags=re.S)
