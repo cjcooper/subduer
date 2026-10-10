@@ -125,6 +125,7 @@ pub fn run() {
             commands::set_unsaved,
             commands::open_url,
             commands::helm_rollback,
+            commands::helm_uninstall,
             commands::check_access,
             commands::expand_claim,
             commands::set_reclaim_policy,

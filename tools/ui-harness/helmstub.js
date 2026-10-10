@@ -1,4 +1,4 @@
-// Helm release Details tab and Rollback. Query: op=rollback, to=<revision>, nowait=1, ctx=prod, typed=1, locked=1,
+// Helm release Details tab, Rollback and Delete. Query: op=rollback|delete, keep=1 (keep history), to=<revision>, nowait=1, ctx=prod, typed=1, locked=1,
 // go=1 (sent args land in the page title), fail=1 (helm answers with an error), collapse=…, scroll=<px>
 (function () {
   const params = new URLSearchParams(location.search);
@@ -37,6 +37,7 @@
       if (cmd === 'connect') return { context: ctxName, kinds, namespaces: ['shop'] };
       if (cmd === 'set_unlocked') { unlocked = true; return null; }
       if (cmd === 'object_details') return args.kind.kind === 'Release' ? d : { ...d, kind: args.kind.kind, name: args.name, sections: [], info: [] };
+      if (cmd === 'helm_uninstall') { document.title = 'helm_uninstall ' + JSON.stringify(args); if (params.get('fail')) throw 'Error: uninstallation completed with 1 error(s): context deadline exceeded'; return 'release "acme-api" uninstalled'; }
       if (cmd === 'helm_rollback') { document.title = 'helm_rollback ' + JSON.stringify(args); if (params.get('fail')) throw 'Error: release acme-api failed: timed out waiting for the condition'; return 'Rollback was a success! Happy Helming!'; }
       if (['set_unsaved', 'cluster_overview', 'stop_watch', 'workload_history'].includes(cmd)) return null;
       if (cmd === 'get_yaml') return '# Helm release summary\n';
@@ -48,11 +49,12 @@
   setTimeout(() => [...document.querySelectorAll('.kind-section-title')].find((b) => /helm/i.test(b.textContent))?.click(), 600);
   setTimeout(() => [...document.querySelectorAll('button.kind')].find((b) => /release/i.test(b.textContent))?.click(), 1000);
   setTimeout(() => document.querySelector('tbody tr')?.click(), 1500);
-  if (params.get('op')) setTimeout(() => btn('.detail-actions button', 'Rollback')?.click(), 2300);
+  if (params.get('op')) setTimeout(() => btn('.detail-actions button', params.get('op') === 'delete' ? 'Delete' : 'Rollback')?.click(), 2300);
+  if (params.get('keep')) setTimeout(() => { const c = document.querySelector('.check-row input'); if (c) { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); } }, 2650);
   if (params.get('to')) setTimeout(() => { const s = document.querySelector('.rollback-select'); if (s) { s.value = params.get('to'); s.dispatchEvent(new Event('change', { bubbles: true })); } }, 2600);
   if (params.get('nowait')) setTimeout(() => { const c = document.querySelector('.check-row input'); if (c) { c.checked = false; c.dispatchEvent(new Event('change', { bubbles: true })); } }, 2650);
-  if (prod && params.get('typed')) setTimeout(() => { const i = [...document.querySelectorAll('.modal .confirm-input')].pop(); if (i) { i.value = 'acme-api'; i.dispatchEvent(new Event('input', { bubbles: true })); } }, 2800);
-  if (params.get('go')) setTimeout(() => document.querySelector('.modal-actions .primary')?.click(), 3100);
+  if (params.get('typed')) setTimeout(() => { const i = [...document.querySelectorAll('.modal .confirm-input')].pop(); if (i) { i.value = 'acme-api'; i.dispatchEvent(new Event('input', { bubbles: true })); } }, 2800);
+  if (params.get('go')) setTimeout(() => document.querySelector('.modal-actions .primary, .modal-actions .danger')?.click(), 3100);
   if (params.get('link')) setTimeout(() => [...document.querySelectorAll('.itable tbody tr.clickable')].find((r) => r.textContent.includes('ClusterRole'))?.click(), 2400);
   if (params.get('link')) setTimeout(() => { document.title = 'selected=' + (document.querySelector('.detail-title')?.textContent || 'none'); }, 3400);
   const collapse = params.get('collapse');

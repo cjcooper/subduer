@@ -374,6 +374,23 @@ pub async fn helm_rollback(
         .map_err(|e| e.user_message())
 }
 
+/// Deletes a Helm release with `helm uninstall`, checked like
+/// `delete_resource`. Returns Helm's output.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn helm_uninstall(
+    state: State<'_, AppState>,
+    context: String,
+    namespace: String,
+    name: String,
+    keep_history: bool,
+    wait: bool,
+) -> CmdResult<String> {
+    client_for_change(&state, &context, "deleted").await?;
+    subduer_core::helm::uninstall(&state.gate, &context, &namespace, &name, keep_history, wait, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Opens an Ingress URL in the browser. Only plain http(s) addresses are
 /// accepted.
 #[tauri::command]

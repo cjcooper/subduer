@@ -8,8 +8,9 @@
 //! straight after decoding and never shown; the Details tab takes only each
 //! manifest object's kind and name first.
 //!
-//! Rollback runs the `helm` CLI (`helm rollback`), which re-applies the old
-//! revision, runs its hooks and records a new revision exactly as Helm does.
+//! Rollback and uninstall run the `helm` CLI (`helm rollback`, `helm
+//! uninstall`), so hooks, history and resource policies behave exactly as
+//! they do from a terminal.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -558,24 +559,84 @@ pub async fn rollback(
     if !dry_run {
         gate.ensure_writable(context)?;
     }
+    let helm4 = helm_major().await? >= 4;
+    let args = rollback_args(context, namespace, release, revision, wait, dry_run, helm4);
+    let result = run_helm(&args).await;
+    tracing::info!(%context, %namespace, %release, revision, wait, dry_run, ok = result.is_ok(), "helm rollback");
+    result
+}
+
+/// `helm uninstall` arguments.
+fn uninstall_args(context: &str, namespace: &str, release: &str, keep_history: bool, wait: bool, dry_run: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "uninstall".into(),
+        release.into(),
+        format!("--namespace={namespace}"),
+        format!("--kube-context={context}"),
+    ];
+    if keep_history {
+        args.push("--keep-history".into());
+    }
+    if wait {
+        args.extend(["--wait".into(), "--timeout".into(), "5m0s".into()]);
+    }
+    if dry_run {
+        args.push("--dry-run".into());
+    }
+    args
+}
+
+/// Deletes a release with `helm uninstall`: its resources (except those
+/// marked `helm.sh/resource-policy: keep`, and PVCs made by StatefulSets)
+/// and, unless `keep_history`, its revision records. A `dry_run` changes
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+pub async fn uninstall(
+    gate: &SafetyGate,
+    context: &str,
+    namespace: &str,
+    release: &str,
+    keep_history: bool,
+    wait: bool,
+    dry_run: bool,
+) -> Result<String> {
+    if !valid_name(release) || !valid_name(namespace) {
+        return Err(Error::Message("not a valid release or namespace name".into()));
+    }
+    if !dry_run {
+        gate.ensure_writable(context)?;
+    }
+    helm_major().await?;
+    let result = run_helm(&uninstall_args(context, namespace, release, keep_history, wait, dry_run)).await;
+    tracing::info!(%context, %namespace, %release, keep_history, wait, dry_run, ok = result.is_ok(), "helm uninstall");
+    result
+}
+
+/// The installed Helm's major version; an error if `helm` can't be run.
+async fn helm_major() -> Result<u32> {
     let version = tokio::process::Command::new("helm")
         .args(["version", "--short"])
         .output()
         .await
         .map_err(|_| Error::Message("The helm command isn't installed or isn't on PATH (brew install helm).".into()))?;
-    let helm4 = String::from_utf8_lossy(&version.stdout).trim_start().starts_with("v4");
-    let args = rollback_args(context, namespace, release, revision, wait, dry_run, helm4);
-    let run = tokio::process::Command::new("helm").args(&args).kill_on_drop(true).output();
+    let text = String::from_utf8_lossy(&version.stdout);
+    Ok(text.trim_start().trim_start_matches('v').split('.').next().and_then(|m| m.parse().ok()).unwrap_or(3))
+}
+
+/// Runs `helm` with `args` (no shell) and returns its output, or its error
+/// output as the error. Gives up after 6 minutes.
+async fn run_helm(args: &[String]) -> Result<String> {
+    let what = format!("helm {}", args.first().map_or("", String::as_str));
+    let run = tokio::process::Command::new("helm").args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(Duration::from_secs(6 * 60), run)
         .await
-        .map_err(|_| Error::Message("helm rollback took more than 6 minutes; check the release's history".into()))?
+        .map_err(|_| Error::Message(format!("{what} took more than 6 minutes; check the release's history")))?
         .map_err(|e| Error::Message(format!("couldn't run helm: {e}")))?;
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim().to_owned();
-    tracing::info!(%context, %namespace, %release, revision, wait, dry_run, ok = out.status.success(), "helm rollback");
     if out.status.success() {
         Ok(text)
     } else {
-        Err(Error::Message(if text.is_empty() { format!("helm rollback failed ({})", out.status) } else { text }))
+        Err(Error::Message(if text.is_empty() { format!("{what} failed ({})", out.status) } else { text }))
     }
 }
 
@@ -661,6 +722,24 @@ mod tests {
         assert_eq!(rollback_args("c", "n", "r", 1, false, true, false).last().unwrap(), "--dry-run");
         assert!(!rollback_args("c", "n", "r", 1, false, false, true).iter().any(|a| a.starts_with("--dry-run")));
         assert!(valid_name("corporate-wallet") && !valid_name("web; rm") && !valid_name("--all"));
+    }
+
+    #[test]
+    fn uninstall_arguments() {
+        assert_eq!(
+            uninstall_args("acme-uat", "shop", "web", true, true, true),
+            ["uninstall", "web", "--namespace=shop", "--kube-context=acme-uat", "--keep-history", "--wait", "--timeout", "5m0s", "--dry-run"]
+        );
+        assert_eq!(uninstall_args("c", "n", "r", false, false, false), ["uninstall", "r", "--namespace=n", "--kube-context=c"]);
+    }
+
+    #[tokio::test]
+    async fn uninstall_is_gated_and_checked() {
+        let gate = SafetyGate::default();
+        let err = uninstall(&gate, "acme-prd", "shop", "web", false, false, false).await.unwrap_err();
+        assert!(matches!(err, Error::Locked(_)));
+        let err = uninstall(&gate, "acme-prd", "shop", "-a", false, false, true).await.unwrap_err();
+        assert!(matches!(err, Error::Message(_)));
     }
 
     #[tokio::test]

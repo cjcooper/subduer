@@ -32,6 +32,8 @@ pub enum Op {
     Reclaim,
     /// Roll a Helm release back to an earlier revision.
     Rollback,
+    /// Delete a Helm release with `helm uninstall`.
+    Uninstall,
 }
 
 impl Op {
@@ -47,6 +49,7 @@ impl Op {
             Op::Expand => "Expand",
             Op::Reclaim => "Reclaim policy",
             Op::Rollback => "Rollback",
+            Op::Uninstall => "Delete",
         }
     }
 
@@ -64,6 +67,7 @@ impl Op {
             (Op::Expand, _) => "Make the claim bigger",
             (Op::Reclaim, _) => "Keep or delete the data when its claim is deleted",
             (Op::Rollback, _) => "Go back to an earlier revision with helm rollback",
+            (Op::Uninstall, _) => "Delete the release and everything it created, with helm uninstall",
         }
     }
 }
@@ -122,6 +126,8 @@ struct Change<'a> {
     revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wait: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_history: Option<bool>,
 }
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
@@ -188,6 +194,9 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
             if history(store, &row.name, true).len() > 1 {
                 ops.push(Op::Rollback);
             }
+            if !history(store, &row.name, true).is_empty() {
+                ops.push(Op::Uninstall);
+            }
         } else if kind.kind == "HorizontalPodAutoscaler" {
             if patch {
                 ops.push(Op::Range);
@@ -240,7 +249,12 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
                     };
                     let (kind, row) = (kind.clone(), row.clone());
                     view! {
-                        <button class="btn small" title=title on:click=move |_| request(store, kind.clone(), &row, op)>
+                        <button
+                            class="btn small"
+                            class:danger-outline=op == Op::Uninstall
+                            title=title
+                            on:click=move |_| request(store, kind.clone(), &row, op)
+                        >
                             {op.label()}
                         </button>
                     }
@@ -292,6 +306,20 @@ fn history(store: Store, name: &str, tracked: bool) -> Vec<(i64, String, String,
         _ => Vec::new(),
     };
     if tracked { store.object.with(read) } else { store.object.with_untracked(read) }
+}
+
+/// The objects a release created, from its loaded Resources: (kind, name).
+fn release_objects(store: Store, name: &str) -> Vec<(String, String)> {
+    store.object.with_untracked(|o| match o {
+        Some(Ok(d)) if d.name == name && d.kind == "Release" => d
+            .sections
+            .iter()
+            .find(|s| s.id == "helm-resources")
+            .and_then(|s| s.table.as_ref())
+            .map(|t| t.rows.iter().filter_map(|r| Some((r.cells.first()?.clone(), r.cells.get(1)?.clone()))).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    })
 }
 
 /// A size like `20Gi`, `500M` or `1e9` in bytes.
@@ -361,8 +389,10 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     let size = RwSignal::new(String::new());
     let rollback_to = RwSignal::new(String::new());
     let wait = RwSignal::new(true);
+    let keep_history = RwSignal::new(false);
     let close = move || {
         typed.set(String::new());
+        keep_history.set(false);
         error.set(None);
         busy.set(false);
         current.set(None);
@@ -439,7 +469,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 let name = name.clone();
                 let grows = grows.clone();
                 move || {
-                    let typed_ok = !prod || typed.get().trim() == name;
+                    // Deleting a whole release always needs the name typed.
+                    let typed_ok = !(prod || op == Op::Uninstall) || typed.get().trim() == name;
                     let scale_ok = match op {
                         Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
                         Op::Range => range().is_some_and(|r| Some(r) != range_now()),
@@ -459,6 +490,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     let size = size.get_untracked().trim().to_owned();
                     let revision = rollback_to.get_untracked().parse::<i64>().ok();
                     let wait = wait.get_untracked();
+                    let keep_history = keep_history.get_untracked();
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
@@ -473,6 +505,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             Op::Expand => ("expand_claim", None, None),
                             Op::Reclaim => ("set_reclaim_policy", None, None),
                             Op::Rollback => ("helm_rollback", None, None),
+                            Op::Uninstall => ("helm_uninstall", None, None),
                         };
                         let args = Change {
                             context: &target.context.name,
@@ -486,7 +519,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             size: (target.op == Op::Expand).then_some(size.as_str()),
                             policy: (target.op == Op::Reclaim).then_some(new_policy),
                             revision: (target.op == Op::Rollback).then_some(revision).flatten(),
-                            wait: (target.op == Op::Rollback).then_some(wait),
+                            wait: matches!(target.op, Op::Rollback | Op::Uninstall).then_some(wait),
+                            keep_history: (target.op == Op::Uninstall).then_some(keep_history),
                         };
                         // Run now answers with the new Job's name; the others with nothing.
                         match invoke::<_, Option<String>>(command, &args).await {
@@ -494,6 +528,11 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                                 close();
                                 if target.op == Op::Save {
                                     store.editing.set(false);
+                                }
+                                if target.op == Op::Uninstall {
+                                    // It's gone; the table drops it when the watch catches up.
+                                    store.selected.set(None);
+                                    return;
                                 }
                                 crate::pod_detail::load(store, true);
                             }
@@ -573,6 +612,36 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     <p class="muted">"Claims can't shrink again. The filesystem grows when the driver resizes it, which for some drivers needs the pod restarted."</p>
                 }
                 .into_any(),
+                Op::Uninstall => {
+                    let objects = release_objects(store, &name);
+                    let shown = objects.len().min(8);
+                    let more = objects.len() - shown;
+                    let list = objects
+                        .iter()
+                        .take(shown)
+                        .map(|(kind, obj)| view! { <li>{kind.clone()}" "<span class="mono">{obj.clone()}</span></li> })
+                        .collect_view();
+                    view! {
+                        <p>{what}" will be uninstalled with helm uninstall."</p>
+                        {(!objects.is_empty()).then(|| view! {
+                            <p>"It deletes what the release created:"</p>
+                            <ul class="change-list">
+                                {list}
+                                {(more > 0).then(|| view! { <li class="muted">{format!("and {more} more")}</li> })}
+                            </ul>
+                        })}
+                        <p class="warn-text">"Data in those objects is lost. Objects marked helm.sh/resource-policy: keep stay, and so do volume claims a StatefulSet created."</p>
+                        <label class="check-row">
+                            <input type="checkbox" prop:checked=move || keep_history.get() on:change=move |ev| keep_history.set(event_target_checked(&ev)) />
+                            " Keep its history, so it can be rolled back later"
+                        </label>
+                        <label class="check-row">
+                            <input type="checkbox" prop:checked=move || wait.get() on:change=move |ev| wait.set(event_target_checked(&ev)) />
+                            " Wait until everything is deleted (up to 5 minutes)"
+                        </label>
+                    }
+                    .into_any()
+                }
                 Op::Rollback => {
                     let revisions = history(store, &name, false);
                     let current = revisions.first().cloned();
@@ -692,6 +761,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 Op::Expand => ("Expand claim?".to_owned(), "Expanding…"),
                 Op::Reclaim => ("Change reclaim policy?".to_owned(), "Saving…"),
                 Op::Rollback => ("Roll back Helm release?".to_owned(), "Rolling back…"),
+                Op::Uninstall => ("Delete Helm release?".to_owned(), "Deleting…"),
                 Op::Save => (format!("Save {}?", kind.kind), "Saving…"),
             };
             let label = move || {
@@ -699,6 +769,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     doing.to_owned()
                 } else if op == Op::Scale {
                     replicas().map_or_else(|| "Scale".to_owned(), |n| format!("Scale to {n}"))
+                } else if op == Op::Uninstall {
+                    "Delete release".to_owned()
                 } else if op == Op::Rollback {
                     rollback_to.with(|r| if r.is_empty() { "Rollback".to_owned() } else { format!("Roll back to {r}") })
                 } else if op == Op::Reclaim {
@@ -718,6 +790,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         {body}
                         {context.prod_like.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
+                        })}
+                        {(context.prod_like || op == Op::Uninstall).then(|| view! {
                             <p>"Type the name to confirm:"</p>
                             <input
                                 class="confirm-input"
@@ -729,7 +803,11 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         <div class="modal-actions">
                             // Leaving the Save dialog never saves; it goes back to the edit.
                             <button on:click=move |_| close()>{if op == Op::Save { "Back to editing" } else { "Cancel" }}</button>
-                            <button class="primary" prop:disabled=move || !ok() on:click=confirm.clone()>{label}</button>
+                            <button
+                                class=if op == Op::Uninstall { "danger" } else { "primary" }
+                                prop:disabled=move || !ok()
+                                on:click=confirm.clone()
+                            >{label}</button>
                         </div>
                     </div>
                 </div>
