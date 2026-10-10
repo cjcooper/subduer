@@ -83,11 +83,8 @@ fn object(pairs: &[(&str, JsValue)]) -> JsValue {
 impl Term {
     fn new(host: &web_sys::HtmlElement) -> Option<Self> {
         let w: JsValue = window().into();
-        let dark = window()
-            .match_media("(prefers-color-scheme: dark)")
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.matches());
+        // The Appearance setting, or the system's when it's Auto.
+        let dark = crate::prefs::is_dark();
         // Matches the app's --panel / --text / --accent tokens.
         let (bg, fg, cursor, selection) =
             if dark { ("#1d2128", "#e3e7ed", "#5b9bff", "#2f4a7a") } else { ("#ffffff", "#1c2430", "#2f6fe4", "#cfe0fb") };

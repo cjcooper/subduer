@@ -17,6 +17,9 @@ pub(crate) enum DetailTab {
     Yaml,
 }
 
+/// Backend event: the Settings… menu item was chosen.
+const OPEN_SETTINGS: &str = "open-settings";
+
 /// Backend event: closing the window or quitting was held for unsaved edits.
 const UNSAVED_CLOSE: &str = "unsaved-close";
 
@@ -88,6 +91,9 @@ pub(crate) struct Store {
     /// A ConfigMap or Secret is being edited: background refreshes pause so
     /// they don't replace the draft.
     pub(crate) editing: RwSignal<bool>,
+    /// The Settings dialog is open, and the Appearance setting.
+    pub(crate) settings_open: RwSignal<bool>,
+    pub(crate) theme: RwSignal<crate::prefs::Theme>,
     /// What has unsaved edits, e.g. `ConfigMap app-config`; `None` when
     /// nothing would be lost. Leaving goes through [`guard`].
     pub(crate) dirty: RwSignal<Option<String>>,
@@ -151,6 +157,8 @@ impl Store {
             workload: RwSignal::new(None),
             object: RwSignal::new(None),
             editing: RwSignal::new(false),
+            settings_open: RwSignal::new(false),
+            theme: RwSignal::new(crate::prefs::load_theme()),
             dirty: RwSignal::new(None),
             discard_prompt: RwSignal::new(false),
             discard_then: StoredValue::new_local(None),
@@ -253,6 +261,7 @@ pub fn App() -> impl IntoView {
         })
         .await;
         listen::<Vec<ForwardInfo>>(subduer_types::forward_events::CHANGED, move |list| store.forwards.set(list)).await;
+        listen::<()>(OPEN_SETTINGS, move |()| store.settings_open.set(true)).await;
         // Closing the window or quitting was held for unsaved edits.
         listen::<bool>(UNSAVED_CLOSE, move |quit| {
             guard(store, move || {
@@ -274,6 +283,17 @@ pub fn App() -> impl IntoView {
     });
 
     set_interval(move || store.now.set(js_sys::Date::now()), Duration::from_secs(5));
+    // Title bars and native controls follow the Appearance setting too.
+    Effect::new(move |_| {
+        #[derive(Serialize)]
+        struct Args {
+            theme: &'static str,
+        }
+        let theme = store.theme.get();
+        spawn_local(async move {
+            let _ = invoke::<_, ()>("set_app_theme", &Args { theme: theme.as_str() }).await;
+        });
+    });
     // The backend holds window close and quit while there are unsaved edits.
     Effect::new(move |was: Option<bool>| {
         #[derive(Serialize)]
@@ -352,6 +372,7 @@ pub fn App() -> impl IntoView {
             <crate::delete::DeleteDialog store=store />
             <crate::workload::WorkloadDialog store=store />
             <DiscardDialog store=store />
+            <SettingsDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
             <crate::download::DownloadDialog store=store />
@@ -1000,6 +1021,69 @@ pub(crate) fn guard(store: Store, then: impl FnOnce() + 'static) {
     } else {
         store.editing.set(false);
         then();
+    }
+}
+
+/// Settings: Appearance as preview cards (Auto where the system reports one,
+/// Light, Dark). Changes apply straight away, in every window.
+#[component]
+fn SettingsDialog(store: Store) -> impl IntoView {
+    use crate::prefs::Theme;
+    let auto = crate::prefs::auto_supported();
+    let choose = move |t: Theme| {
+        crate::prefs::save_theme(t);
+        crate::prefs::apply_theme(t);
+        store.theme.set(t);
+    };
+    let close = move |_| store.settings_open.set(false);
+    let card = move |t: Theme, label: &'static str| {
+        // Auto shows both, split diagonally, like the system's own setting.
+        let preview = match t {
+            Theme::Light => view! { <img src="assets/appearance-light.jpg" alt="" /> }.into_any(),
+            Theme::Dark => view! { <img src="assets/appearance-dark.jpg" alt="" /> }.into_any(),
+            Theme::Auto => view! {
+                <img src="assets/appearance-light.jpg" alt="" />
+                <img class="split" src="assets/appearance-dark.jpg" alt="" />
+            }
+            .into_any(),
+        };
+        view! {
+            <button
+                class="theme-card"
+                class:on=move || store.theme.get() == t
+                aria-pressed=move || (store.theme.get() == t).to_string()
+                on:click=move |_| choose(t)
+            >
+                <span class="theme-preview">{preview}</span>
+                <span class="theme-name">{label}</span>
+            </button>
+        }
+    };
+    let note = move || match store.theme.get() {
+        Theme::Auto => "Follows your system's light or dark appearance.",
+        Theme::Light => "Always light.",
+        Theme::Dark => "Always dark.",
+    };
+    move || {
+        store.settings_open.get().then(|| view! {
+            <div class="modal-backdrop" on:click=close>
+                <div class="modal wide" on:click=|ev| ev.stop_propagation()>
+                    <h2>"Settings"</h2>
+                    <fieldset class="settings-group">
+                        <legend>"Appearance"</legend>
+                        <div class="theme-cards" role="group" aria-label="Appearance">
+                            {auto.then(|| card(Theme::Auto, "Auto"))}
+                            {card(Theme::Light, "Light")}
+                            {card(Theme::Dark, "Dark")}
+                        </div>
+                        <p class="muted small settings-note">{note}</p>
+                    </fieldset>
+                    <div class="modal-actions">
+                        <button class="primary" on:click=close>"Done"</button>
+                    </div>
+                </div>
+            </div>
+        })
     }
 }
 

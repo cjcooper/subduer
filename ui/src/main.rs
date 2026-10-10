@@ -19,6 +19,8 @@ mod workload_detail;
 
 fn main() {
     console_error_panic_hook::set_once();
+    // Every window (main, logs, shell) follows the Appearance setting.
+    prefs::follow_theme();
     // The same page serves logs and shell windows: `?logs=<label>`, `?exec=<label>`.
     if let Some(label) = logs::label_from_url() {
         leptos::mount::mount_to_body(move || leptos::view! { <logs::LogsApp label=label.clone() /> });

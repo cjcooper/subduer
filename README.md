@@ -49,6 +49,7 @@ cargo run -p subduer-core --example smoke -- <context>   # read-only CLI check
 - **Run now** a CronJob (like `kubectl create job --from=cronjob/…`), and **Suspend/Resume** CronJobs and Jobs, after the same kind of confirmation.
 - **Edit range** of an HPA (min and max replicas), **Expand** a PersistentVolumeClaim, and switch a PersistentVolume's **Reclaim policy** between Retain and Delete.
 - **Live tables.** Each table is backed by a Kubernetes watch, with snapshots throttled to 250 ms.
+- **Light or dark.** Settings… (⌘,) shows previews of Light, Dark and, where the system reports one, Auto; pick one. Every window follows it.
 - **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name. All mutations go through `SafetyGate::ensure_writable`: Delete, Restart, Scale, Run now, Suspend/Resume, Save, Edit range, Expand, Reclaim policy, Rollback, release Delete, Shell and Upload ask to unlock first.
 
 ## License

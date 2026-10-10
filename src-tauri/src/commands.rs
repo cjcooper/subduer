@@ -404,6 +404,18 @@ pub fn open_url(url: String) -> CmdResult<()> {
     crate::forward::open_in_browser(&url)
 }
 
+/// Sets every window's native appearance (title bar, scroll bars, form
+/// controls): `light`, `dark`, or `auto` to follow the system.
+#[tauri::command]
+pub fn set_app_theme(app: AppHandle, theme: String) {
+    let theme = match theme.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    app.set_theme(theme);
+}
+
 /// The UI reports whether it holds unsaved edits, so closing the window or
 /// quitting can ask first.
 #[tauri::command]

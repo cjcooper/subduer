@@ -123,6 +123,7 @@ pub fn run() {
             upload::reveal_download,
             commands::secret_value,
             commands::set_unsaved,
+            commands::set_app_theme,
             commands::open_url,
             commands::helm_rollback,
             commands::helm_uninstall,

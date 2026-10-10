@@ -1,13 +1,17 @@
 //! The app menu: Tauri's default, with an About item that carries the app
-//! icon and says who makes the app. Without an explicit icon, macOS shows a
-//! generic one whenever the binary isn't running from a bundle (`cargo tauri dev`).
+//! icon and says who makes the app, and a Settings… item (⌘, / Ctrl+,).
+//! Without an explicit icon, macOS shows a generic one whenever the binary
+//! isn't running from a bundle (`cargo tauri dev`).
 
 use tauri::image::Image;
-use tauri::menu::{AboutMetadata, Menu, MenuItemKind, PredefinedMenuItem};
-use tauri::{AppHandle, Runtime};
+use tauri::menu::{AboutMetadata, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
 pub const MAKER: &str = "it-problems";
+const SETTINGS_ID: &str = "settings";
+/// Sent to the main window to open its Settings dialog.
+pub const OPEN_SETTINGS: &str = "open-settings";
 
 fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
     let info = app.package_info();
@@ -38,6 +42,26 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     {
         submenu.insert(&about, position)?;
     }
+    // Settings…: after About on macOS (where apps keep it), first in the
+    // first (File) menu elsewhere.
+    let settings = MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, Some("CmdOrCtrl+,"))?;
+    if let Some(MenuItemKind::Submenu(first)) = menu.items()?.into_iter().next() {
+        if cfg!(target_os = "macos") {
+            first.insert(&PredefinedMenuItem::separator(app)?, 1)?;
+            first.insert(&settings, 2)?;
+        } else {
+            first.insert(&settings, 0)?;
+            first.insert(&PredefinedMenuItem::separator(app)?, 1)?;
+        }
+    }
+    app.on_menu_event(|app, event| {
+        if event.id() == SETTINGS_ID
+            && let Some(main) = app.get_webview_window("main")
+        {
+            let _ = main.set_focus();
+            let _ = main.emit_to("main", OPEN_SETTINGS, ());
+        }
+    });
     // macOS lists open windows (main and logs) under Window once it knows
     // which submenu that is; Tauri's default menu doesn't say.
     #[cfg(target_os = "macos")]

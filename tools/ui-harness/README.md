@@ -31,7 +31,10 @@ python3 -m http.server 8765 &
 | `storagestub.js` | Storage-section Details tabs, Expand and Reclaim policy | `kind=pvc\|pv\|sc\|va`, `pending=1`, `op=expand\|reclaim`, `size=<new size>`, `ctx=prod`, `typed=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>` |
 | `rbacstub.js` | Access Control Details tabs and Check access | `kind=sa\|role\|binding`, `check=<resource>` (`secrets` is denied, others allowed; args land in the page title), `collapse=…`, `scroll=<px>` |
 | `helmstub.js` | Helm release Details tab, Rollback and Delete | `op=rollback\|delete`, `keep=1` (keep history), `to=<revision>`, `nowait=1`, `fail=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (args land in the page title), `link=1` (follows the ClusterRole link), `collapse=…`, `scroll=<px>`. Watch ids count up, as the app drops tables from older watches. |
+| `settingsstub.js` | Settings dialog and Appearance (preview cards) | `theme=auto\|light\|dark` (saved before start), `pick=auto\|light\|dark`, `open=1`, `noauto=1` (no system appearance). The title reports `data-theme`, the background, what's saved and the `set_app_theme` calls; vary `preferredColorScheme` to play the system. |
 | `ov.js` | Cluster page | needs `ov.json`: `cargo run -p subduer-core --example overview -- <context> --json`, with node and namespace names replaced by generic ones |
+
+`appearance-previews.sh` regenerates the Appearance preview images in `ui/assets/` from `workloadstub.js`.
 
 The stubs grew one feature at a time, so they're scrappy. Fixtures use generic
 names (`acme-uat`, `shop`), never real cluster or employer names.
