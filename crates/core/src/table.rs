@@ -304,6 +304,10 @@ pub(crate) fn pod_status(data: &Value, terminating: bool) -> String {
         if let Some(waiting) = state["waiting"]["reason"].as_str().filter(|r| !r.is_empty() && *r != "PodInitializing") {
             return format!("Init:{waiting}");
         }
+        // A running native sidecar (`restartPolicy: Always`) has done its init step.
+        if state["running"].is_object() && is_sidecar(data, &c["name"]) {
+            continue;
+        }
         return format!("Init:{i}/{}", inits.len());
     }
 
@@ -330,6 +334,13 @@ pub(crate) fn pod_status(data: &Value, terminating: bool) -> String {
     } else {
         reason
     }
+}
+
+/// Is the init container called `name` a native sidecar?
+fn is_sidecar(data: &Value, name: &Value) -> bool {
+    data["spec"]["initContainers"]
+        .as_array()
+        .is_some_and(|specs| specs.iter().any(|s| s["name"] == *name && s["restartPolicy"] == "Always"))
 }
 
 fn terminated_reason(terminated: &Value) -> String {
@@ -599,3 +610,7 @@ mod tests {
         assert_eq!(order, ["2026-10-01T03:00:00Z", "2026-10-01T02:00:00Z", "2026-10-01T01:00:00Z"]);
     }
 }
+
+#[cfg(test)]
+#[path = "table_tests.rs"]
+mod coverage_tests;

@@ -120,3 +120,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "download_tests.rs"]
+mod coverage_tests;

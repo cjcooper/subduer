@@ -324,22 +324,28 @@ fn release_objects(store: Store, name: &str) -> Vec<(String, String)> {
 
 /// A size like `20Gi`, `500M` or `1e9` in bytes.
 fn bytes(s: &str) -> Option<f64> {
-    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
-    let (number, suffix) = s.split_at(split);
+    // An exponent (`1e9`) is part of the number, so the suffix is matched
+    // from the end rather than split off at the first non-digit.
+    const SUFFIXES: [(&str, f64); 9] = [
+        ("Ki", 1024.0),
+        ("Mi", 1048576.0),
+        ("Gi", 1073741824.0),
+        ("Ti", 1099511627776.0),
+        ("Pi", 1125899906842624.0),
+        ("k", 1e3),
+        ("M", 1e6),
+        ("G", 1e9),
+        ("T", 1e12),
+    ];
+    let (number, k) =
+        SUFFIXES.iter().find_map(|(suffix, k)| s.strip_suffix(suffix).map(|n| (n, *k))).unwrap_or((s, 1.0));
+    // Plain decimals only: no sign, `inf` or `NaN`.
+    if !number.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+        || !number.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+    {
+        return None;
+    }
     let n: f64 = number.parse().ok()?;
-    let k: f64 = match suffix {
-        "" => 1.0,
-        "k" => 1e3,
-        "M" => 1e6,
-        "G" => 1e9,
-        "T" => 1e12,
-        "Ki" => 1024.0,
-        "Mi" => 1024f64.powi(2),
-        "Gi" => 1024f64.powi(3),
-        "Ti" => 1024f64.powi(4),
-        "Pi" => 1024f64.powi(5),
-        _ => return None,
-    };
     Some(n * k)
 }
 
@@ -815,3 +821,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "workload_tests.rs"]
+mod tests_unit;

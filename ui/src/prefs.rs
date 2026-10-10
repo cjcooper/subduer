@@ -16,6 +16,11 @@ pub fn load_section_order() -> Vec<Category> {
     let saved = storage()
         .and_then(|s| s.get_item(SECTION_ORDER_KEY).ok().flatten())
         .unwrap_or_default();
+    section_order_from(&saved)
+}
+
+/// [`load_section_order`] from the saved text.
+fn section_order_from(saved: &str) -> Vec<Category> {
     let mut order: Vec<Category> = vec![];
     for name in saved.split(',') {
         if let Some(c) = Category::SECTIONS.into_iter().find(|c| format!("{c:?}") == name)
@@ -35,10 +40,15 @@ pub fn load_section_order() -> Vec<Category> {
 }
 
 pub fn save_section_order(order: &[Category]) {
-    let value = order.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(",");
+    let value = section_order_text(order);
     if let Some(s) = storage() {
         let _ = s.set_item(SECTION_ORDER_KEY, &value);
     }
+}
+
+/// The saved form read by [`section_order_from`].
+fn section_order_text(order: &[Category]) -> String {
+    order.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(",")
 }
 
 const THEME_KEY: &str = "appearance.theme";
@@ -73,11 +83,15 @@ pub fn auto_supported() -> bool {
 /// The saved theme; Auto where supported, otherwise Light.
 pub fn load_theme() -> Theme {
     let saved = storage().and_then(|s| s.get_item(THEME_KEY).ok().flatten());
-    match saved.as_deref() {
+    theme_from(saved.as_deref(), auto_supported)
+}
+
+/// The theme a saved value means; `auto` asks only when it matters.
+fn theme_from(saved: Option<&str>, auto: impl Fn() -> bool) -> Theme {
+    match saved {
         Some("light") => Theme::Light,
         Some("dark") => Theme::Dark,
-        Some("auto") if auto_supported() => Theme::Auto,
-        _ if auto_supported() => Theme::Auto,
+        _ if auto() => Theme::Auto,
         _ => Theme::Light,
     }
 }
@@ -130,6 +144,10 @@ pub enum Desktop {
 
 pub fn desktop() -> Desktop {
     let agent = leptos::prelude::window().navigator().user_agent().unwrap_or_default();
+    desktop_from(&agent)
+}
+
+fn desktop_from(agent: &str) -> Desktop {
     if agent.contains("Windows") {
         Desktop::Windows
     } else if agent.contains("Mac") {
@@ -141,9 +159,17 @@ pub fn desktop() -> Desktop {
 
 /// The button that shows a downloaded file in the system's file manager.
 pub fn reveal_label() -> &'static str {
-    match desktop() {
+    reveal_label_for(desktop())
+}
+
+fn reveal_label_for(desktop: Desktop) -> &'static str {
+    match desktop {
         Desktop::Mac => "Show in Finder",
         Desktop::Windows => "Show in Explorer",
         Desktop::Linux => "Show folder",
     }
 }
+
+#[cfg(test)]
+#[path = "prefs_tests.rs"]
+mod tests_unit;

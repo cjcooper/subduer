@@ -549,3 +549,7 @@ mod tests {
         assert!(matches!(vars[6].value, EnvValue::Unreadable { .. }));
     }
 }
+
+#[cfg(test)]
+#[path = "pod_details_tests.rs"]
+mod coverage_tests;

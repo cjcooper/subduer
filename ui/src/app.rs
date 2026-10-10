@@ -118,6 +118,11 @@ pub(crate) struct Store {
 
 impl Store {
     fn new() -> Self {
+        Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load())
+    }
+
+    /// A fresh store from the saved preferences and the current time.
+    fn with(section_order: Vec<Category>, theme: crate::prefs::Theme, now: f64, col_widths: ColumnWidths) -> Self {
         Self {
             contexts: RwSignal::new(vec![]),
             context: RwSignal::new(None),
@@ -128,7 +133,7 @@ impl Store {
             namespace: RwSignal::new(None),
             kind_filter: RwSignal::new(String::new()),
             expanded: RwSignal::new(HashSet::new()),
-            section_order: RwSignal::new(crate::prefs::load_section_order()),
+            section_order: RwSignal::new(section_order),
             dragging: RwSignal::new(None),
             drop_target: RwSignal::new(None),
             row_filter: RwSignal::new(String::new()),
@@ -136,7 +141,7 @@ impl Store {
             min_watch_id: RwSignal::new(0),
             selected: RwSignal::new(None),
             yaml: RwSignal::new(None),
-            now: RwSignal::new(js_sys::Date::now()),
+            now: RwSignal::new(now),
             unlock_prompt: RwSignal::new(None),
             delete_prompt: RwSignal::new(None),
             pending_delete: RwSignal::new(None),
@@ -154,7 +159,7 @@ impl Store {
             overview_error: RwSignal::new(None),
             overview_loading: RwSignal::new(false),
             overview_at: RwSignal::new(0.0),
-            col_widths: ColumnWidths::load(),
+            col_widths,
             detail_tab: RwSignal::new(DetailTab::Yaml),
             pod: RwSignal::new(None),
             workload: RwSignal::new(None),
@@ -163,7 +168,7 @@ impl Store {
             settings_open: RwSignal::new(false),
             new_namespace: RwSignal::new(false),
             pending_new_namespace: RwSignal::new(false),
-            theme: RwSignal::new(crate::prefs::load_theme()),
+            theme: RwSignal::new(theme),
             dirty: RwSignal::new(None),
             discard_prompt: RwSignal::new(false),
             discard_then: StoredValue::new_local(None),
@@ -725,17 +730,17 @@ fn move_section(store: Store, moved: Category, target: Category) {
     if moved == target {
         return;
     }
-    store.section_order.update(|order| {
-        let (Some(from), Some(to)) = (
-            order.iter().position(|c| *c == moved),
-            order.iter().position(|c| *c == target),
-        ) else {
-            return;
-        };
-        let item = order.remove(from);
-        order.insert(to, item);
-    });
+    store.section_order.update(|order| reorder(order, moved, target));
     crate::prefs::save_section_order(&store.section_order.get_untracked());
+}
+
+/// Moves `moved` to `target`'s position in `order`; unknown sections leave it as is.
+fn reorder(order: &mut Vec<Category>, moved: Category, target: Category) {
+    let (Some(from), Some(to)) = (order.iter().position(|c| *c == moved), order.iter().position(|c| *c == target)) else {
+        return;
+    };
+    let item = order.remove(from);
+    order.insert(to, item);
 }
 
 fn end_drag(store: Store) {
@@ -940,13 +945,7 @@ fn cell_view(store: Store, kind: ColumnKind, value: String) -> AnyView {
         }
         ColumnKind::Badge => {
             // e.g. "Completed (OOM)" -> badge-completed-oom
-            let slug = value
-                .to_lowercase()
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("-");
-            let badge = format!("badge badge-{slug}");
+            let badge = crate::workload_detail::badge_class(&value);
             view! { <td><span class=badge>{value}</span></td> }.into_any()
         }
         _ => view! { <td class=class>{value}</td> }.into_any(),
@@ -1359,11 +1358,15 @@ fn DetailPanel(store: Store) -> impl IntoView {
 
 /// kubectl-style age: 45s, 12m, 5h, 3d, 2y.
 pub(crate) fn format_age(now_ms: f64, created: &str) -> String {
-    let then = js_sys::Date::parse(created);
-    if then.is_nan() {
+    age_since(now_ms, js_sys::Date::parse(created))
+}
+
+/// [`format_age`] from a parsed time (ms); empty when it didn't parse.
+pub(crate) fn age_since(now_ms: f64, then_ms: f64) -> String {
+    if then_ms.is_nan() {
         return String::new();
     }
-    format_span(((now_ms - then) / 1000.0).max(0.0) as u64)
+    format_span(((now_ms - then_ms) / 1000.0).max(0.0) as u64)
 }
 
 /// A length of time the way ages are shown: 45s, 12m, 5h, 3d, 2y.
@@ -1376,3 +1379,7 @@ pub(crate) fn format_span(secs: u64) -> String {
         s => format!("{}y", s / (365 * 86400)),
     }
 }
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+pub(crate) mod tests_unit;

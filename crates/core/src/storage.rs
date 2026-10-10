@@ -252,7 +252,7 @@ fn volume_usage(summary: &Value, namespace: &str, name: &str) -> Option<crate::t
     })?;
     let num = |k: &str| vol[k].as_f64();
     let (used, cap) = (num("usedBytes")?, num("capacityBytes")?);
-    let free = num("availableBytes").unwrap_or(cap - used);
+    let free = num("availableBytes").unwrap_or((cap - used).max(0.0));
     let fill = (cap > 0.0).then(|| used / cap);
     let mut rows = vec![{
         let mut r = InfoTableRow::new(vec!["Space".into(), bytes(used), bytes(free), bytes(cap)]);
@@ -657,3 +657,7 @@ mod tests {
         assert_eq!(row(&d, "Attach error"), Some("rpc error: volume in use"));
     }
 }
+
+#[cfg(test)]
+#[path = "storage_tests.rs"]
+mod coverage_tests;

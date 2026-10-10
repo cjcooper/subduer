@@ -245,3 +245,7 @@ mod tests {
         assert!(is_tcp(None) && is_tcp(Some("tcp")) && !is_tcp(Some("UDP")));
     }
 }
+
+#[cfg(test)]
+#[path = "forward_tests.rs"]
+mod coverage_tests;

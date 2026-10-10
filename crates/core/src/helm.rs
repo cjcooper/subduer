@@ -772,3 +772,7 @@ mod tests {
         assert_eq!(chart_info(&release), ChartInfo { chart: "web-1.2.0".into(), app_version: "3.4".into() });
     }
 }
+
+#[cfg(test)]
+#[path = "helm_tests.rs"]
+mod coverage_tests;

@@ -531,3 +531,7 @@ fn age_ms(ms: f64) -> String {
     let secs = (ms / 1000.0).max(0.0) as u64;
     if secs < 60 { format!("{secs}s") } else { format!("{}m", secs / 60) }
 }
+
+#[cfg(test)]
+#[path = "overview_tests.rs"]
+mod tests_unit;

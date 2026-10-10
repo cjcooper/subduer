@@ -87,3 +87,7 @@ where
 fn row_key(obj: &DynamicObject) -> String {
     table::row_id(obj.metadata.namespace.as_deref(), obj.metadata.name.as_deref().unwrap_or_default())
 }
+
+#[cfg(test)]
+#[path = "watch_tests.rs"]
+mod coverage_tests;

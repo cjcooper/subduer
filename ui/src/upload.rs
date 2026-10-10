@@ -48,6 +48,27 @@ enum Phase {
     Done { bytes: u64, path: String },
 }
 
+/// What the destination `dest` will mean for a file named `name` (if chosen),
+/// given the folder on screen.
+fn dest_hint(dest: &str, shown: Option<&DirListing>, name: Option<&str>) -> String {
+    let d = dest.trim();
+    if !d.starts_with('/') {
+        return "Use an absolute path, e.g. /tmp/".to_owned();
+    }
+    // Warn before uploading into the folder on screen when it's read-only.
+    let read_only =
+        shown.is_some_and(|l| !l.writable && folder_of(d).trim_end_matches('/') == l.path.trim_end_matches('/'));
+    if read_only {
+        return "This folder is read-only for the container user; pick a writable one.".to_owned();
+    }
+    match name {
+        Some(name) if d.ends_with('/') => format!("Saved as {}", join(d, name)),
+        Some(name) => format!("Saved as {d}, or as {} if {d} is a folder", join(d, name)),
+        None if d.ends_with('/') => "The file keeps its name in this folder.".into(),
+        None => "A folder keeps the file's name; anything else is the new file's path.".into(),
+    }
+}
+
 #[component]
 pub fn UploadDialog(store: Store) -> impl IntoView {
     let file = StoredValue::new_local(None::<web_sys::File>);
@@ -171,23 +192,8 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
     // What the destination will mean once the file is chosen.
     let hint = move || {
         let d = dest.get();
-        let d = d.trim();
-        if !d.starts_with('/') {
-            return "Use an absolute path, e.g. /tmp/".to_owned();
-        }
-        // Warn before uploading into the folder on screen when it's read-only.
-        let read_only = listing.with(|l| {
-            matches!(l, Some(Ok(l)) if !l.writable && folder_of(d).trim_end_matches('/') == l.path.trim_end_matches('/'))
-        });
-        if read_only {
-            return "This folder is read-only for the container user; pick a writable one.".to_owned();
-        }
-        match file_label.get() {
-            Some((name, _)) if d.ends_with('/') => format!("Saved as {}", join(d, &name)),
-            Some((name, _)) => format!("Saved as {d}, or as {} if {d} is a folder", join(d, &name)),
-            None if d.ends_with('/') => "The file keeps its name in this folder.".into(),
-            None => "A folder keeps the file's name; anything else is the new file's path.".into(),
-        }
+        let name = file_label.get().map(|(name, _)| name);
+        listing.with(|l| dest_hint(&d, l.as_ref().and_then(|l| l.as_ref().ok()), name.as_deref()))
     };
 
     move || {
@@ -276,3 +282,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "upload_tests.rs"]
+mod tests_unit;

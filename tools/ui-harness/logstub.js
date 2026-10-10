@@ -13,7 +13,7 @@
     lines.push({ source: merged ? ['web-7d9f-abcde/app', 'web-7d9f-fghij/app', 'web-7d9f-abcde/envoy'][i % 3] : null, time: iso(now - (80 - i) * 1500), text: msgs[i % msgs.length] });
   }
   const session = merged
-    ? { context: 'acme-uat', title: 'Deployment shop/web · acme-uat · Logs', event: label, target: { namespace: 'shop', source: { Workload: { kind: {}, name: 'web' } } } }
+    ? { context: 'acme-uat', title: 'Deployment shop/web · acme-uat · Logs', event: label, target: { namespace: 'shop', source: { Workload: { kind: { group: 'apps', version: 'v1', kind: 'Deployment', plural: 'deployments', namespaced: true }, name: 'web' } } } }
     : { context: 'acme-uat', title: 'app · shop/web-7d9f-abcde · acme-uat · Logs', event: label, target: { namespace: 'shop', source: { Container: { pod: 'web-7d9f-abcde', container: 'app' } } } };
   window.__TAURI__ = {
     core: { invoke: async (cmd) => {

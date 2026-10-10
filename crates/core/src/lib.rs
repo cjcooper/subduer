@@ -20,6 +20,8 @@ pub mod quantity;
 pub mod rbac;
 pub mod safety;
 pub mod storage;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod table;
 pub mod upload;
 pub mod usage;
@@ -60,3 +62,7 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod coverage_tests;

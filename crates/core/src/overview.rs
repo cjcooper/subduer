@@ -332,3 +332,7 @@ mod tests {
         assert_eq!(r.cpu_limits, 0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "overview_tests.rs"]
+mod coverage_tests;

@@ -7,7 +7,7 @@ use subduer_core::types::{
     SecretValues, WorkloadDetails, events,
 };
 use subduer_core::{actions, cluster, config, contexts, overview, pod_details, watch, workload};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Runtime};
 
 use crate::{AppState, Session};
 
@@ -60,8 +60,8 @@ pub fn set_unlocked(state: State<'_, AppState>, context: String, unlocked: bool)
 /// Replaces the current watch. Snapshots arrive as `resource-table` events
 /// tagged with the returned id.
 #[tauri::command]
-pub async fn watch_resources(
-    app: AppHandle,
+pub async fn watch_resources<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     kind: KindRef,
     namespace: Option<String>,
@@ -416,7 +416,7 @@ pub fn open_url(url: String) -> CmdResult<()> {
 /// Sets every window's native appearance (title bar, scroll bars, form
 /// controls): `light`, `dark`, or `auto` to follow the system.
 #[tauri::command]
-pub fn set_app_theme(app: AppHandle, theme: String) {
+pub fn set_app_theme<R: Runtime>(app: AppHandle<R>, theme: String) {
     let theme = match theme.as_str() {
         "light" => Some(tauri::Theme::Light),
         "dark" => Some(tauri::Theme::Dark),
@@ -434,7 +434,7 @@ pub fn set_unsaved(state: State<'_, AppState>, unsaved: bool) {
 
 /// Closes the main window (or quits) after the user chose to discard edits.
 #[tauri::command]
-pub fn close_discarding(app: AppHandle, state: State<'_, AppState>, quit: bool) {
+pub fn close_discarding<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, quit: bool) {
     state.unsaved.store(false, Ordering::SeqCst);
     if quit {
         app.exit(0);

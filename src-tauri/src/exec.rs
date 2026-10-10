@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use subduer_core::kube::Client;
 use subduer_core::types::{ExecOutput, ExecSession, ExecTarget};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::AppState;
@@ -46,7 +46,7 @@ impl ShellWindows {
 /// Opens a new shell window for `target` on the current cluster. Each call
 /// opens another session, like separate terminal tabs.
 #[tauri::command]
-pub async fn open_exec(app: AppHandle, state: State<'_, AppState>, target: ExecTarget) -> Result<(), String> {
+pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, target: ExecTarget) -> Result<(), String> {
     let (client, context) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -88,7 +88,7 @@ pub async fn open_exec(app: AppHandle, state: State<'_, AppState>, target: ExecT
 /// Called by a shell window once it's listening and knows its size:
 /// (re)connects the session.
 #[tauri::command]
-pub fn exec_start(window: WebviewWindow, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<ExecSession, String> {
+pub fn exec_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<ExecSession, String> {
     let label = window.label().to_owned();
     let mut windows = state.shells.windows.lock().unwrap();
     let w = windows.get_mut(&label).ok_or("this shell window is no longer connected")?;
@@ -125,14 +125,14 @@ pub fn exec_start(window: WebviewWindow, state: State<'_, AppState>, cols: u16, 
 
 /// Keystrokes from the terminal.
 #[tauri::command]
-pub fn exec_input(window: WebviewWindow, state: State<'_, AppState>, data: String) {
+pub fn exec_input<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, data: String) {
     if let Some(input) = state.shells.windows.lock().unwrap().get(window.label()).and_then(|w| w.input.as_ref()) {
         let _ = input.send(data.into_bytes());
     }
 }
 
 #[tauri::command]
-pub fn exec_resize(window: WebviewWindow, state: State<'_, AppState>, cols: u16, rows: u16) {
+pub fn exec_resize<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, cols: u16, rows: u16) {
     if let Some(resize) = state.shells.windows.lock().unwrap().get(window.label()).and_then(|w| w.resize.as_ref()) {
         let _ = resize.send((cols, rows));
     }

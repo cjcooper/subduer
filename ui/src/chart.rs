@@ -217,3 +217,7 @@ pub fn clock(t: f64) -> String {
     let d = js_sys::Date::new(&(t * 1000.0).into());
     format!("{:02}:{:02}", d.get_hours(), d.get_minutes())
 }
+
+#[cfg(test)]
+#[path = "chart_tests.rs"]
+mod tests_unit;

@@ -6,6 +6,7 @@ use subduer_core::types::{DirListing, DownloadResult, UploadOutcome, UploadTarge
 use tauri::State;
 use tauri::ipc::{InvokeBody, Request};
 
+use tauri::Runtime;
 use crate::AppState;
 
 /// Lists a directory in a container for the upload dialog's browser. Read
@@ -57,8 +58,8 @@ pub async fn upload_file(state: State<'_, AppState>, request: Request<'_>) -> Re
 /// Copies a file out of a container into the Downloads folder, numbering the
 /// name if it's taken. Read-only for the cluster, so not gated.
 #[tauri::command]
-pub async fn download_file(
-    app: tauri::AppHandle,
+pub async fn download_file<R: Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
     namespace: String,
     pod: String,
@@ -80,7 +81,7 @@ pub async fn download_file(
 /// Shows a downloaded file in Finder (or its folder elsewhere). Only paths in
 /// the Downloads folder are accepted.
 #[tauri::command]
-pub fn reveal_download(app: tauri::AppHandle, path: String) -> Result<(), String> {
+pub fn reveal_download<R: Runtime>(app: tauri::AppHandle<R>, path: String) -> Result<(), String> {
     use tauri::Manager;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let path = std::path::PathBuf::from(path);

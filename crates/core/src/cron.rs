@@ -163,3 +163,7 @@ mod tests {
         assert_eq!(next("0 0 * * *", Some("Not/AZone"), "2026-10-10T00:00:00Z"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "cron_tests.rs"]
+mod coverage_tests;

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use subduer_core::forward::{self, ForwardStats};
 use subduer_core::types::{ForwardInfo, ForwardRequest, ForwardSource, PortOption, forward_events};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, Runtime};
 
 use crate::AppState;
 
@@ -54,7 +54,7 @@ impl Forwards {
 }
 
 /// Sends the current list to the main window.
-fn broadcast(app: &AppHandle) {
+fn broadcast<R: Runtime>(app: &AppHandle<R>) {
     let list = app.state::<AppState>().forwards.list();
     let _ = app.emit_to("main", forward_events::CHANGED, list);
 }
@@ -71,7 +71,7 @@ pub async fn forward_ports(
 }
 
 #[tauri::command]
-pub async fn start_forward(app: AppHandle, state: State<'_, AppState>, request: ForwardRequest) -> Result<ForwardInfo, String> {
+pub async fn start_forward<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, request: ForwardRequest) -> Result<ForwardInfo, String> {
     let (client, context) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -97,7 +97,7 @@ pub fn list_forwards(state: State<'_, AppState>) -> Vec<ForwardInfo> {
 }
 
 #[tauri::command]
-pub fn stop_forward(app: AppHandle, state: State<'_, AppState>, id: u64) {
+pub fn stop_forward<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, id: u64) {
     if let Some(f) = state.forwards.forwards.lock().unwrap().remove(&id) {
         f.task.abort();
         tracing::info!(id, "port-forward stopped");

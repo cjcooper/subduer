@@ -490,7 +490,8 @@ async fn ingress_related(client: &Client, namespace: &str, d: &mut ObjectDetails
     let (services, slices, secrets) =
         tokio::join!(services.list_metadata(&all), slices.list(&all), secrets.list_metadata(&all));
     let services: HashSet<String> = services?.items.iter().map(ResourceExt::name_any).collect();
-    let secrets: HashSet<String> = secrets.map(|l| l.items.iter().map(ResourceExt::name_any).collect()).unwrap_or_default();
+    // `None` when the Secrets can't be listed: then nothing is flagged missing.
+    let secrets: Option<HashSet<String>> = secrets.ok().map(|l| l.items.iter().map(ResourceExt::name_any).collect());
     let mut ready: HashMap<String, (usize, usize)> = HashMap::new();
     for s in slices?.items {
         let Some(svc) = s.labels().get("kubernetes.io/service-name").cloned() else { continue };
@@ -530,8 +531,7 @@ async fn ingress_related(client: &Client, namespace: &str, d: &mut ObjectDetails
             "tls" => {
                 for row in &mut table.rows {
                     if let Some(l) = &row.link
-                        && !secrets.is_empty()
-                        && !secrets.contains(&l.name)
+                        && secrets.as_ref().is_some_and(|names| !names.contains(&l.name))
                     {
                         row.warn = true;
                         row.cells[1] = format!("{} (missing)", l.name);
@@ -831,3 +831,7 @@ mod tests {
         assert_eq!(d.status.as_deref(), Some("Denies incoming"));
     }
 }
+
+#[cfg(test)]
+#[path = "network_tests.rs"]
+mod coverage_tests;

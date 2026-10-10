@@ -60,3 +60,7 @@ mod tests {
         assert_eq!(parse("12Qi"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "quantity_tests.rs"]
+mod coverage_tests;

@@ -763,3 +763,7 @@ fn DataEditor(
         </div>
     }
 }
+
+#[cfg(test)]
+#[path = "object_detail_tests.rs"]
+mod tests_unit;

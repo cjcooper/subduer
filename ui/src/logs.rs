@@ -31,6 +31,11 @@ pub fn open(target: LogTarget, on_error: impl Fn(String) + 'static) {
 /// The window label from `?logs=<label>`, if this page is a logs window.
 pub fn label_from_url() -> Option<String> {
     let search = window().location().search().ok()?;
+    label_in(&search)
+}
+
+/// The `logs` parameter of a URL's query string (`?a=b&logs=x`).
+fn label_in(search: &str) -> Option<String> {
     search
         .trim_start_matches('?')
         .split('&')
@@ -222,13 +227,18 @@ fn LogRow(line: LogLine, show_time: RwSignal<bool>) -> impl IntoView {
     }
 }
 
+/// An RFC 3339 UTC time cut to milliseconds, which JS dates can parse.
+fn millis(ts: &str) -> String {
+    match ts.find('.') {
+        Some(dot) => format!("{}Z", &ts[..(dot + 4).min(ts.len() - 1)]),
+        None => ts.to_owned(),
+    }
+}
+
 /// `HH:MM:SS.mmm` in local time, plus the original RFC 3339 for the tooltip.
 fn local_time(ts: &str) -> (String, String) {
     // JS dates take milliseconds at most; the kubelet sends nanoseconds.
-    let trimmed = match ts.find('.') {
-        Some(dot) => format!("{}Z", &ts[..(dot + 4).min(ts.len() - 1)]),
-        None => ts.to_owned(),
-    };
+    let trimmed = millis(ts);
     let d = js_sys::Date::new(&trimmed.into());
     if d.get_time().is_nan() {
         return (ts.to_owned(), ts.to_owned());
@@ -242,3 +252,7 @@ fn local_time(ts: &str) -> (String, String) {
     );
     (local, ts.to_owned())
 }
+
+#[cfg(test)]
+#[path = "logs_tests.rs"]
+mod tests_unit;

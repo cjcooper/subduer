@@ -381,3 +381,7 @@ mod tests {
         assert_eq!(out[0].usage.cpu, vec![(1800.0, 2.0), (3700.0, 3.0)]);
     }
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod coverage_tests;

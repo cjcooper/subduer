@@ -3,6 +3,13 @@
 Stubs that fake `window.__TAURI__` so the UI can be rendered and screenshotted
 without the app or a cluster. See RUNBOOK.md section 3 for the full recipe.
 
+`run_e2e.py` turns them into an automated suite: it builds the UI, serves it
+with each stub, runs 108 scenarios in headless Chrome and checks the page title
+(where stubs record what the app sent) and text. Run it with
+`python3 tools/ui-harness/run_e2e.py [filter…]`, or `--show <scenario>` to see
+what one scenario saw. Stubs must hand out increasing watch ids, as the app
+drops tables from older watches.
+
 ```sh
 trunk build --dist /tmp/subduer-harness            # not dist/: `trunk serve` rewrites it
 cp tools/ui-harness/*.js /tmp/subduer-harness/

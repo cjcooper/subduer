@@ -577,3 +577,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rbac_tests.rs"]
+mod coverage_tests;

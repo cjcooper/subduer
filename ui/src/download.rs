@@ -179,3 +179,7 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "download_tests.rs"]
+mod tests_unit;

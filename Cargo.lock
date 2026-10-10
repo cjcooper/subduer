@@ -4511,10 +4511,12 @@ name = "subduer-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "flate2",
  "form_urlencoded",
  "futures",
  "http",
+ "http-body-util",
  "jiff",
  "k8s-openapi",
  "kube",
@@ -4524,6 +4526,7 @@ dependencies = [
  "subduer-types",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -4532,6 +4535,7 @@ name = "subduer-types"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

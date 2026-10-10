@@ -284,3 +284,7 @@ pub fn ForwardsPage(store: Store) -> impl IntoView {
         }}
     }
 }
+
+#[cfg(test)]
+#[path = "forward_tests.rs"]
+mod tests_unit;

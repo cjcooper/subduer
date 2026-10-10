@@ -186,3 +186,7 @@ mod tests {
         assert_eq!(section("keda.sh"), Category::CustomResources);
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod coverage_tests;

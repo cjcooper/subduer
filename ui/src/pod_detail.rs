@@ -216,6 +216,31 @@ impl Resource {
     }
 }
 
+/// The chart's header: usage now (`used`), its share of the limit (or the
+/// node without one), the request and the limit.
+fn usage_header(u: Usage, fmt: fn(f64) -> String) -> String {
+    let Usage { requests, limits, used: now, node } = u;
+    let ceiling = limits.or(node);
+    let share = now.zip(ceiling).filter(|(_, c)| *c > 0.0).map(|(u, c)| u / c);
+    let icon = if share.is_some_and(|s| s >= 0.75) { "⚠ " } else { "" };
+    let of = if limits.is_some() { "limit" } else { "node" };
+    let share_text = match share {
+        Some(s) if s > 0.0 && s < 0.01 => format!(" · <1% of {of}"),
+        Some(s) => format!(" · {:.0}% of {of}", s * 100.0),
+        None => String::new(),
+    };
+    let limit_text = match (limits, node) {
+        (Some(l), _) => fmt(l),
+        (None, Some(n)) => format!("unlimited (node {})", fmt(n)),
+        (None, None) => "unlimited".to_owned(),
+    };
+    format!(
+        "{icon}now {}{share_text} · req {} · limit {limit_text}",
+        now.map_or_else(|| "—".to_owned(), fmt),
+        requests.map_or_else(|| "not set".to_owned(), fmt),
+    )
+}
+
 /// Last-hour line chart for the pod (`container: None`) or one container,
 /// with request and limit lines. Without a limit, the node is the ceiling.
 #[component]
@@ -251,25 +276,7 @@ pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, contain
     });
     let header = move || {
         let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(used);
-        let ceiling = limits.or(node);
-        let share = now.zip(ceiling).filter(|(_, c)| *c > 0.0).map(|(u, c)| u / c);
-        let icon = if share.is_some_and(|s| s >= 0.75) { "⚠ " } else { "" };
-        let of = if limits.is_some() { "limit" } else { "node" };
-        let share_text = match share {
-            Some(s) if s > 0.0 && s < 0.01 => format!(" · <1% of {of}"),
-            Some(s) => format!(" · {:.0}% of {of}", s * 100.0),
-            None => String::new(),
-        };
-        let limit_text = match (limits, node) {
-            (Some(l), _) => fmt(l),
-            (None, Some(n)) => format!("unlimited (node {})", fmt(n)),
-            (None, None) => "unlimited".to_owned(),
-        };
-        format!(
-            "{icon}now {}{share_text} · req {} · limit {limit_text}",
-            now.map_or_else(|| "—".to_owned(), fmt),
-            requests.map_or_else(|| "not set".to_owned(), fmt),
-        )
+        usage_header(Usage { requests, limits, used: now, node }, fmt)
     };
     let scale = match resource {
         Resource::Cpu => Scale::Decimal,
@@ -607,3 +614,7 @@ pub(crate) fn EventList(store: Store, events: Vec<EventSummary>, empty: &'static
         .collect_view()
         .into_any()
 }
+
+#[cfg(test)]
+#[path = "pod_detail_tests.rs"]
+mod tests_unit;

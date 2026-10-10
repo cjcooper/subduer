@@ -275,3 +275,7 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}[32mINFO\u{1b}[0m ready"), "INFO ready");
     }
 }
+
+#[cfg(test)]
+#[path = "logs_tests.rs"]
+mod coverage_tests;

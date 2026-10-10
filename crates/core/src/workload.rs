@@ -75,6 +75,12 @@ pub async fn workload_details(client: &Client, kind: &KindRef, namespace: &str, 
             object_names.get(&key).cloned()
         }),
     );
+    // metrics-server answers for every pod the selector matches (all of the
+    // namespace for an empty one); keep only this workload's own.
+    let usage = usage.map(|mut u| {
+        u.retain(|pod, _| placements.iter().any(|(p, _)| p == pod));
+        u
+    });
 
     let workload_pods: Vec<WorkloadPod> = pods.iter().map(|p| workload_pod(p, &w, usage.as_ref())).collect();
     let containers: Vec<TemplateContainer> = template_spec
@@ -832,3 +838,7 @@ mod tests {
         assert_eq!(w.pod_selector, "");
     }
 }
+
+#[cfg(test)]
+#[path = "workload_tests.rs"]
+mod coverage_tests;

@@ -27,6 +27,45 @@ pub enum BrowseMode {
     Download,
 }
 
+/// Breadcrumbs for a path as (label, path): `/` first, then each folder.
+fn crumb_paths(path: &str) -> Vec<(String, String)> {
+    let mut acc = String::new();
+    let mut out = vec![("/".to_owned(), "/".to_owned())];
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        acc.push('/');
+        acc.push_str(part);
+        out.push((part.to_owned(), acc.clone()));
+    }
+    out
+}
+
+/// An entry's note, whether it's dimmed, and whether it can be clicked.
+fn entry_state(mode: BrowseMode, e: &DirEntry) -> (&'static str, bool, bool) {
+    match (mode, e.dir) {
+        (BrowseMode::Upload, true) => (if e.writable { "writable" } else { "read-only" }, !e.writable, true),
+        (BrowseMode::Upload, false) => (if e.writable { "replace" } else { "read-only" }, !e.writable, true),
+        (BrowseMode::Download, true) => (if e.readable { "" } else { "no access" }, !e.readable, e.readable),
+        (BrowseMode::Download, false) => (if e.readable { "download" } else { "can't read" }, !e.readable, e.readable),
+    }
+}
+
+fn entry_title(mode: BrowseMode, dir: bool, full: &str) -> String {
+    match (mode, dir) {
+        (_, true) => format!("Open {full}"),
+        (BrowseMode::Upload, false) => format!("Upload as {full} (asks before replacing)"),
+        (BrowseMode::Download, false) => format!("Download {full}"),
+    }
+}
+
+/// The current folder's status note.
+fn folder_status(mode: BrowseMode, writable: bool) -> &'static str {
+    match (mode, writable) {
+        (BrowseMode::Upload, true) => "✓ writable",
+        (BrowseMode::Upload, false) => "read-only: files can't be saved here",
+        (BrowseMode::Download, _) => "",
+    }
+}
+
 /// Writable-place shortcuts, breadcrumbs and the current folder's entries.
 /// Clicking a folder opens it; clicking a file passes it to `pick_file`.
 #[component]
@@ -50,31 +89,16 @@ pub fn FolderBrowser(
             .collect_view()
     };
     let crumbs = move |path: &str| {
-        let mut acc = String::new();
-        let mut out = vec![("/".to_owned(), "/".to_owned())];
-        for part in path.split('/').filter(|p| !p.is_empty()) {
-            acc.push('/');
-            acc.push_str(part);
-            out.push((part.to_owned(), acc.clone()));
-        }
-        out.into_iter()
+        crumb_paths(path)
+            .into_iter()
             .map(|(label, to)| view! { <button class="crumb mono" on:click=move |_| browse(to.clone(), false)>{label}</button> })
             .collect_view()
     };
     let entry_row = move |dir_path: String, e: DirEntry| {
         let full = join(&dir_path, &e.name);
         let icon = if e.dir { "📁" } else { "📄" };
-        let (note, dim, enabled) = match (mode, e.dir) {
-            (BrowseMode::Upload, true) => (if e.writable { "writable" } else { "read-only" }, !e.writable, true),
-            (BrowseMode::Upload, false) => (if e.writable { "replace" } else { "read-only" }, !e.writable, true),
-            (BrowseMode::Download, true) => (if e.readable { "" } else { "no access" }, !e.readable, e.readable),
-            (BrowseMode::Download, false) => (if e.readable { "download" } else { "can't read" }, !e.readable, e.readable),
-        };
-        let title = match (mode, e.dir) {
-            (_, true) => format!("Open {full}"),
-            (BrowseMode::Upload, false) => format!("Upload as {full} (asks before replacing)"),
-            (BrowseMode::Download, false) => format!("Download {full}"),
-        };
+        let (note, dim, enabled) = entry_state(mode, &e);
+        let title = entry_title(mode, e.dir, &full);
         let click = move |_| {
             if e.dir {
                 browse(full.clone(), false);
@@ -102,11 +126,7 @@ pub fn FolderBrowser(
                 Some(Ok(l)) => {
                     let parent = folder_of(&l.path);
                     let at_root = l.path == "/";
-                    let status = match (mode, l.writable) {
-                        (BrowseMode::Upload, true) => "✓ writable",
-                        (BrowseMode::Upload, false) => "read-only: files can't be saved here",
-                        (BrowseMode::Download, _) => "",
-                    };
+                    let status = folder_status(mode, l.writable);
                     let rows = l.entries.iter().cloned().map(|e| entry_row(l.path.clone(), e)).collect_view();
                     view! {
                         <div class="browser-bar">
@@ -126,3 +146,7 @@ pub fn FolderBrowser(
         </div>
     }
 }
+
+#[cfg(test)]
+#[path = "browser_tests.rs"]
+mod tests_unit;

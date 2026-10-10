@@ -1056,3 +1056,6 @@ pub struct DownloadResult {
     pub saved_to: String,
     pub bytes: u64,
 }
+
+#[cfg(test)]
+mod tests;

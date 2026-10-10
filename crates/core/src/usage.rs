@@ -89,3 +89,7 @@ mod tests {
         assert!(pod_usage(&summary, "y", "a").is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "usage_tests.rs"]
+mod coverage_tests;

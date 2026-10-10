@@ -185,3 +185,7 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "delete_tests.rs"]
+mod tests_unit;

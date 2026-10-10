@@ -41,6 +41,11 @@ pub fn open(store: Store, target: ExecTarget) {
 /// The window label from `?exec=<label>`, if this page is a shell window.
 pub fn label_from_url() -> Option<String> {
     let search = window().location().search().ok()?;
+    label_in(&search)
+}
+
+/// The `exec` parameter of a URL's query string (`?a=b&exec=x`).
+fn label_in(search: &str) -> Option<String> {
     search
         .trim_start_matches('?')
         .split('&')
@@ -292,3 +297,7 @@ pub fn ExecApp(label: String) -> impl IntoView {
         </div>
     }
 }
+
+#[cfg(test)]
+#[path = "exec_tests.rs"]
+mod tests_unit;

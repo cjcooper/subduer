@@ -47,6 +47,22 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: UI unit tests
+        run: cargo test -p subduer-ui
+
+      # The real UI in headless Chrome against the harness stubs. The script
+      # assumes macOS paths (Chrome's app bundle).
+      - name: UI end-to-end tests
+        if: runner.os == 'macOS'
+        run: python3 tools/ui-harness/run_e2e.py
+
+      - name: Coverage report
+        if: runner.os == 'Linux'
+        run: |
+          cargo install --locked cargo-llvm-cov
+          rustup component add llvm-tools-preview
+          cargo llvm-cov --workspace --summary-only
+
       - name: Build bundles
         run: cargo tauri build
         env:

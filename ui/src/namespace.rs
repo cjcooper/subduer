@@ -162,3 +162,7 @@ pub fn FilterButton(store: Store, row: ResourceRow) -> impl IntoView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "namespace_tests.rs"]
+mod tests_unit;

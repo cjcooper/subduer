@@ -9,7 +9,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{Condition, JobRun, KindRef, TemplateContainer, Usage, WorkloadDetails, WorkloadPod};
 
-use crate::app::{ContainerIcon, Store, format_age, format_span};
+use crate::app::{ContainerIcon, Store, age_since, format_age, format_span};
 use crate::overview::{fmt_bytes, fmt_cpu};
 use crate::pod_detail::{EnvTable, EventList, HistoryNote, Resource, Section, UsageChart};
 use crate::tauri::invoke;
@@ -138,11 +138,15 @@ fn is_time(key: &str) -> bool {
 
 /// `5m ago` or `in 12m`.
 pub(crate) fn relative(now_ms: f64, time: &str) -> String {
-    let then = js_sys::Date::parse(time);
-    if then > now_ms {
-        format!("in {}", format_span(((then - now_ms) / 1000.0) as u64))
+    relative_at(now_ms, js_sys::Date::parse(time))
+}
+
+/// [`relative`] from a parsed time (ms).
+fn relative_at(now_ms: f64, then_ms: f64) -> String {
+    if then_ms > now_ms {
+        format!("in {}", format_span(((then_ms - now_ms) / 1000.0) as u64))
     } else {
-        format!("{} ago", format_age(now_ms, time))
+        format!("{} ago", age_since(now_ms, then_ms))
     }
 }
 
@@ -424,3 +428,7 @@ fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: S
         </Section>
     }
 }
+
+#[cfg(test)]
+#[path = "workload_detail_tests.rs"]
+mod tests_unit;

@@ -217,3 +217,7 @@ mod tests {
         assert!(!l.entries[0].readable && l.entries[3].readable);
     }
 }
+
+#[cfg(test)]
+#[path = "upload_tests.rs"]
+mod coverage_tests;

@@ -104,3 +104,7 @@ pub async fn get_yaml(client: &Client, kind: &KindRef, namespace: Option<&str>, 
     obj.metadata.managed_fields = None;
     Ok(serde_norway::to_string(&obj)?)
 }
+
+#[cfg(test)]
+#[path = "cluster_tests.rs"]
+mod coverage_tests;

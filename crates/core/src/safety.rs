@@ -68,3 +68,7 @@ mod tests {
         assert!(gate.ensure_writable("docker-desktop").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "safety_tests.rs"]
+mod coverage_tests;

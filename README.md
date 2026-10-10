@@ -28,7 +28,9 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
 cargo tauri dev                  # app with hot-reloading UI
 cargo tauri build                # bundles for the system you build on, in target/release/bundle:
                                  #   macOS .app + .dmg · Linux .deb + .rpm + .AppImage · Windows NSIS .exe + .msi
-cargo test -p subduer-core       # unit tests
+cargo test                       # backend tests (core, types, Tauri commands)
+cargo test -p subduer-ui         # UI logic tests
+python3 tools/ui-harness/run_e2e.py   # UI end to end in headless Chrome
 cargo run -p subduer-core --example smoke -- <context>   # read-only CLI check
 ```
 

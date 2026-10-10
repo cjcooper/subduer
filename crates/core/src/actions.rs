@@ -494,3 +494,7 @@ mod tests {
         assert!(matches!(err, Error::Message(_)));
     }
 }
+
+#[cfg(test)]
+#[path = "actions_tests.rs"]
+mod coverage_tests;

@@ -20,6 +20,12 @@ pub struct ColumnWidths(RwSignal<HashMap<(String, String), f64>>);
 impl ColumnWidths {
     pub fn load() -> Self {
         let saved = storage().and_then(|s| s.get_item(KEY).ok().flatten()).unwrap_or_default();
+        Self::from_saved(&saved)
+    }
+
+    /// Widths from their saved form: `table\theader\twidth` lines. Malformed
+    /// lines are skipped.
+    pub(crate) fn from_saved(saved: &str) -> Self {
         let map = saved
             .lines()
             .filter_map(|line| {
@@ -32,15 +38,20 @@ impl ColumnWidths {
     }
 
     fn save(&self) {
-        let text = self.0.with_untracked(|m| {
+        let text = self.saved();
+        if let Some(s) = storage() {
+            let _ = s.set_item(KEY, &text);
+        }
+    }
+
+    /// The saved form read by [`Self::from_saved`].
+    fn saved(&self) -> String {
+        self.0.with_untracked(|m| {
             m.iter()
                 .map(|((t, h), w)| format!("{t}\t{h}\t{w:.0}"))
                 .collect::<Vec<_>>()
                 .join("\n")
-        });
-        if let Some(s) = storage() {
-            let _ = s.set_item(KEY, &text);
-        }
+        })
     }
 
     pub fn get(&self, table: &str, header: &str) -> Option<f64> {
@@ -58,8 +69,12 @@ impl ColumnWidths {
     }
 
     fn reset(&self, table: &str) {
-        self.0.update(|m| m.retain(|(t, _), _| t != table));
+        self.forget(table);
         self.save();
+    }
+
+    fn forget(&self, table: &str) {
+        self.0.update(|m| m.retain(|(t, _), _| t != table));
     }
 
     /// Fixed layout at the summed width once the table has custom widths;
@@ -152,3 +167,7 @@ pub fn ResizableTh(
         </th>
     }
 }
+
+#[cfg(test)]
+#[path = "columns_tests.rs"]
+mod tests_unit;

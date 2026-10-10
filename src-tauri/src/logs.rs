@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use subduer_core::kube::Client;
 use subduer_core::types::{LogBatch, LogSession, LogTarget};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
 
 use crate::AppState;
 
@@ -42,7 +42,7 @@ impl LogWindows {
 /// Opens (or focuses, if already open) a logs window for `target` on the
 /// current cluster.
 #[tauri::command]
-pub async fn open_logs(app: AppHandle, state: State<'_, AppState>, target: LogTarget) -> Result<(), String> {
+pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, target: LogTarget) -> Result<(), String> {
     let (client, context) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -90,7 +90,7 @@ pub async fn open_logs(app: AppHandle, state: State<'_, AppState>, target: LogTa
 /// Called by a logs window once it's listening: (re)starts its stream and
 /// says what it's showing. `previous` reads the last terminated container.
 #[tauri::command]
-pub fn logs_start(window: WebviewWindow, state: State<'_, AppState>, previous: bool) -> Result<LogSession, String> {
+pub fn logs_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, previous: bool) -> Result<LogSession, String> {
     let label = window.label().to_owned();
     let mut windows = state.logs.windows.lock().unwrap();
     let w = windows.get_mut(&label).ok_or("this logs window is no longer connected")?;
@@ -114,7 +114,7 @@ pub fn logs_start(window: WebviewWindow, state: State<'_, AppState>, previous: b
 }
 
 /// Closes every logs and shell window, e.g. when the main window goes away.
-pub fn close_all(app: &AppHandle) {
+pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
     for (label, window) in app.webview_windows() {
         if label.starts_with(LABEL_PREFIX) || label.starts_with(crate::exec::LABEL_PREFIX) {
             let _ = window.close();

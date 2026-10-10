@@ -1208,3 +1208,7 @@ mod tests {
         assert!(!valid_key("a/b") && !valid_key("") && !valid_key("..") && !valid_key("a b"));
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod coverage_tests;

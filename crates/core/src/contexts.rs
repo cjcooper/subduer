@@ -48,3 +48,7 @@ pub async fn client_for(kubeconfig: &Kubeconfig, context: &str) -> Result<Client
     let config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options).await?;
     Ok(Client::try_from(config)?)
 }
+
+#[cfg(test)]
+#[path = "contexts_tests.rs"]
+mod coverage_tests;

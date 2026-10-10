@@ -17,7 +17,8 @@ _Last updated: 2026-10-10 (Jobs and CronJobs)._
   - **Settings › Appearance:** a Settings… menu item (⌘, / Ctrl+,) and dialog with Auto (where supported), Light and Dark. Files: `src-tauri/src/menu.rs`, `set_app_theme` in the commands, `ui/src/prefs.rs` (theme), `ui/src/main.rs`, `ui/src/app.rs` (`SettingsDialog`), `ui/src/exec.rs`, CSS, `tools/ui-harness/settingsstub.js` (new) and docs. Also: bigger top-level sidebar items and icons.
   - **Builds on each system:** per-OS bundle configs (`src-tauri/tauri.{macos,linux,windows}.conf.json`), `icon.ico` bundled, Unix-only login-shell PATH, no console windows on Windows, per-OS reveal label and fonts, and `.github/workflows/build.yml`. Only the macOS build has been run.
   - **Namespaces section:** a Details tab for Namespace, New namespace and Filter to it. Files: `crates/core/src/namespace.rs` (new), `pod_details.rs` (`namespace_usage`), `config.rs` (dispatch), the types, `create_namespace` in the commands, `examples/namespace_dry_run.rs` (new), `ui/src/namespace.rs` (new), `ui/src/app.rs` (list links, unlock flow), `ui/src/object_detail.rs` (Recent warnings), `ui/src/workload_detail.rs` (namespace conditions), `tools/ui-harness/nsstub.js` (new) and docs.
-- **Verified:** clippy is clean (backend, and UI on wasm32), `cargo test` passes (70 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
+  - **Tests across the app:** the fake API (`crates/core/src/testing.rs`, `test-support` feature), `*_tests.rs` beside every core module and most UI modules, `src-tauri/src/tests.rs`, `crates/types/src/tests.rs`, `tools/ui-harness/run_e2e.py`, runtime-generic Tauri commands, small UI refactors for testability, five bug fixes (see "Tests"), and CI steps for UI tests, the end-to-end suite (macOS) and coverage (Linux).
+- **Verified:** clippy is clean (backend, and UI on wasm32); 520 tests pass (373 core, 17 Tauri, 11 types, 119 UI) and the 108-scenario end-to-end suite passes. Earlier: `cargo test` passed (70 core + 1 tauri + 1 types; the UI icon test runs via `cargo test -p subduer-ui`), and `trunk build` succeeds. Each feature was checked against UAT through its `examples/*` script and visually in the headless harness, light and dark.
 - **Not yet seen in the real app window** (macOS blocks scripted clicks and screenshots): the Settings… menu item and the native title bar following the theme, the unsaved-edits hold on window close and Cmd+Q, logs, shell and port-forward windows, their Window-menu entries, the shell window closing on exit, Open/Copy on port-forwards, real drag-and-drop in Upload, and Show in Finder. The user had `cargo tauri dev` running; restart it to pick up backend changes.
 - **Untested:** downloading multi-MB files end to end (the user declined the SHA check command).
 - **Checked on UAT (2026-10-10):** `workload` and `workload_dry_run` against a Deployment, a StatefulSet, two CronJobs (one with `timeZone: America/New_York`) and completed and failed Jobs. Every dry run was accepted, and the locked gate refused each real call. UAT's Prometheus has no series for the short CronJob pods, so their history falls back to local samples; Deployment and StatefulSet history come from Prometheus.
@@ -58,11 +59,37 @@ Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 w
 ```sh
 cargo tauri dev                       # run the app (Trunk serves the UI on :1420)
 cargo tauri build                     # this system's bundles in target/release/bundle (see "Building on each system")
-cargo test                            # core + types unit tests (backend crates)
+cargo test                            # backend tests: core, types and the Tauri commands (~400)
+cargo test -p subduer-ui              # UI logic tests on the host (~120)
+python3 tools/ui-harness/run_e2e.py   # the real UI in headless Chrome, 108 scenarios (~1.5 min)
+cargo llvm-cov --workspace --summary-only   # line coverage (needs cargo-llvm-cov + llvm-tools-preview)
 cargo clippy --all-targets            # backend lint, kept at zero warnings
 cargo clippy -p subduer-ui --target wasm32-unknown-unknown   # UI lint, zero warnings
 trunk build                           # UI only, into dist/
 ```
+
+### Tests
+
+Five layers, none of which contacts a cluster:
+
+| Layer | Where | What |
+|---|---|---|
+| Core logic | `crates/core/src/<module>_tests.rs`, included from each module as `mod coverage_tests` (plus the older inline `mod tests`) | Every module against **`crates/core/src/testing.rs`**, a fake Kubernetes API: routes by method and path (optionally a query substring) to canned JSON, 404 `Status` otherwise, records every request (method, path, query, body) so tests can check patches and `dryRun=All`. Helpers: `list`, `object`, `pod`, `merge`, `kind`, `status`. Exposed to other crates with the `test-support` feature. |
+| WebSocket paths | `crates/core/src/ws_fake_tests.rs` | A small local server speaking the `v5.channel.k8s.io` exec protocol, so shell, upload, download and browse run end to end. |
+| Types | `crates/types/src/tests.rs` | Keys, predicates, categories, encodings, titles, serde defaults. |
+| Tauri commands | `src-tauri/src/tests.rs` | Commands called on Tauri's mock app (`tauri::test`) with a session on the fake API: not-connected errors, context mismatch, the safety gate, request bodies, logs/shell windows, port-forwards. Commands that take an `AppHandle`/`WebviewWindow` are generic over `R: Runtime` for this. |
+| UI logic | `ui/src/<module>_tests.rs` (`mod tests_unit`) | Pure functions on the host: formatting, quantity parsing, the data-edit diff, validation, section order, prefs parsing, chart scales. Some logic was pulled out of browser-only closures for this (e.g. `age_since`, `relative_at`, `ColumnWidths::from_saved`, `theme_from`, `desktop_from`). |
+| UI end to end | `tools/ui-harness/run_e2e.py` | Builds the UI, serves it with each harness stub, drives headless Chrome through 108 scenarios (every dialog, the unsaved-edit guard for all 10 ways out, settings against light/dark systems, …) and checks what the app sent to the backend (the stubs put it in the page title) and what the page shows. One browser at a time by default (`E2E_JOBS` to change); a failure is retried once and reported as needing a retry. `--show <id>` prints what a scenario saw. |
+
+**Coverage (2026-10-10, `cargo llvm-cov --workspace`):** core 99.0% of lines (26 modules; 19 at 100%), types 100%, Tauri crate 66.6%, backend overall 95.9% (from 46% before). UI host tests cover 14.5% of the UI crate's lines: every logic function, but not `view!` markup, which the end-to-end suite exercises instead (llvm-cov can't measure WebAssembly in Chrome).
+
+What isn't covered, and why:
+- `helm.rs` after the gate (running the real `helm` binary): tested up to argument building, validation and gate refusal. Faking `helm` would mean changing `PATH` for the whole test process.
+- `forward.rs` `connect` success: needs a fake of the port-forward WebSocket protocol (only exec's is faked).
+- Tauri crate: `lib.rs` `run()` and window setup, `main.rs`, `menu.rs` (macOS builds menus only on the main thread), `shell_env::inherit_login_path` (runs the login shell), `set_app_theme` (not implemented by the mock runtime), `connect`'s success path (needs a real server), `upload_file` (its IPC `Request` can't be built in tests), and anything that opens a browser or Finder.
+- A few unreachable branches (streams that never end, "streams not opened" when they're always requested).
+
+Bugs the tests found (fixed): workload usage included pods the workload doesn't own (and a CronJob with no Jobs showed the whole namespace); a running native sidecar made a healthy pod show `Init:1/2`; the Expand dialog rejected sizes like `1e9`; an Ingress whose TLS secret was missing wasn't flagged in a namespace with no Secrets; disk usage could show negative free space. Noted, not changed: `history::sum_series` would double-count two local samples in the same millisecond; `logs::millis` assumes UTC timestamps; `size_text(1048575)` shows "1024.0 KiB".
 
 ### Building on each system
 
@@ -442,6 +469,7 @@ Smaller items that have come up:
 - Add a `Reason` column to Events (offered, not yet requested).
 - Add a "reset section order" option for the sidebar (offered).
 - Add column sorting by clicking headers. Not built; Events are sorted by Last Seen on the backend.
+- Tests: fake the port-forward WebSocket protocol to cover `forward::connect`; make `helm` runs testable by injecting the binary path instead of using `PATH`.
 - The harness stubs are saved in `tools/ui-harness/` (uncommitted, with a README): `stub.js` (pod, delete, upload, download), `nav.js` (sidebar), `fwd.js`, `workloadstub.js`, `batchstub.js`, `configstub.js`, `networkstub.js`, `storagestub.js`, `rbacstub.js`, `helmstub.js`, `settingsstub.js`, `nsstub.js`, `logstub.js`, `execstub.js`, `ov.js`. The user can choose to commit them; tidying them into fixtures would help.
 - Logs: add pods that start after the window opens to merged workload logs; add a download/save-logs button.
 - Port-forward from workloads (pick a pod), and optional gating for prod.

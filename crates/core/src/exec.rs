@@ -125,3 +125,7 @@ mod tests {
         assert_eq!(ended(None), Ended::Failed("Shell ended.".into()));
     }
 }
+
+#[cfg(test)]
+#[path = "exec_tests.rs"]
+mod coverage_tests;
