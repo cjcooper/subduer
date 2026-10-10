@@ -147,11 +147,11 @@ fn Section(
         let open = open.clone();
         move || open().to_string()
     };
-    let chevron_open = open.clone();
+    let chevron_open = Signal::derive(open.clone());
     view! {
         <section class="dsection" class:nested=nested>
             <button class="dsection-title" on:click=toggle aria-expanded=expanded>
-                <span class="chevron" class:open=chevron_open>"▸"</span>
+                <crate::icons::Chevron open=chevron_open />
                 {icon}
                 <span class="dsection-name">{title}</span>
                 <span class="dsection-summary">{summary}</span>

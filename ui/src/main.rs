@@ -2,6 +2,7 @@ mod app;
 mod chart;
 mod columns;
 mod delete;
+mod icons;
 mod overview;
 mod pod_detail;
 mod prefs;

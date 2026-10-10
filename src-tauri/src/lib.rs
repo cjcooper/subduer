@@ -1,4 +1,5 @@
 mod commands;
+mod menu;
 mod shell_env;
 
 use std::sync::Mutex;
@@ -49,6 +50,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| Ok(menu::install(app.handle())?))
         .invoke_handler(tauri::generate_handler![
             commands::list_contexts,
             commands::connect,

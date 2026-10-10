@@ -465,7 +465,7 @@ fn Sidebar(store: Store) -> impl IntoView {
                             class="kind"
                             class:active=move || store.overview_open.get()
                             on:click=move |_| store.overview_open.set(true)
-                        >"Cluster"</button>
+                        ><crate::icons::ClusterIcon /><span class="kind-label">"Cluster"</span></button>
                     </Show>
                     {move || kind_list(store, Category::TopLevel, in_category(Category::TopLevel))}
                 </div>
@@ -519,8 +519,9 @@ fn Sidebar(store: Store) -> impl IntoView {
                                 }
                                 on:dragend=move |_| end_drag(store)
                             >
-                                <span class="chevron" class:open=open>"▸"</span>
-                                {category.label()}
+                                <crate::icons::Chevron open=Signal::derive(open) />
+                                <crate::icons::CategoryIcon category=category />
+                                <span class="kind-label">{category.label()}</span>
                                 <span class="section-count">{count}</span>
                             </button>
                             <Show when=open>
@@ -580,6 +581,9 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
             let active = move || !store.overview_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key);
             let label = k.kind.clone();
             let title = format!("{} ({})", k.plural, k.api_version());
+            let icon = view! {
+                <crate::icons::KindIcon kind=k.clone() custom=category == Category::CustomResources />
+            };
             view! {
                 {heading}
                 <button
@@ -590,7 +594,7 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                         store.overview_open.set(false);
                         store.kind.set(Some(k.clone()));
                     }
-                >{label}</button>
+                >{icon}<span class="kind-label">{label}</span></button>
             }
         })
         .collect_view()

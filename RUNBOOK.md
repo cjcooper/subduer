@@ -41,6 +41,7 @@ cargo run -p subduer-core --example smoke    -- <context> [group/Kind]   # kinds
 cargo run -p subduer-core --example overview -- <context> [--json]      # Cluster page data
 cargo run -p subduer-core --example pod      -- <context> <ns> <pod>     # Pod Details data, never fetches secret values
 cargo run -p subduer-core --example history  -- <context> <ns> <pod>     # last-hour CPU/memory; shows which Prometheus it found
+cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm release summary (no values/manifest)
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
 ```
 
@@ -85,6 +86,7 @@ crates/core    all cluster logic, no UI deps
   overview.rs    Cluster page: nodes, pods, requests/limits, metrics-server usage, warnings (1h)
   pod_details.rs Pod Details tab + secret_value; usage from metrics-server, else kubelet /stats/summary via node proxy
   actions.rs     mutations; each checks SafetyGate first (delete so far)
+  helm.rs        Helm releases as a virtual kind (helm.sh/Release) from owner=helm Secrets
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
   quantity.rs    "500m"/"1.5Gi" -> numbers
 src-tauri      Tauri app: AppState (gate, session, one watch), commands.rs, shell_env.rs
@@ -124,7 +126,7 @@ ui             Leptos CSR app
 - **Contexts and safety:** the context picker marks prod-like contexts with ⚠. The lock toggle uses an in-app modal; prod contexts require typing the name. JS `prompt` and `confirm` are avoided because WKWebView may not support them.
 - **Sidebar:**
   - **Cluster** page, **Node** and **Event** at the top level.
-  - Collapsible sections: Workloads, Config, Network, Storage, Namespaces, Access Control, Custom Resources (grouped by API group), and Other.
+  - Collapsible sections: Workloads, Helm, Config, Network, Storage, Namespaces, Access Control, Custom Resources (grouped by API group), and Other.
   - Sections start closed and can be reordered by dragging. The order persists, and new sections slot into their default position.
   - `events.k8s.io/Event` is hidden as a duplicate of `core/Event`.
 - **Tables:**
@@ -153,11 +155,19 @@ ui             Leptos CSR app
   - The command re-checks that the dialog's context is still the connected one.
   - Background propagation, matching kubectl. No force or grace-period option yet.
   - Tested only by server-side dry run on UAT.
+- **Helm** (`helm.rs`):
+  - Releases are a virtual kind, `helm.sh/Release`, listed only if any `owner=helm` Secret exists. Verbs are list/watch/get, so there's no Delete: deleting the Secret isn't `helm uninstall`.
+  - The list is a metadata-only watch, one row per release at its latest revision.
+  - Chart and app version are decoded from the latest revision's payload (Helm base64, then gzip, then JSON). `config`, `manifest`, `hooks` and everything in `chart` except `metadata` are dropped right away.
+  - **Updated** is the revision Secret's creation time. The `modifiedAt` label is stale on UAT (identical across revisions).
+  - The detail panel shows a summary (chart, status, notes, revision history) instead of YAML.
+- **Sidebar icons** (`ui/src/icons.rs`): hand-drawn 24×24 stroke icons in `currentColor`, one per built-in kind and section. Custom resources share a puzzle piece, unknown kinds a box. The group chevron is a 14px stroked SVG in body ink, also used in the Pod Details sections.
 - **Usage history** (`history.rs`): Prometheus first, found by listing services for a non-headless `*prometheus*` service on port 9090 that answers `query=1`, reached through the API server's service proxy. Queries are cAdvisor `container_cpu_usage_seconds_total` (rate 2m) and `container_memory_working_set_bytes`, `max by (container)` to survive double scrapes, step 15 s aligned to the step. If Prometheus is missing or has no series for the pod, the app records a sample per request (metrics-server, else kubelet stats), kept for an hour per connection. UAT's Prometheus doesn't cover every pod (its own pod isn't in cAdvisor data), so both paths get used.
 - **Charts** (`ui/src/chart.rs`): one series per chart, hand-rolled SVG stretched with `preserveAspectRatio="none"` plus `non-scaling-stroke`; dots and text are HTML overlays so they don't distort. Gaps over 2.5 steps break the line. Crosshair tooltip on hover.
 - **CRD detection** uses `<plural>.<group>` names from a metadata-only CRD list, because full CRDs are megabytes. It falls back to treating non-built-in API groups as custom.
 - **Watches** send full snapshots (throttled), not diffs. That's simple and fine at current sizes; revisit for very large clusters.
 - **`dragDropEnabled: false`** in `tauri.conf.json`, so HTML5 drag and drop works for section reordering. The app doesn't need file drops.
+- **About panel** (`src-tauri/src/menu.rs`): Tauri's default menu, but the About item is rebuilt with an embedded icon (`icons/128x128@2x.png`, needs tauri's `image-png` feature) and "An it-problems application." credits. Without the explicit icon, unbundled runs (`cargo tauri dev`) show a generic icon. `bundle.publisher`/`copyright` in `tauri.conf.json` name it-problems.
 - **GUI launched from Finder** gets a minimal `PATH`. `shell_env.rs` copies the login shell's `PATH` so `aws` exec auth works.
 
 ## 7. Next up

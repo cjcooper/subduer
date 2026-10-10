@@ -91,15 +91,20 @@ button, input, select { font: inherit; color: inherit; }
 .kind-section { border-top: 2px solid transparent; border-radius: 4px; }
 .kind-section.dragging { opacity: 0.4; }
 .kind-section.drop-target { border-top-color: var(--accent); background: var(--accent-soft); }
-.chevron { display: inline-block; width: 10px; transition: transform 0.12s; }
+/* Open/closed indicator: 14px stroked chevron in body ink so it reads at a glance. */
+.chevron { flex-shrink: 0; width: 14px; height: 14px; color: var(--text); opacity: 0.75; transition: transform 0.12s; }
 .chevron.open { transform: rotate(90deg); }
+.kind-section-title:hover .chevron, .dsection-title:hover .chevron { opacity: 1; }
+.nav-icon { flex-shrink: 0; width: 16px; height: 16px; opacity: 0.85; }
+.kind-section-title .nav-icon { width: 15px; height: 15px; }
+.kind-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-count { margin-left: auto; font-weight: 400; }
 .kind-group-title {
-  margin: 8px 10px 2px 22px; font-size: 11px; color: var(--muted);
+  margin: 8px 10px 2px 28px; font-size: 11px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .kind {
-  display: block; width: 100%; text-align: left; padding: 4px 10px 4px 22px;
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 10px 4px 28px;
   border: none; background: none; border-radius: 5px; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -142,7 +147,9 @@ table.resources { width: 100%; border-collapse: collapse; }
 .badge { padding: 1px 7px; border-radius: 9px; font-size: 12px; background: var(--row-hover); }
 .badge-warning, .badge-failed, .badge-error, .badge-crashloopbackoff, .badge-oomkilled,
 .badge-imagepullbackoff, .badge-errimagepull, .badge-notready { background: var(--danger-soft); color: var(--danger); }
-.badge-running, .badge-ready, .badge-succeeded, .badge-completed { color: var(--ok); }
+.badge-running, .badge-ready, .badge-succeeded, .badge-completed, .badge-deployed { color: var(--ok); }
+.badge-superseded, .badge-uninstalled { color: var(--muted); }
+.badge-pending-install, .badge-pending-upgrade, .badge-pending-rollback, .badge-uninstalling { background: var(--warn-bg); color: var(--warn-text); }
 .badge-pending, .badge-containercreating, .badge-terminating, .badge-completed-oom { background: var(--warn-bg); color: var(--warn-text); }
 
 .warn { margin: 0 16px 8px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }

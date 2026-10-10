@@ -37,3 +37,7 @@ cargo run -p subduer-core --example smoke -- <context>   # read-only CLI check
 - **Pod details.** Selecting a pod opens a Details tab (YAML is still one click away), refreshed every 15 s. It shows pod resources (used, requested and limit), pod info, and each container with its resources, state, ports and environment, then events. Every section collapses. Secret-backed variables stay masked until you click Show, which fetches that one value.
 - **Live tables.** Each table is backed by a Kubernetes watch, with snapshots throttled to 250 ms.
 - **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name. All mutations must go through `SafetyGate::ensure_writable`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 it-problems.

@@ -1,0 +1,374 @@
+//! Helm 3 releases, read from the Secrets Helm stores them in
+//! (`type: helm.sh/release.v1`, label `owner=helm`, one per revision).
+//!
+//! Releases appear as a virtual kind. The list comes from a metadata-only
+//! watch, so it doesn't download release payloads. Chart and app version are
+//! decoded from each release's latest revision; only `chart.metadata` and
+//! `info` are kept. Values and manifests (which can hold secrets) are dropped
+//! straight after decoding and never shown.
+
+use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
+use std::time::Duration;
+
+use base64::Engine;
+use futures::{StreamExt, stream};
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Api, ListParams};
+use kube::core::PartialObjectMeta;
+use kube::runtime::{WatchStreamExt, watcher};
+use kube::{Client, ResourceExt};
+use serde_json::{Value, json};
+
+use crate::types::{Category, Column, ColumnKind, KindInfo, KindRef, ResourceRow, ResourceTable};
+use crate::{Error, Result};
+
+const SELECTOR: &str = "owner=helm";
+const THROTTLE: Duration = Duration::from_millis(250);
+
+/// The virtual kind the sidebar lists under Helm.
+pub fn release_kind() -> KindRef {
+    KindRef {
+        group: "helm.sh".into(),
+        version: "v3".into(),
+        kind: "Release".into(),
+        plural: "releases".into(),
+        namespaced: true,
+    }
+}
+
+pub fn is_release(kind: &KindRef) -> bool {
+    kind.group == "helm.sh" && kind.kind == "Release"
+}
+
+/// The Release kind if the cluster has any Helm releases we can see. Read-only:
+/// deleting a release's Secrets is not `helm uninstall`.
+pub async fn discover(client: &Client) -> Option<KindInfo> {
+    let api: Api<Secret> = Api::all(client.clone());
+    let lp = ListParams::default().labels(SELECTOR).limit(1);
+    let found = !api.list_metadata(&lp).await.ok()?.items.is_empty();
+    found.then(|| KindInfo {
+        kind: release_kind(),
+        verbs: vec!["list".into(), "watch".into(), "get".into()],
+        category: Category::Helm,
+    })
+}
+
+/// One revision, from a release Secret's labels.
+#[derive(Debug, Clone, PartialEq)]
+struct Revision {
+    namespace: String,
+    secret: String,
+    release: String,
+    revision: i64,
+    status: String,
+    /// When the revision was created, RFC 3339.
+    updated: String,
+}
+
+impl Revision {
+    fn from_meta(meta: &PartialObjectMeta<Secret>) -> Option<Self> {
+        let labels = meta.labels();
+        Some(Self {
+            namespace: meta.namespace()?,
+            secret: meta.name_any(),
+            release: labels.get("name")?.clone(),
+            revision: labels.get("version")?.parse().ok()?,
+            status: labels.get("status").cloned().unwrap_or_default(),
+            // Each revision's Secret is created at deploy time. The `modifiedAt`
+            // label isn't reliable: some setups leave it unchanged across revisions.
+            updated: meta.creation_timestamp().map(|t| t.0.to_string()).unwrap_or_default(),
+        })
+    }
+}
+
+/// What the table shows from a decoded release.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ChartInfo {
+    chart: String,
+    app_version: String,
+}
+
+fn columns() -> Vec<Column> {
+    use ColumnKind::*;
+    [
+        ("Name", Name),
+        ("Namespace", Namespace),
+        ("Chart", Text),
+        ("App Version", Text),
+        ("Revision", Number),
+        ("Status", Badge),
+        ("Updated", Age),
+    ]
+    .into_iter()
+    .map(|(header, kind)| Column { header: header.into(), kind })
+    .collect()
+}
+
+/// Latest revision of each release, keyed `namespace/release`.
+fn latest(revisions: &BTreeMap<String, Revision>) -> BTreeMap<String, &Revision> {
+    let mut out: BTreeMap<String, &Revision> = BTreeMap::new();
+    for r in revisions.values() {
+        let key = format!("{}/{}", r.namespace, r.release);
+        if out.get(&key).is_none_or(|cur| r.revision > cur.revision) {
+            out.insert(key, r);
+        }
+    }
+    out
+}
+
+fn rows(revisions: &BTreeMap<String, Revision>, charts: &HashMap<String, ChartInfo>) -> Vec<ResourceRow> {
+    latest(revisions)
+        .into_iter()
+        .map(|(id, r)| {
+            let info = charts.get(&secret_key(&r.namespace, &r.secret)).cloned().unwrap_or_default();
+            ResourceRow {
+                id,
+                name: r.release.clone(),
+                namespace: Some(r.namespace.clone()),
+                cells: vec![
+                    r.release.clone(),
+                    r.namespace.clone(),
+                    info.chart,
+                    info.app_version,
+                    r.revision.to_string(),
+                    r.status.clone(),
+                    r.updated.clone(),
+                ],
+            }
+        })
+        .collect()
+}
+
+fn secret_key(namespace: &str, name: &str) -> String {
+    format!("{namespace}/{name}")
+}
+
+/// Like [`crate::watch::watch_table`], for Helm releases.
+pub async fn watch_releases<F>(client: Client, namespace: Option<String>, watch_id: u64, emit: F)
+where
+    F: Fn(ResourceTable),
+{
+    // A `PartialObjectMeta` API makes metadata-only requests: no payloads.
+    let api: Api<PartialObjectMeta<Secret>> = match &namespace {
+        Some(ns) => Api::namespaced(client.clone(), ns),
+        None => Api::all(client.clone()),
+    };
+    let config = watcher::Config::default().labels(SELECTOR);
+    let mut stream = watcher(api, config).default_backoff().boxed();
+    let mut revisions: BTreeMap<String, Revision> = BTreeMap::new();
+    let mut pending: Option<BTreeMap<String, Revision>> = None;
+    // Decoded chart info per Secret; a revision's chart never changes.
+    let mut charts: HashMap<String, ChartInfo> = HashMap::new();
+    let mut dirty = false;
+    let mut ticker = tokio::time::interval(THROTTLE);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let table = |rows: Vec<ResourceRow>, error: Option<String>| ResourceTable {
+        watch_id,
+        columns: columns(),
+        rows,
+        error,
+    };
+
+    loop {
+        tokio::select! {
+            event = stream.next() => {
+                let Some(event) = event else { break };
+                let insert = |map: &mut BTreeMap<String, Revision>, meta: &PartialObjectMeta<Secret>| {
+                    if let Some(r) = Revision::from_meta(meta) {
+                        map.insert(secret_key(&r.namespace, &r.secret), r);
+                    }
+                };
+                match event {
+                    Ok(watcher::Event::Init) => pending = Some(BTreeMap::new()),
+                    Ok(watcher::Event::InitApply(meta)) => insert(pending.get_or_insert_with(BTreeMap::new), &meta),
+                    Ok(watcher::Event::InitDone) => {
+                        revisions = pending.take().unwrap_or_default();
+                        dirty = true;
+                    }
+                    Ok(watcher::Event::Apply(meta)) => {
+                        insert(&mut revisions, &meta);
+                        dirty = true;
+                    }
+                    Ok(watcher::Event::Delete(meta)) => {
+                        revisions.remove(&secret_key(&meta.namespace().unwrap_or_default(), &meta.name_any()));
+                        dirty = true;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "helm release watch error");
+                        emit(table(rows(&revisions, &charts), Some(err.to_string())));
+                    }
+                }
+            }
+            _ = ticker.tick(), if dirty && pending.is_none() => {
+                dirty = false;
+                let missing: Vec<(String, String)> = latest(&revisions)
+                    .values()
+                    .filter(|r| !charts.contains_key(&secret_key(&r.namespace, &r.secret)))
+                    .map(|r| (r.namespace.clone(), r.secret.clone()))
+                    .collect();
+                if !missing.is_empty() {
+                    // Show the list straight away; chart columns fill in after.
+                    emit(table(rows(&revisions, &charts), None));
+                    let fetched: Vec<(String, ChartInfo)> = stream::iter(missing)
+                        .map(|(ns, name)| {
+                            let client = client.clone();
+                            async move {
+                                let info = read_release(&client, &ns, &name).await.map(|r| chart_info(&r));
+                                (secret_key(&ns, &name), info.unwrap_or_default())
+                            }
+                        })
+                        .buffer_unordered(8)
+                        .collect()
+                        .await;
+                    charts.extend(fetched);
+                }
+                emit(table(rows(&revisions, &charts), None));
+            }
+        }
+    }
+}
+
+/// Decodes one revision: Secret data is base64 (handled by k8s-openapi), then
+/// Helm's own base64, usually gzipped JSON. Values and manifest are removed
+/// before returning.
+async fn read_release(client: &Client, namespace: &str, secret: &str) -> Option<Value> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let s = api.get(secret).await.ok()?;
+    let raw = s.data.as_ref()?.get("release")?;
+    let mut release = decode(&raw.0)?;
+    if let Some(obj) = release.as_object_mut() {
+        obj.remove("config");
+        obj.remove("manifest");
+        obj.remove("hooks");
+    }
+    if let Some(chart) = release["chart"].as_object_mut() {
+        chart.retain(|k, _| k == "metadata");
+    }
+    Some(release)
+}
+
+fn decode(helm_b64: &[u8]) -> Option<Value> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(helm_b64).ok()?;
+    let json = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&bytes[..]).read_to_end(&mut out).ok()?;
+        out
+    } else {
+        bytes
+    };
+    serde_json::from_slice(&json).ok()
+}
+
+fn chart_info(release: &Value) -> ChartInfo {
+    let meta = &release["chart"]["metadata"];
+    let (name, version) = (meta["name"].as_str().unwrap_or_default(), meta["version"].as_str().unwrap_or_default());
+    ChartInfo {
+        chart: if version.is_empty() { name.to_owned() } else { format!("{name}-{version}") },
+        app_version: meta["appVersion"].as_str().unwrap_or_default().to_owned(),
+    }
+}
+
+/// The detail panel's text for a release: chart, status, notes and revision
+/// history. Values and manifests are deliberately left out.
+pub async fn release_yaml(client: &Client, namespace: &str, release: &str) -> Result<String> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("{SELECTOR},name={release}"));
+    let mut history: Vec<Revision> = api
+        .list_metadata(&lp)
+        .await?
+        .items
+        .iter()
+        .filter_map(Revision::from_meta)
+        .collect();
+    history.sort_by_key(|r| std::cmp::Reverse(r.revision));
+    let latest = history
+        .first()
+        .ok_or_else(|| Error::NotFound(format!("Helm release {namespace}/{release}")))?;
+    let decoded = read_release(client, namespace, &latest.secret).await.unwrap_or(Value::Null);
+    let meta = &decoded["chart"]["metadata"];
+    let info = &decoded["info"];
+    let notes = info["notes"].as_str().map(|n| {
+        // Trailing spaces force quoted YAML; trimmed, notes print as a block.
+        let lines: Vec<&str> = n.lines().map(str::trim_end).collect();
+        Value::from(lines.join("\n").trim_matches('\n'))
+    });
+    let history: Vec<Value> = history
+        .iter()
+        .map(|r| json!({"revision": r.revision, "status": r.status, "updated": r.updated}))
+        .collect();
+    let fields = [
+        ("release", json!(release)),
+        ("namespace", json!(namespace)),
+        ("revision", json!(latest.revision)),
+        ("status", json!(latest.status)),
+        ("chart", meta["name"].clone()),
+        ("chartVersion", meta["version"].clone()),
+        ("appVersion", meta["appVersion"].clone()),
+        ("description", info["description"].clone()),
+        ("firstDeployed", info["first_deployed"].clone()),
+        ("lastDeployed", info["last_deployed"].clone()),
+        ("history", Value::from(history)),
+        ("notes", notes.unwrap_or(Value::Null)),
+    ];
+    // A YAML mapping keeps this order; a JSON object would sort the keys.
+    let mut summary = serde_norway::Mapping::new();
+    for (key, value) in fields {
+        if !value.is_null() && value.as_str() != Some("") {
+            summary.insert(key.into(), serde_norway::to_value(value)?);
+        }
+    }
+    let mut text = String::from("# Helm release summary. Values and manifest are not shown.\n");
+    text.push_str(&serde_norway::to_string(&summary)?);
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn rev(ns: &str, release: &str, revision: i64, status: &str) -> (String, Revision) {
+        let secret = format!("sh.helm.release.v1.{release}.v{revision}");
+        (
+            secret_key(ns, &secret),
+            Revision {
+                namespace: ns.into(),
+                secret,
+                release: release.into(),
+                revision,
+                status: status.into(),
+                updated: "2026-10-01T00:00:00Z".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn one_row_per_release_at_its_latest_revision() {
+        let revisions = BTreeMap::from([
+            rev("apps", "web", 1, "superseded"),
+            rev("apps", "web", 10, "deployed"),
+            rev("apps", "web", 9, "superseded"),
+            rev("ops", "web", 2, "failed"),
+        ]);
+        let charts = HashMap::from([(
+            secret_key("apps", "sh.helm.release.v1.web.v10"),
+            ChartInfo { chart: "web-1.2.0".into(), app_version: "3.4".into() },
+        )]);
+        let rows = rows(&revisions, &charts);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "apps/web");
+        assert_eq!(rows[0].cells[2..6], ["web-1.2.0", "3.4", "10", "deployed"]);
+        assert_eq!(rows[1].cells[4..6], ["2", "failed"]);
+    }
+
+    #[test]
+    fn decodes_gzipped_release() {
+        let json = br#"{"name":"web","chart":{"metadata":{"name":"web","version":"1.2.0","appVersion":"3.4"}}}"#;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(json).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(gz.finish().unwrap());
+        let release = decode(encoded.as_bytes()).unwrap();
+        assert_eq!(chart_info(&release), ChartInfo { chart: "web-1.2.0".into(), app_version: "3.4".into() });
+    }
+}

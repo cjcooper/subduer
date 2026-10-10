@@ -30,7 +30,11 @@ async fn main() -> subduer_core::Result<()> {
     let task = tokio::spawn(watch::watch_table(client, kind, None, 1, move |t| {
         let _ = tx.send(t);
     }));
-    let table = tokio::time::timeout(Duration::from_secs(15), rx.recv()).await.expect("snapshot").unwrap();
+    let mut table = tokio::time::timeout(Duration::from_secs(15), rx.recv()).await.expect("snapshot").unwrap();
+    // Some tables fill in later (Helm chart columns); keep the newest for a moment.
+    while let Ok(Some(next)) = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+        table = next;
+    }
     task.abort();
     let headers: Vec<_> = table.columns.iter().map(|c| c.header.as_str()).collect();
     println!("{headers:?}");

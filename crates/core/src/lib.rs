@@ -4,6 +4,7 @@ pub mod actions;
 pub mod catalog;
 pub mod cluster;
 pub mod contexts;
+pub mod helm;
 pub mod history;
 pub mod overview;
 pub mod pod_details;

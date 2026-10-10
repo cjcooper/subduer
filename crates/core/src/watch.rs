@@ -22,6 +22,9 @@ pub async fn watch_table<F>(client: Client, kind: KindRef, namespace: Option<Str
 where
     F: Fn(ResourceTable),
 {
+    if crate::helm::is_release(&kind) {
+        return crate::helm::watch_releases(client, namespace, watch_id, emit).await;
+    }
     let api = dynamic_api(&client, &kind, namespace.as_deref());
     let columns = table::columns(&kind);
     let snapshot = |rows: &BTreeMap<String, ResourceRow>, error: Option<String>| {

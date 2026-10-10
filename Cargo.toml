@@ -6,7 +6,7 @@ default-members = ["crates/types", "crates/core", "src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "UNLICENSED"
+license = "MIT"
 
 [workspace.dependencies]
 subduer-types = { path = "crates/types" }

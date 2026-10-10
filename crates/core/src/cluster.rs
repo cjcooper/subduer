@@ -15,7 +15,7 @@ use crate::types::{KindInfo, KindRef};
 /// then catalog position, then group and kind. Uses each group's preferred version.
 pub async fn discover_kinds(client: &Client) -> Result<Vec<KindInfo>> {
     let discovery = Discovery::new(client.clone()).run().await?;
-    let crd_names = crd_names(client).await;
+    let (crd_names, helm) = tokio::join!(crd_names(client), crate::helm::discover(client));
     let mut kinds: Vec<(usize, KindInfo)> = discovery
         .groups()
         .flat_map(|group| group.recommended_resources())
@@ -41,7 +41,9 @@ pub async fn discover_kinds(client: &Client) -> Result<Vec<KindInfo>> {
     kinds.sort_by(|(pa, a), (pb, b)| {
         (a.category, pa, &a.kind.group, &a.kind.kind).cmp(&(b.category, pb, &b.kind.group, &b.kind.kind))
     });
-    Ok(kinds.into_iter().map(|(_, info)| info).collect())
+    let mut kinds: Vec<KindInfo> = kinds.into_iter().map(|(_, info)| info).collect();
+    kinds.extend(helm);
+    Ok(kinds)
 }
 
 /// Names (`<plural>.<group>`) of installed CRDs, fetched as metadata only since
@@ -93,6 +95,9 @@ pub fn dynamic_api(client: &Client, kind: &KindRef, namespace: Option<&str>) -> 
 
 /// Fetches one object as YAML, without `managedFields` noise.
 pub async fn get_yaml(client: &Client, kind: &KindRef, namespace: Option<&str>, name: &str) -> Result<String> {
+    if crate::helm::is_release(kind) {
+        return crate::helm::release_yaml(client, namespace.unwrap_or_default(), name).await;
+    }
     let mut obj = dynamic_api(client, kind, namespace).get(name).await?;
     obj.metadata.managed_fields = None;
     Ok(serde_norway::to_string(&obj)?)

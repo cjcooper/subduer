@@ -57,6 +57,8 @@ pub enum Category {
     /// Listed at the top of the sidebar, outside any section.
     TopLevel,
     Workloads,
+    /// Helm releases (a virtual kind read from Helm's release Secrets).
+    Helm,
     Config,
     Network,
     Storage,
@@ -70,8 +72,9 @@ pub enum Category {
 
 impl Category {
     /// Sidebar sections in default order (excludes `TopLevel`).
-    pub const SECTIONS: [Category; 8] = [
+    pub const SECTIONS: [Category; 9] = [
         Self::Workloads,
+        Self::Helm,
         Self::Config,
         Self::Network,
         Self::Storage,
@@ -85,6 +88,7 @@ impl Category {
         match self {
             Self::TopLevel => "Top level",
             Self::Workloads => "Workloads",
+            Self::Helm => "Helm",
             Self::Config => "Config",
             Self::Network => "Network",
             Self::Storage => "Storage",
