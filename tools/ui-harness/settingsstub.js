@@ -25,11 +25,14 @@
   };
   if (params.get('open') || params.get('pick')) setTimeout(() => (listeners['open-settings'] || []).forEach((cb) => cb({ payload: null })), 800);
   const pick = params.get('pick');
+  // click=outside: on the backdrop; click=inside: on the dialog's heading.
+  const click = params.get('click');
+  if (click) setTimeout(() => document.querySelector(click === 'outside' ? '.modal-backdrop' : '.modal h2')?.click(), 1200);
   if (pick) setTimeout(() => [...document.querySelectorAll('.theme-card')].find((b) => b.textContent.trim().toLowerCase() === pick)?.click(), 1100);
   setTimeout(() => {
     const root = document.documentElement;
     const bg = getComputedStyle(document.body).backgroundColor;
     const buttons = [...document.querySelectorAll('.theme-card')].map((b) => b.textContent.trim() + (b.classList.contains('on') ? '*' : '')).join('|');
-    document.title = `data-theme=${root.getAttribute('data-theme') || 'none'} bg=${bg} saved=${localStorage.getItem('appearance.theme')} native=${themes.join(',')} buttons=${buttons}`;
+    document.title = `data-theme=${root.getAttribute('data-theme') || 'none'} bg=${bg} saved=${localStorage.getItem('appearance.theme')} native=${themes.join(',')} buttons=${buttons} dialog=${document.querySelector('.modal-backdrop') ? 'open' : 'closed'}`;
   }, 1600);
 })();

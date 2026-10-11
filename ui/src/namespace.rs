@@ -6,6 +6,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::ResourceRow;
 
+use crate::modal::Modal;
 use crate::app::{Store, guard};
 use crate::tauri::invoke;
 
@@ -111,8 +112,7 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal" class:prod=prod>
+                <Modal on_cancel=move |()| close() busy=busy prod=prod>
                         <h2>"New namespace"</h2>
                         <p>"Create a namespace on context "<strong>{ctx_name}</strong>"."</p>
                         {prod.then(|| view! { <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p> })}
@@ -128,13 +128,12 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
                         {move || hint().map(|h| view! { <p class="warn-text">{h}</p> })}
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| close()>"Cancel"</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>"Cancel"</button>
                             <button class="primary" prop:disabled=move || !ok() on:click=move |_| create()>
                                 {move || if busy.get() { "Creating…" } else { "Create" }}
                             </button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             }
         })
     }

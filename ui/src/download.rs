@@ -7,6 +7,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{DirListing, DownloadResult};
 
+use crate::modal::{Generation, Modal};
 use crate::app::Store;
 use crate::browser::{BrowseMode, FolderBrowser, folder_of, join};
 use crate::overview::fmt_bytes;
@@ -40,9 +41,13 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
     let suggestions = RwSignal::new(Vec::<String>::new());
     let browsing = RwSignal::new(false);
 
+    // Results of requests sent before the dialog last opened or closed are dropped.
+    let generation = Generation::new();
+
     let browse = move |dir: String, _suggest: bool| {
         let Some(prompt) = store.download_prompt.get_untracked() else { return };
         browsing.set(true);
+        let sent = generation.now();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args {
@@ -54,6 +59,9 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
             }
             let args = Args { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: dir, suggest: false };
             let result = invoke::<_, DirListing>("browse_dir", &args).await;
+            if !generation.still(sent) {
+                return;
+            }
             if let Ok(l) = &result {
                 path.set(join(&l.path, ""));
             }
@@ -64,6 +72,7 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
 
     // Fresh state each time; start in the container's working directory.
     Effect::new(move |_| {
+        generation.next();
         if store.download_prompt.with(Option::is_some) {
             path.set(String::new());
             phase.set(Phase::Choosing);
@@ -78,6 +87,7 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
         let file = path.get_untracked().trim().to_owned();
         phase.set(Phase::Downloading);
         error.set(None);
+        let sent = generation.now();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args {
@@ -87,7 +97,11 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
                 path: String,
             }
             let args = Args { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: file };
-            match invoke::<_, DownloadResult>("download_file", &args).await {
+            let result = invoke::<_, DownloadResult>("download_file", &args).await;
+            if !generation.still(sent) {
+                return;
+            }
+            match result {
                 Ok(r) => phase.set(Phase::Done(r)),
                 Err(e) => {
                     error.set(Some(e));
@@ -168,13 +182,11 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal wide">
-                        <h2>"Download file"</h2>
-                        <p class="mono">{source}</p>
-                        {body}
-                    </div>
-                </div>
+                <Modal on_cancel=move |()| close() wide=true>
+                    <h2>"Download file"</h2>
+                    <p class="mono">{source}</p>
+                    {body}
+                </Modal>
             }
         })
     }

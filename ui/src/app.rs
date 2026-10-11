@@ -9,6 +9,7 @@ use subduer_types::{Category, ClusterInfo, ClusterOverview, ForwardInfo, PodDeta
 use subduer_types::containers::{self, State};
 
 use crate::columns::{ColumnWidths, ResizableTh};
+use crate::modal::Modal;
 use crate::tauri::{NoArgs, invoke, listen};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -647,7 +648,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 let name = name.clone();
                 move || !prod || typed.get().trim() == name
             };
-            let cancel = move |_| {
+            let cancel = move || {
                 typed.set(String::new());
                 store.unlock_prompt.set(None);
                 store.pending_delete.set(None);
@@ -699,8 +700,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal" class:prod=prod>
+                <Modal on_cancel=move |()| cancel() prod=prod>
                         <h2>"Allow changes?"</h2>
                         {if prod {
                             view! {
@@ -716,11 +716,10 @@ fn UnlockDialog(store: Store) -> impl IntoView {
                             view! { <p>"Context "<strong>{name.clone()}</strong>" will become writable for this session."</p> }.into_any()
                         }}
                         <div class="modal-actions">
-                            <button on:click=cancel>"Cancel"</button>
+                            <button on:click=move |_| cancel()>"Cancel"</button>
                             <button class="danger" prop:disabled=move || !ok() on:click=confirm>"Allow changes"</button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             }
         })}
     }
@@ -1197,8 +1196,8 @@ fn SettingsDialog(store: Store) -> impl IntoView {
         crate::prefs::apply_theme(t);
         store.theme.set(t);
     };
-    let close = move |_| store.settings_open.set(false);
-    let card = move |t: Theme, label: &'static str| {
+    let close = move || store.settings_open.set(false);
+    let card =move |t: Theme, label: &'static str| {
         // Auto shows both, split diagonally, like the system's own setting.
         let preview = match t {
             Theme::Light => view! { <img src="assets/appearance-light.jpg" alt="" /> }.into_any(),
@@ -1228,8 +1227,7 @@ fn SettingsDialog(store: Store) -> impl IntoView {
     };
     move || {
         store.settings_open.get().then(|| view! {
-            <div class="modal-backdrop" on:click=close>
-                <div class="modal wide" on:click=|ev| ev.stop_propagation()>
+            <Modal on_cancel=move |()| close() wide=true dismiss_outside=true>
                     <h2>"Settings"</h2>
                     <fieldset class="settings-group">
                         <legend>"Appearance"</legend>
@@ -1241,10 +1239,9 @@ fn SettingsDialog(store: Store) -> impl IntoView {
                         <p class="muted small settings-note">{note}</p>
                     </fieldset>
                     <div class="modal-actions">
-                        <button class="primary" on:click=close>"Done"</button>
+                        <button class="primary" on:click=move |_| close()>"Done"</button>
                     </div>
-                </div>
-            </div>
+            </Modal>
         })
     }
 }
@@ -1252,7 +1249,7 @@ fn SettingsDialog(store: Store) -> impl IntoView {
 /// "Discard unsaved changes?", shown by [`guard`].
 #[component]
 fn DiscardDialog(store: Store) -> impl IntoView {
-    let keep = move |_| {
+    let keep = move || {
         store.discard_then.set_value(None);
         store.discard_prompt.set(false);
     };
@@ -1269,17 +1266,15 @@ fn DiscardDialog(store: Store) -> impl IntoView {
         store.discard_prompt.get().then(|| {
             let what = store.dirty.get_untracked().unwrap_or_else(|| "this object".into());
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal">
+                <Modal on_cancel=move |()| keep()>
                         <h2>"Discard unsaved changes?"</h2>
                         <p>"Your edits to "<strong class="mono">{what}</strong>" haven't been saved."</p>
                         <p>"If you continue, they're lost. Nothing is saved unless you click "<strong>"Save…"</strong></p>
                         <div class="modal-actions">
                             <button class="danger" on:click=discard>"Discard changes"</button>
-                            <button class="primary" autofocus on:click=keep>"Keep editing"</button>
+                            <button class="primary" autofocus on:click=move |_| keep()>"Keep editing"</button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             }
         })
     }
@@ -1419,14 +1414,35 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
     }
 }
 
+/// Fields where Esc belongs to the typing, not the detail panel.
+const TEXT_FIELD: &str = "textarea, [contenteditable]:not([contenteditable=false]), \
+    input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=range]):not([type=file])";
+
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
-    let close = move |_| {
+    let close_now = move || {
         guard(store, move || {
             store.selected.set(None);
             store.revealed.set(HashMap::new());
         })
     };
+    let close = move |_| close_now();
+    // Esc closes the panel, unless a dialog is open (Esc is the dialog's) or a
+    // text field has focus. Ignoring repeats means holding Esc closes one thing.
+    let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+        use wasm_bindgen::JsCast;
+        if !crate::modal::is_plain_esc(&ev) || crate::modal::any_open() || store.selected.with_untracked(Option::is_none) {
+            return;
+        }
+        let in_field = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|el| el.closest(TEXT_FIELD).ok().flatten().is_some());
+        if !in_field {
+            close_now();
+        }
+    });
+    on_cleanup(move || esc.remove());
     let show_tab = move |tab: DetailTab| {
         let switch = move || {
             store.detail_tab.set(tab);
@@ -1457,7 +1473,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <WorkloadLogsButton store=store row=row.clone() />
                             <crate::workload::WorkloadButtons store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
-                            <button class="close" title="Close" on:click=close>"×"</button>
+                            <button class="close" title="Close (Esc)" on:click=close>"×"</button>
                         </div>
                     </div>
                     {has_details.then(|| view! {

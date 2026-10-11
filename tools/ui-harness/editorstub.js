@@ -20,9 +20,10 @@
       if (cmd === 'editor_start') { calls.push('start'); return session(); }
       if (cmd === 'editor_dirty') { dirty = args.dirty; return null; }
       if (cmd === 'editor_close') { calls.push('close'); return null; }
-      if (cmd === 'set_unlocked') { calls.push('unlock:' + args.context); unlocked = true; return null; }
+      if (cmd === 'set_unlocked') { calls.push('unlock:' + args.context); if (params.get('hang') === 'unlock') return new Promise(() => {}); unlocked = true; return null; }
       if (cmd === 'editor_save') {
         calls.push(args.dry_run ? 'check' : 'save');
+        if (!args.dry_run && params.get('hang') === 'save') return new Promise(() => {});
         if (args.dry_run && params.get('dryfail')) throw 'Deployment.apps "acme-api" is invalid: spec.replicas: Invalid value: -1: must be greater than or equal to 0';
         return args.yaml;
       }
