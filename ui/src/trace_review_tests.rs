@@ -24,6 +24,7 @@ fn row(name: &str, ns: &str, cpu_spare: Option<f64>, flags: Vec<ReviewFlag>) -> 
         mem_spare: None,
         flags,
         suggestion: Some(Suggestion { cpu_request: 10.0, mem_request: 16.0, basis: String::new() }),
+        note: None,
     }
 }
 

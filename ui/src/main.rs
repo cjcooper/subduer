@@ -2,6 +2,7 @@ mod app;
 mod browser;
 mod chart;
 mod columns;
+mod compare;
 mod delete;
 mod download;
 mod editor;

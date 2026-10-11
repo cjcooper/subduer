@@ -389,6 +389,49 @@ impl TraceFile {
     }
 }
 
+/// Notes are kept in their own table, made when the first note is written,
+/// so files from before notes existed still open. Key "" is the trace's own
+/// note; `namespace/kind/name` a workload's.
+const NOTES: &str = "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, text TEXT NOT NULL, updated REAL NOT NULL) WITHOUT ROWID";
+
+impl TraceFile {
+    /// Every note, by key. Empty if none were ever written.
+    pub fn notes(&self) -> Result<std::collections::HashMap<String, String>> {
+        let exists: bool = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notes'", [], |r| r.get::<_, i64>(0))?
+            > 0;
+        if !exists {
+            return Ok(Default::default());
+        }
+        let mut stmt = self.conn.prepare("SELECT key, text FROM notes")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+/// The key of a workload's note.
+pub fn note_key(namespace: &str, kind: &str, name: &str) -> String {
+    format!("{namespace}/{kind}/{name}")
+}
+
+/// Writes (or, when blank, removes) a note in a trace file, which may be
+/// being recorded by this app at the same time.
+pub fn set_note(path: &Path, key: &str, text: &str, now: f64) -> Result<()> {
+    TraceFile::open(path)?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(|e| Error::Message(format!("can't write to {}: {e}", path.display())))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.execute_batch(NOTES)?;
+    let text = text.trim();
+    if text.is_empty() {
+        conn.execute("DELETE FROM notes WHERE key = ?1", [key])?;
+    } else {
+        conn.execute("INSERT OR REPLACE INTO notes (key, text, updated) VALUES (?1, ?2, ?3)", params![key, text, now])?;
+    }
+    Ok(())
+}
+
 /// `path` with `suffix` added to the file name (SQLite's `-wal`, `-shm`).
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();

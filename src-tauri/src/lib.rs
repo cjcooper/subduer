@@ -165,6 +165,10 @@ pub fn run() {
             trace::trace_review,
             trace::trace_series,
             trace::trace_daily,
+            trace::trace_set_note,
+            trace::trace_compare,
+            trace::choose_report_file,
+            trace::export_trace_report,
             commands::rightsize_preview,
             commands::rightsize_apply,
         ])

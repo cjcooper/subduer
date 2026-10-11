@@ -222,6 +222,21 @@ SCENARIOS = [
     S("apply/unlock-then-apply", "reviewstub.js", "recent=1&file=1&sel=web&apply=1&locked=1&unlock=1&go=1", has=["rightsize_apply:web@acme-uat"]),
     S("apply/other-context", "reviewstub.js", "recent=1&file=1&sel=web&other=1", has=["Connect to acme-stg to apply suggestions."], lacks=["Apply…"]),
     S("apply/dark", "reviewstub.js", "recent=1&file=1&check=web,worker&applysel=1", scheme=DARK, has=["Apply to 2 workloads"]),
+    # ---- Notes, compare, export (reviewstub.js) ----
+    S("notes/shown", "reviewstub.js", "recent=1&file=1&noted=1&sel=web",
+      has=["Note on this trace", "Peak season week; compare after the resize.", "Note on this workload", "Agreed with the team: 250m"]),
+    S("notes/add-trace-note", "reviewstub.js", "recent=1&file=1&note=Before the resize",
+      has=["note:trace=Before the resize", "Note on this trace Before the resize"]),
+    S("notes/add-workload-note", "reviewstub.js", "recent=1&file=1&sel=worker&wnote=Raise to 1.4 cores", has=["note:worker=Raise to 1.4 cores"]),
+    S("notes/leaving-asks", "reviewstub.js", "recent=1&file=1&note=Half written&leave=1",
+      has=["Discard unsaved changes?", "the note on this trace"], lacks=["note:trace"]),
+    S("compare/from-recent", "reviewstub.js", "recent=1&page=1&compare=1",
+      has=["compare:2", "Comparing 2 traces", "cmprows=web,db,nightly", "Request 1.5 cores → 15m (−99%)", "Only in trace 1", "OOM ×2"]),
+    S("compare/changed-only", "reviewstub.js", "recent=1&page=1&compare=1&changed=1", has=["cmprows=web", "1 of 3 rows"]),
+    S("compare/with-another", "reviewstub.js", "recent=1&file=1&cmpwith=1", has=["choose_trace_to_open", "compare:2", "Comparing 2 traces"]),
+    S("compare/dark", "reviewstub.js", "recent=1&page=1&compare=1", scheme=DARK, has=["Comparing 2 traces"]),
+    S("export/saved", "reviewstub.js", "recent=1&file=1&export=1", has=["Report saved:", "acme-uat-shop-report.html"]),
+    S("export/failed", "reviewstub.js", "recent=1&file=1&export=1&exportfail=1", has=["The report wasn't saved: permission denied"]),
     S("trace/switch-without-trace", "tracestub.js", "switch=1", has=["connects=2", "dialogs=none"]),
     # ---- Settings / appearance ----
     # ---- Giving up on a failing connection (connstub.js) ----

@@ -24,6 +24,7 @@ fn row(kind: &str, name: &str, container: &str, suggest: bool) -> ReviewRow {
         mem_spare: None,
         flags: vec![],
         suggestion: suggest.then(|| Suggestion { cpu_request: 15.0, mem_request: 64.0, basis: String::new() }),
+        note: None,
     }
 }
 

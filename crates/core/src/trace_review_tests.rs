@@ -4,9 +4,9 @@ use super::*;
 use crate::trace_file::{Batch, Bucket, ContainerKey, Event, EventKind, Owner, Resources, Source, Stat};
 use crate::types::{TraceEnd, TraceScope};
 
-const T0: i64 = 1_800_000_000 - 1_800_000_000 % 86_400;
+pub(crate) const T0: i64 = 1_800_000_000 - 1_800_000_000 % 86_400;
 
-fn scratch(tag: &str) -> PathBuf {
+pub(crate) fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("subduer-review-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -22,7 +22,7 @@ fn key(kind: &str, name: &str, container: &str) -> TraceKey {
 
 /// A trace of `web` (a Deployment with two pods, then a rollout) and `db`
 /// (a StatefulSet that hits its memory limit), `minutes` long.
-fn sample(dir: &std::path::Path, minutes: i64) -> PathBuf {
+pub(crate) fn sample(dir: &std::path::Path, minutes: i64) -> PathBuf {
     let path = dir.join("t.trace");
     let mut file = TraceFile::create(&path, false, "acme-uat", &TraceScope::Namespaces(vec!["shop".into()]), T0 as f64).unwrap();
     let mut batch = Batch { source: Some(Source::Prometheus), ..Batch::default() };
@@ -193,4 +193,49 @@ fn gaps_over_a_tenth_are_mentioned() {
     let r = review(&path, false).unwrap();
     assert!(r.rows[0].suggestion.as_ref().unwrap().basis.ends_with(", 13% of the trace is gaps"), "{}", r.rows[0].suggestion.as_ref().unwrap().basis);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn notes_are_saved_in_the_file() {
+    let dir = scratch("notes");
+    let path = sample(&dir, 8 * 60);
+    assert_eq!(review(&path, false).unwrap().note, None);
+    crate::trace_file::set_note(&path, "", "  Peak season week  ", 1.0).unwrap();
+    crate::trace_file::set_note(&path, &crate::trace_file::note_key("shop", "Deployment", "web"), "Agreed: 250m", 2.0).unwrap();
+    let r = review(&path, false).unwrap();
+    assert_eq!(r.note.as_deref(), Some("Peak season week"));
+    assert_eq!(r.rows[0].note.as_deref(), Some("Agreed: 250m"));
+    assert_eq!(r.rows[1].note, None);
+    // Blank removes it.
+    crate::trace_file::set_note(&path, "", " ", 3.0).unwrap();
+    assert_eq!(review(&path, false).unwrap().note, None);
+    let other = dir.join("other.txt");
+    std::fs::write(&other, "x").unwrap();
+    assert!(crate::trace_file::set_note(&other, "", "x", 1.0).is_err(), "only trace files");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn comparing_traces_lines_rows_up_oldest_first() {
+    let (a, b) = (scratch("cmp-a"), scratch("cmp-b"));
+    let (pa, pb) = (sample(&a, 8 * 60), sample(&b, 7 * 60));
+    // A row only the second trace has.
+    {
+        let conn = rusqlite::Connection::open(&pb).unwrap();
+        conn.execute("UPDATE pods SET workload_name = 'web2' WHERE name = 'web-b-1'", []).unwrap();
+    }
+    let c = compare(&[(pb.clone(), false), (pa.clone(), false)]).unwrap();
+    assert_eq!(c.traces.len(), 2);
+    let keys: Vec<String> = c.rows.iter().map(|r| r.key.name.clone()).collect();
+    // By namespace, kind, name: the Deployments, then the StatefulSet.
+    assert_eq!(keys, ["web", "web2", "db"]);
+    let db = c.rows.iter().find(|r| r.key.name == "db").unwrap();
+    assert!(db.cells.iter().all(Option::is_some));
+    let first = db.cells[0].as_ref().unwrap();
+    assert_eq!((first.ooms, first.throttled, first.cpu_request), (3, Some(0.2), None));
+    let web2 = c.rows.iter().find(|r| r.key.name == "web2").unwrap();
+    assert!(web2.cells.iter().filter(|c| c.is_some()).count() == 1);
+    assert!(compare(&[(pa, false)]).unwrap_err().to_string().contains("at least two"));
+    std::fs::remove_dir_all(&a).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
 }

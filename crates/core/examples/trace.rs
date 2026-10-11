@@ -3,6 +3,7 @@
 //! `cargo run -p subduer-core --example trace -- <context> <scope> <file> <minutes>`
 //! `cargo run -p subduer-core --example trace -- --summary <file>`
 //! `cargo run -p subduer-core --example trace -- --review <file> [<namespace/kind/name/container>]`
+//! `cargo run -p subduer-core --example trace -- --report <file> <out.html>` (the out file must not exist)
 //!
 //! `<scope>` is `cluster`, `ns:<a>[,<b>…]`, `<kind>:<ns>/<name>` (kind is
 //! deploy, sts, ds, job or cronjob) or `pod:<ns>/<name>`. The first pull
@@ -23,6 +24,19 @@ async fn main() -> subduer_core::Result<()> {
         && flag == "--summary"
     {
         print(&trace::read_summary(Path::new(file)).await?);
+        return Ok(());
+    }
+    if let [flag, file, out] = &args[..]
+        && flag == "--report"
+    {
+        let out = Path::new(out);
+        if out.exists() {
+            eprintln!("{} already exists", out.display());
+            std::process::exit(2);
+        }
+        let html = subduer_core::trace_report::report_html(Path::new(file), false, &jiff::tz::TimeZone::system(), "now")?;
+        std::fs::write(out, html).map_err(|e| subduer_core::Error::Message(e.to_string()))?;
+        println!("wrote {}", out.display());
         return Ok(());
     }
     if let [flag, file, rest @ ..] = &args[..]
@@ -58,6 +72,7 @@ fn usage() -> ! {
     eprintln!("usage: trace <context> <cluster|ns:a,b|deploy:ns/name|sts:…|ds:…|job:…|cronjob:…|pod:ns/name> <file> <minutes>");
     eprintln!("       trace --summary <file>");
     eprintln!("       trace --review <file> [<namespace/kind/name/container>]");
+    eprintln!("       trace --report <file> <out.html>");
     std::process::exit(2);
 }
 

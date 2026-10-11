@@ -537,8 +537,20 @@ async fn traces_start_report_and_stop() {
     let key = subduer_core::types::TraceKey { namespace: "shop".into(), kind: "Pod".into(), name: "api-1".into(), container: "app".into() };
     let err = trace::trace_series(second.clone(), key.clone(), None, None, 100).await.unwrap_err();
     assert!(err.contains("isn't in this trace"), "{err}");
-    assert!(trace::trace_daily(second.clone(), key).await.is_err());
+    assert!(trace::trace_daily(second.clone(), key.clone()).await.is_err());
     assert!(trace::trace_review(s(), "/etc/hosts".into()).await.unwrap_err().contains("trace file"));
+
+    // Notes, a comparison and a report work on the files alone.
+    trace::trace_set_note(second.clone(), None, "Before the resize".into()).await.unwrap();
+    trace::trace_set_note(second.clone(), Some(key.clone()), "Agreed".into()).await.unwrap();
+    assert_eq!(trace::trace_review(s(), second.clone()).await.unwrap().note.as_deref(), Some("Before the resize"));
+    let first = format!("{file}.trace");
+    let cmp = trace::trace_compare(s(), vec![first.clone(), second.clone()]).await.unwrap();
+    assert_eq!(cmp.traces.len(), 2);
+    assert!(trace::trace_compare(s(), vec![first]).await.unwrap_err().contains("at least two"));
+    let out = dir.join("report.html").display().to_string();
+    assert_eq!(trace::export_trace_report(s(), second.clone(), out.clone()).await.unwrap(), out);
+    assert!(std::fs::read_to_string(&out).unwrap().contains("Before the resize"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -34,6 +34,8 @@ pub(crate) fn open_file(store: Store, path: String) {
         store.traces_open.set(true);
         store.review_sel.set(None);
         store.review_checked.set(Default::default());
+        store.compare_paths.set(None);
+        store.report_saved.set(None);
         store.review_path.set(Some(path));
         load(store);
     });
@@ -282,12 +284,193 @@ fn apply_row(store: Store, row: &ReviewRow) -> impl IntoView + use<> {
     }
 }
 
+/// Picks another trace and compares it with the one under review.
+fn compare_with(store: Store) {
+    let Some(current) = store.review_path.get_untracked() else { return };
+    spawn_local(async move {
+        match invoke::<_, Option<String>>("choose_trace_to_open", &NoArgs {}).await {
+            Ok(Some(other)) if other != current => crate::compare::open(store, vec![current, other]),
+            Ok(Some(_)) => store.error.set(Some("Choose a different trace to compare with.".into())),
+            Ok(None) => {}
+            Err(e) => store.error.set(Some(e)),
+        }
+    });
+}
+
+/// Saves the review as an HTML page where the user chooses.
+fn export_report(store: Store) {
+    let Some(path) = store.review_path.get_untracked() else { return };
+    spawn_local(async move {
+        #[derive(Serialize)]
+        struct Choose {
+            trace: String,
+        }
+        #[derive(Serialize)]
+        struct Export {
+            path: String,
+            out: String,
+        }
+        let out = match invoke::<_, Option<String>>("choose_report_file", &Choose { trace: path.clone() }).await {
+            Ok(Some(out)) => out,
+            Ok(None) => return,
+            Err(e) => {
+                store.report_saved.set(Some(Err(e)));
+                return;
+            }
+        };
+        store.report_saved.set(None);
+        let result = invoke::<_, String>("export_trace_report", &Export { path, out }).await;
+        store.report_saved.set(Some(result));
+    });
+}
+
+/// "Report saved to …" with Show in Finder, after Export report….
+fn report_line(store: Store) -> impl IntoView {
+    move || {
+        store.report_saved.get().map(|r| match r {
+            Ok(out) => {
+                let reveal_path = out.clone();
+                view! {
+                    <div class="report-line">
+                        <span class="ok-text">"✓ Report saved: "</span>
+                        <span class="mono">{file_name(&out).to_owned()}</span>
+                        <button class="btn small" on:click=move |_| {
+                            #[derive(Serialize)]
+                            struct Args {
+                                path: String,
+                            }
+                            let path = reveal_path.clone();
+                            spawn_local(async move {
+                                if let Err(e) = invoke::<_, ()>("reveal_trace", &Args { path }).await {
+                                    store.error.set(Some(e));
+                                }
+                            });
+                        }>{crate::prefs::reveal_label()}</button>
+                        <button class="close" title="Dismiss" aria-label="Dismiss" on:click=move |_| store.report_saved.set(None)>"×"</button>
+                    </div>
+                }
+                .into_any()
+            }
+            Err(e) => view! { <div class="report-line warn-text">{format!("The report wasn't saved: {e}")}</div> }.into_any(),
+        })
+    }
+}
+
+/// Puts a saved note into the open review: on the trace, or on every row of the workload.
+fn note_saved(store: Store, key: Option<&TraceKey>, text: &str) {
+    let note = (!text.trim().is_empty()).then(|| text.trim().to_owned());
+    store.review.update(|r| {
+        if let Some(Ok(r)) = r {
+            match key {
+                None => r.note = note.clone(),
+                Some(k) => {
+                    for row in r.rows.iter_mut().filter(|row| row.key.namespace == k.namespace && row.key.kind == k.kind && row.key.name == k.name) {
+                        row.note = note.clone();
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// A note shown as text with Edit, or being edited. Saved into the trace
+/// file, so it travels with it. Unsaved text holds leaving like other edits.
+#[component]
+fn NoteBox(store: Store, key: Option<TraceKey>, text: Option<String>, label: &'static str) -> impl IntoView {
+    let editing = RwSignal::new(false);
+    let draft = RwSignal::new(text.clone().unwrap_or_default());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let original = StoredValue::new(text.clone().unwrap_or_default());
+    let what = match &key {
+        None => "the note on this trace".to_owned(),
+        Some(k) => format!("the note on {}", k.name),
+    };
+    let stop = move || {
+        editing.set(false);
+        store.dirty.set(None);
+    };
+    let save = {
+        let key = key.clone();
+        move |_| {
+            let Some(path) = store.review_path.get_untracked() else { return };
+            let (key, text) = (key.clone(), draft.get_untracked());
+            busy.set(true);
+            spawn_local(async move {
+                #[derive(Serialize)]
+                struct Args {
+                    path: String,
+                    key: Option<TraceKey>,
+                    text: String,
+                }
+                match invoke::<_, ()>("trace_set_note", &Args { path, key: key.clone(), text: text.clone() }).await {
+                    Ok(()) => {
+                        original.set_value(text.trim().to_owned());
+                        stop();
+                        note_saved(store, key.as_ref(), &text);
+                    }
+                    Err(e) => error.set(Some(e)),
+                }
+                busy.set(false);
+            });
+        }
+    };
+    move || {
+        if editing.get() {
+            let what = what.clone();
+            let save = save.clone();
+            view! {
+                <div class="note-box editing">
+                    <label class="note-label">{label}</label>
+                    <textarea
+                        rows="3"
+                        prop:value=move || draft.get()
+                        on:input=move |ev| {
+                            draft.set(event_target_value(&ev));
+                            let changed = draft.get_untracked().trim() != original.get_value().trim();
+                            store.dirty.set(changed.then(|| what.clone()));
+                        }
+                    ></textarea>
+                    {move || error.get().map(|e| view! { <p class="warn-text small">{e}</p> })}
+                    <div class="note-actions">
+                        <button class="btn small" prop:disabled=move || busy.get() on:click=move |_| {
+                            draft.set(original.get_value());
+                            error.set(None);
+                            stop();
+                        }>"Cancel"</button>
+                        <button class="btn small primary" prop:disabled=move || busy.get() on:click=save>
+                            {move || if busy.get() { "Saving…" } else { "Save note" }}
+                        </button>
+                    </div>
+                </div>
+            }
+            .into_any()
+        } else {
+            let current = original.get_value();
+            if current.is_empty() {
+                view! { <button class="btn small note-add" on:click=move |_| editing.set(true)>{format!("Add a {}…", label.to_lowercase())}</button> }.into_any()
+            } else {
+                view! {
+                    <div class="note-box">
+                        <span class="note-label">{label}</span>
+                        <p class="note-text">{current}</p>
+                        <button class="btn small" on:click=move |_| editing.set(true)>"Edit"</button>
+                    </div>
+                }
+                .into_any()
+            }
+        }
+    }
+}
+
 // --- The page --------------------------------------------------------------------
 
 #[component]
 pub(crate) fn TracesPage(store: Store) -> impl IntoView {
     move || {
-        if store.review_path.with(Option::is_some) {
+        if store.compare_paths.with(Option::is_some) {
+            view! { <crate::compare::CompareView store=store /> }.into_any()
+        } else if store.review_path.with(Option::is_some) {
             view! { <ReviewView store=store /> }.into_any()
         } else {
             view! { <TraceList store=store /> }.into_any()
@@ -297,6 +480,7 @@ pub(crate) fn TracesPage(store: Store) -> impl IntoView {
 
 #[component]
 fn TraceList(store: Store) -> impl IntoView {
+    let picked = RwSignal::new(std::collections::BTreeSet::<String>::new());
     let running = move || {
         store.trace.get().map(|s| {
             let path = s.path.clone();
@@ -319,10 +503,18 @@ fn TraceList(store: Store) -> impl IntoView {
         }
         list.into_iter()
             .map(|t| {
-                let (path, forget_path) = (t.path.clone(), t.path.clone());
+                let (path, forget_path, pick_path) = (t.path.clone(), t.path.clone(), t.path.clone());
+                let is_picked = { let p = t.path.clone(); move || picked.with(|s| s.contains(&p)) };
                 let when = js_sys::Date::new(&t.at.into()).to_locale_string("default", &wasm_bindgen::JsValue::UNDEFINED).as_string().unwrap_or_default();
                 view! {
                     <div class="trace-card">
+                        <input
+                            type="checkbox"
+                            title="Choose for Compare"
+                            aria-label="Choose for Compare"
+                            prop:checked=is_picked
+                            on:change=move |_| picked.update(|s| if !s.remove(&pick_path) { s.insert(pick_path.clone()); })
+                        />
                         <button class="trace-card-open" title=t.path.clone() on:click=move |_| open_file(store, path.clone())>
                             <strong>{file_name(&t.path).to_owned()}</strong>
                             <span class="muted small">{format!("{} · {} · {when}", t.context, t.what)}</span>
@@ -340,11 +532,20 @@ fn TraceList(store: Store) -> impl IntoView {
             <div class="resource-header page-head">
                 <h1>"Traces"</h1>
                 <span class="spacer"></span>
+                {move || {
+                    let n = picked.with(|s| s.len());
+                    (n >= 2).then(|| view! {
+                        <button class="btn" on:click=move |_| crate::compare::open(store, picked.get_untracked().into_iter().collect())>
+                            {format!("Compare {n}…")}
+                        </button>
+                    })
+                }}
                 <button class="btn primary" on:click=move |_| choose_and_open(store)>"Open trace…"</button>
             </div>
             <p class="muted">"Review CPU and memory recorded over hours or days, against requests, to right-size workloads. Opening a trace doesn't need a cluster."</p>
             {running}
             <h2 class="section-title">"Recent"</h2>
+            <p class="muted small">"Tick two or more to compare them, e.g. before and after a resize."</p>
             <div class="trace-cards">{recent}</div>
         </div>
     }
@@ -355,9 +556,12 @@ fn ReviewView(store: Store) -> impl IntoView {
     let sort = RwSignal::new((SortBy::CpuSpare, true));
     let filter = RwSignal::new(Filter::default());
     let back = move |_| {
-        store.review_path.set(None);
-        store.review.set(None);
-        store.review_sel.set(None);
+        guard(store, move || {
+            store.review_path.set(None);
+            store.review.set(None);
+            store.review_sel.set(None);
+            store.report_saved.set(None);
+        })
     };
     let reveal = move |_| {
         #[derive(Serialize)]
@@ -483,7 +687,10 @@ fn ReviewView(store: Store) -> impl IntoView {
                             />
                         </td>
                         <td>
-                            <div class="review-name">{row.key.name.clone()}</div>
+                            <div>
+                                <span class="review-name">{row.key.name.clone()}</span>
+                                {row.note.clone().map(|n| view! { <span class="note-mark" title=n aria-label="Has a note">"✎"</span> })}
+                            </div>
                             <div class="muted small">{format!("{} · {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
                         </td>
                         <td class="num">{format!("{:.1}", row.avg_pods).trim_end_matches(".0").to_owned()}</td>
@@ -552,13 +759,19 @@ fn ReviewView(store: Store) -> impl IntoView {
                 {move || recording().then(|| view! { <span class="rec-badge"><span class="rec-dot" aria-hidden="true"></span>"Recording"</span> })}
                 <span class="spacer"></span>
                 <button class="btn small" on:click=move |_| load(store) title="Read the file again">"Reload"</button>
+                <button class="btn small" on:click=move |_| compare_with(store) title="Pick another trace to put beside this one">"Compare with…"</button>
+                <button class="btn small" on:click=move |_| export_report(store) title="Save this review as a web page to share">"Export report…"</button>
                 <button class="btn small" on:click=reveal>{crate::prefs::reveal_label()}</button>
             </div>
             {move || match store.review.get() {
                 None => view! { <p class="muted pad">"Reading the trace…"</p> }.into_any(),
                 Some(Err(e)) => view! { <div class="warn">{e}</div> }.into_any(),
-                Some(Ok(_)) => view! {
+                Some(Ok(r)) => view! {
                     {header}
+                    {report_line(store)}
+                    <div class="review-note">
+                        <NoteBox store=store key=None text=r.note.clone() label="Note on this trace" />
+                    </div>
                     <div class="review-filters">
                         <label class="field">
                             "Namespace"
@@ -767,6 +980,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                     <button class="close" title="Close" aria-label="Close" on:click=move |_| store.review_sel.set(None)>"×"</button>
                 </div>
                 {suggestion}
+                <NoteBox store=store key=Some(row.key.clone()) text=row.note.clone() label="Note on this workload" />
                 {(!row.flags.is_empty()).then(|| view! { <ul class="flag-list">{flags}</ul> })}
                 {figures}
                 <p class="muted small">{facts}</p>

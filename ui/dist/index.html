@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>k8s-subduer</title>
     <link rel="stylesheet" href="/xterm-ae5fff20b9b7d4c7.css" integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP"/>
-    <link rel="stylesheet" href="/app-d996ff912569cf6c.css" integrity="sha384-s9cFtTYhi1wc93YLHhRo2gdMZam2nOsyGK4auB1dvUWXP79posI2S9IBg9pilCj+"/>
+    <link rel="stylesheet" href="/app-913f3f751fe0c5f.css" integrity="sha384-Y6ZG5lX8KfOl7w/4erX6vKUdjRmy1gJYAspqBp5HulmNaYzkN8odtmJ9nyQTcoYN"/>
     <!-- Appearance previews for Settings (see tools/ui-harness/README.md to regenerate). -->
     
     <!-- YAML editor for edit windows, loaded on demand (see vendor/ace/README.md). -->
@@ -17,8 +17,8 @@
     <script src="addon-fit.js"></script>
     
 <script type="module">
-import init, * as bindings from '/subduer-ui-b3c4b804da81d27c.js';
-const wasm = await init({ module_or_path: '/subduer-ui-b3c4b804da81d27c_bg.wasm' });
+import init, * as bindings from '/subduer-ui-d13a4f7a44b78461.js';
+const wasm = await init({ module_or_path: '/subduer-ui-d13a4f7a44b78461_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -27,6 +27,6 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/subduer-ui-b3c4b804da81d27c.js" crossorigin="anonymous" integrity="sha384-GcJOd6a1G6YvxK7ySsiM1mQZwB8kJI82fp9BAUk4e6FOSvL8J/Vv7TOWxtzGcHCh"><link rel="preload" href="/subduer-ui-b3c4b804da81d27c_bg.wasm" crossorigin="anonymous" integrity="sha384-AF7mJdKWaV0m6GvX0NA8sRFkGfnYrrrbjQgSNVlXEtDtg3yvzQCSf1JaRHYoYuhh" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/subduer-ui-d13a4f7a44b78461.js" crossorigin="anonymous" integrity="sha384-sbnz0aMkoSojJh29yyI2VMMO/FuKQVpZGN7E+IC/1uUv7ms27xd5t+cSbeSsHM5F"><link rel="preload" href="/subduer-ui-d13a4f7a44b78461_bg.wasm" crossorigin="anonymous" integrity="sha384-1eqyShPAOZKy1mGhS/+9oxzJzSfrp85DCY3GPpyKA2r7XqjjYVKCfYyH7Q7ShdEf" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

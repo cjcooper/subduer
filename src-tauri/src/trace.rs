@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use subduer_core::trace::Trace;
-use subduer_core::types::{TraceDaily, TraceEnd, TraceKey, TraceReview, TraceScope, TraceSeries, TraceStatus, TraceSummary, TraceTargets};
+use subduer_core::types::{
+    TraceComparison, TraceDaily, TraceEnd, TraceKey, TraceReview, TraceScope, TraceSeries, TraceStatus, TraceSummary, TraceTargets,
+};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::oneshot;
@@ -215,6 +217,74 @@ pub async fn trace_series(path: String, key: TraceKey, start: Option<f64>, end: 
 #[tauri::command]
 pub async fn trace_daily(path: String, key: TraceKey) -> CmdResult<TraceDaily> {
     blocking(move || subduer_core::trace_review::daily(Path::new(&path), &key, &jiff::tz::TimeZone::system())).await
+}
+
+/// Saves (or, when blank, removes) a note in a trace file: on the whole
+/// trace, or on `key`'s workload (its container is ignored).
+#[tauri::command]
+pub async fn trace_set_note(path: String, key: Option<TraceKey>, text: String) -> CmdResult<()> {
+    let note_key = key.map_or_else(String::new, |k| subduer_core::trace_file::note_key(&k.namespace, &k.kind, &k.name));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    blocking(move || subduer_core::trace_file::set_note(Path::new(&path), &note_key, &text, now)).await
+}
+
+/// Two or more trace files side by side, oldest data first.
+#[tauri::command]
+pub async fn trace_compare(state: State<'_, AppState>, paths: Vec<String>) -> CmdResult<TraceComparison> {
+    let recording = state.traces.status().await.map(|s| PathBuf::from(s.path));
+    let files: Vec<(PathBuf, bool)> = paths
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|p| {
+            let rec = recording.as_ref() == Some(&p);
+            (p, rec)
+        })
+        .collect();
+    let known = files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+    let comparison = blocking(move || subduer_core::trace_review::compare(&files)).await?;
+    state.traces.known.lock().unwrap().extend(known);
+    Ok(comparison)
+}
+
+/// The native Save dialog for an HTML report, next to its trace.
+#[tauri::command]
+pub async fn choose_report_file<R: Runtime>(app: AppHandle<R>, trace: String) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let trace = PathBuf::from(trace);
+    let name = format!("{}-report.html", trace.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "trace".into()));
+    let (tx, rx) = oneshot::channel();
+    let mut dialog = app.dialog().file().add_filter("Web page", &["html"]).set_file_name(&name).set_title("Save report as");
+    if let Some(dir) = trace.parent() {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    let mut path = path.into_path().map_err(|e| e.to_string())?;
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm")) {
+        path.set_extension("html");
+    }
+    Ok(Some(path.display().to_string()))
+}
+
+/// Writes a trace's review as a self-contained HTML page to `out` (the Save
+/// dialog has already asked about replacing it). Returns where it went.
+#[tauri::command]
+pub async fn export_trace_report(state: State<'_, AppState>, path: String, out: String) -> CmdResult<String> {
+    let recording = state.traces.status().await.is_some_and(|s| Path::new(&s.path) == Path::new(&path));
+    let out_path = PathBuf::from(&out);
+    let target = out_path.clone();
+    blocking(move || {
+        let tz = jiff::tz::TimeZone::system();
+        let generated = jiff::Zoned::now().with_time_zone(tz.clone()).strftime("%a %-d %b %Y %H:%M").to_string();
+        let html = subduer_core::trace_report::report_html(Path::new(&path), recording, &tz, &generated)?;
+        std::fs::write(&target, html).map_err(|e| subduer_core::Error::Message(format!("can't write {}: {e}", target.display())))
+    })
+    .await?;
+    tracing::info!(out = %out_path.display(), "trace report written");
+    state.traces.known.lock().unwrap().insert(out_path);
+    Ok(out)
 }
 
 #[cfg(test)]

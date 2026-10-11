@@ -9,7 +9,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use crate::trace_file::{BUCKET_SECS, TraceFile};
 use crate::types::{
-    ReviewFlag, ReviewRow, Series, Suggestion, TraceDaily, TraceDay, TraceEventMark, TraceGap, TraceKey, TraceReview,
+    CompareCell, CompareRow, ReviewFlag, TraceComparison, ReviewRow, Series, Suggestion, TraceDaily, TraceDay, TraceEventMark, TraceGap, TraceKey, TraceReview,
     TraceSeries,
 };
 use crate::{Error, Result};
@@ -71,15 +71,17 @@ pub fn review(path: &Path, recording: bool) -> Result<TraceReview> {
     };
     let gap_secs: f64 = summary.gaps.iter().map(|g| g.end - g.start).sum();
     let conn = file.conn();
+    let notes = file.notes()?;
     let mut rows = Vec::new();
     for (key, group) in groups(conn)? {
-        if let Some(row) = review_row(conn, key, &group, span, gap_secs)? {
+        if let Some(mut row) = review_row(conn, key, &group, span, gap_secs)? {
+            row.note = notes.get(&crate::trace_file::note_key(&row.key.namespace, &row.key.kind, &row.key.name)).cloned();
             rows.push(row);
         }
     }
     // Most CPU requested but unused first; rows without a request after.
     rows.sort_by(|a, b| b.cpu_spare.unwrap_or(f64::MIN).total_cmp(&a.cpu_spare.unwrap_or(f64::MIN)));
-    Ok(TraceReview { summary, rows })
+    Ok(TraceReview { summary, rows, note: notes.get("").cloned() })
 }
 
 /// Per-container figures gathered from the file.
@@ -260,7 +262,51 @@ fn review_row(conn: &Connection, key: TraceKey, group: &Group, span: f64, gap_se
         mem_spare: mem_request.map(|r| (r - mem_max) * avg_pods),
         flags,
         suggestion,
+        note: None,
     }))
+}
+
+/// Several traces side by side, oldest data first, rows matched by
+/// namespace, workload and container. Each is `(path, being recorded)`.
+pub fn compare(files: &[(std::path::PathBuf, bool)]) -> Result<TraceComparison> {
+    if files.len() < 2 {
+        return Err(Error::Message("choose at least two traces to compare".into()));
+    }
+    let mut reviews = files.iter().map(|(p, rec)| review(p, *rec)).collect::<Result<Vec<_>>>()?;
+    reviews.sort_by(|a, b| a.summary.data_start.unwrap_or(a.summary.started).total_cmp(&b.summary.data_start.unwrap_or(b.summary.started)));
+    let mut rows: BTreeMap<TraceKey, Vec<Option<CompareCell>>> = BTreeMap::new();
+    for (i, r) in reviews.iter().enumerate() {
+        for row in &r.rows {
+            let ooms = row
+                .flags
+                .iter()
+                .map(|f| match f {
+                    ReviewFlag::OomKilled { count } | ReviewFlag::OomEvents { count } => *count,
+                    _ => 0,
+                })
+                .sum();
+            let throttled = row.flags.iter().find_map(|f| match f {
+                ReviewFlag::Throttled { worst } => Some(*worst),
+                _ => None,
+            });
+            let cells = rows.entry(row.key.clone()).or_insert_with(|| vec![None; reviews.len()]);
+            cells[i] = Some(CompareCell {
+                cpu_request: row.cpu_request,
+                cpu_p95: row.cpu_p95,
+                cpu_max: row.cpu_max,
+                mem_request: row.mem_request,
+                mem_max: row.mem_max,
+                avg_pods: row.avg_pods,
+                ooms,
+                throttled,
+                hours: row.minutes as f64 / 60.0,
+            });
+        }
+    }
+    Ok(TraceComparison {
+        traces: reviews.into_iter().map(|r| r.summary).collect(),
+        rows: rows.into_iter().map(|(key, cells)| CompareRow { key, cells }).collect(),
+    })
 }
 
 /// Nearest-rank percentile of sorted values; 0 when empty.
@@ -492,4 +538,4 @@ pub fn daily(path: &Path, key: &TraceKey, tz: &jiff::tz::TimeZone) -> Result<Tra
 
 #[cfg(test)]
 #[path = "trace_review_tests.rs"]
-mod tests;
+pub(crate) mod tests;

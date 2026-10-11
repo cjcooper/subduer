@@ -8,6 +8,9 @@
 // go=1 (the dialog's Apply button), ctx=prod (the trace and connection are acme-prd), typed=1, locked=1,
 // unlock=1 (Allow changes… then confirms), other=1 (connected to another context than the trace's),
 // refuse=1 (the dry run for db is refused), fail=1 (applying worker fails), copy=1 (Copy values snippet).
+// Phase 5: note=<text> (adds a note on the trace), wnote=<text> (on the selected row's workload), noted=1 (the
+// file already has notes), compare=1 (ticks two recent files, then Compare 2…), cmpwith=1 (Compare with… from a
+// review), changed=1 (Requests changed only), export=1 (Export report…), exportfail=1, leave=1 (leaves while editing).
 // The title reports the commands sent, the table's rows in order, the selected row and what's shown.
 (function () {
   const params = new URLSearchParams(location.search);
@@ -143,7 +146,25 @@
       if (cmd === 'choose_trace_to_open') return params.get('cancel') ? null : '/Users/me/Documents/shared-acme-uat.trace';
       if (cmd === 'trace_review') {
         if (params.get('bad')) throw `${args.path} isn't a trace file`;
-        return { summary: Object.assign({}, summary, { path: args.path }), rows };
+        const noted = params.get('noted');
+        return { summary: Object.assign({}, summary, { path: args.path }), note: noted ? 'Peak season week; compare after the resize.' : null,
+          rows: rows.map((r) => Object.assign({}, r, { note: noted && r.key.name === 'web' ? 'Agreed with the team: 250m' : null })) };
+      }
+      if (cmd === 'trace_set_note') { sent.push(`note:${args.key ? args.key.name : 'trace'}=${args.text}`); return null; }
+      if (cmd === 'choose_report_file') return '/Users/me/Documents/acme-uat-shop-report.html';
+      if (cmd === 'export_trace_report') { if (params.get('exportfail')) throw 'permission denied'; return args.out; }
+      if (cmd === 'trace_compare') {
+        sent.push(`compare:${args.paths.length}`);
+        const t = (path, start, req) => Object.assign({}, summary, { path, data_start: start, data_end: start + 3 * 86400 });
+        const c = (cpu_request, cpu_p95, mem_request, mem_max, ooms = 0) => ({ cpu_request, cpu_p95, cpu_max: cpu_p95 * 2, mem_request, mem_max, avg_pods: 3, ooms, throttled: null, hours: 72 });
+        return {
+          traces: [t('/Users/me/Documents/acme-uat-shop-before.trace', start - 10 * 86400), t('/Users/me/Documents/acme-uat-shop-after.trace', start)],
+          rows: [
+            { key: key('web', 'Deployment', 'app'), cells: [c(1500, 11.8, 6144 * MiB, 2557 * MiB), c(15, 12.4, 2944 * MiB, 2560 * MiB)] },
+            { key: key('db', 'StatefulSet', 'db'), cells: [c(null, 610, null, 950 * MiB, 2), c(null, 600, null, 940 * MiB, 1)] },
+            { key: key('nightly', 'CronJob', 'run', 'ops'), cells: [c(100, 80, 128 * MiB, 90 * MiB), null] },
+          ],
+        };
       }
       if (cmd === 'trace_series') return series(args.key, args.start, args.end, args.points);
       if (cmd === 'trace_daily') return daily(args.key);
@@ -190,6 +211,26 @@
   if (params.get('copy')) step(() => button('Copy values snippet')?.click(), 1200);
   if (params.get('typed')) step(() => { const i = document.querySelector('.apply-modal .confirm-input'); if (i) { i.value = ctxName; i.dispatchEvent(new Event('input', { bubbles: true })); } }, 1200);
   if (params.get('go')) step(() => document.querySelector('.apply-modal .danger')?.click(), 1200);
+  const type = (sel, text) => { const el = document.querySelector(sel); if (el) { el.value = text; el.dispatchEvent(new Event('input', { bubbles: true })); } };
+  if (params.get('note')) {
+    step(() => [...document.querySelectorAll('.note-add')].find((b) => /this trace/.test(b.textContent))?.click(), 700);
+    step(() => type('.review-note textarea', params.get('note')));
+    if (!params.get('leave')) step(() => button('Save note', document.querySelector('.review-note'))?.click());
+  }
+  if (params.get('wnote')) {
+    step(() => [...document.querySelectorAll('.review-detail .note-add, .review-detail .note-box button')].find((b) => /Add a note|Edit/.test(b.textContent))?.click(), 900);
+    step(() => type('.review-detail textarea', params.get('wnote')));
+    step(() => button('Save note', document.querySelector('.review-detail'))?.click());
+  }
+  if (params.get('leave')) step(() => button('← Traces')?.click());
+  if (params.get('compare')) {
+    step(() => document.querySelectorAll('.trace-card input[type=checkbox]')[0]?.click());
+    step(() => document.querySelectorAll('.trace-card input[type=checkbox]')[1]?.click());
+    step(() => [...document.querySelectorAll('button')].find((b) => /^Compare \d/.test(b.textContent.trim()))?.click());
+  }
+  if (params.get('cmpwith')) step(() => button('Compare with…')?.click(), 700);
+  if (params.get('changed')) step(() => [...document.querySelectorAll('.review-filters .check input')].pop()?.click(), 900);
+  if (params.get('export')) step(() => button('Export report…')?.click(), 700);
   if (params.get('heat') === 'mem') step(() => button('Memory peak', document.querySelector('.review-detail') || document)?.click());
   if (params.get('back')) step(() => button('← Traces')?.click());
   setTimeout(() => {
@@ -200,6 +241,7 @@
     document.title = `sent=${sent.join(',')} rows=${order || 'none'} detail=${detail} range=${range} heat=${heat}`
       + ` page=${document.querySelector('.traces-page h1')?.textContent || 'none'}`
       + ` dialogs=${[...document.querySelectorAll('.modal h2')].map((h) => h.textContent.trim()).join('|') || 'none'}`
+      + ` cmprows=${[...document.querySelectorAll('.compare-table tbody .review-name')].map((n) => n.textContent).join(',') || 'none'}`
       + ` applybtn=${document.querySelector('.apply-modal .danger')?.disabled === false ? 'on' : 'off'} copied=${copied ? 'yes' : 'no'}`;
   }, t + 1500);
 })();

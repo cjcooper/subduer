@@ -909,3 +909,25 @@ table.figures .num { text-align: right; }
 .apply-locked { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .ok-text { color: var(--ok); }
 .small { font-size: 12px; }
+
+/* Notes, report export and comparing traces. */
+.review-note { margin: 0 16px 10px; }
+.note-box { display: flex; align-items: flex-start; gap: 10px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel); }
+.note-box.editing { flex-direction: column; align-items: stretch; }
+.note-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.note-text { flex: 1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-box textarea { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); font: inherit; }
+.note-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.note-add { margin: 8px 0; }
+.note-mark { margin-left: 6px; color: var(--accent); font-size: 12px; }
+.report-line { display: flex; align-items: center; gap: 8px; margin: 0 16px 10px; }
+.pad-x { margin: 0 16px 10px; }
+.trace-card input[type="checkbox"] { margin: 0 2px 0 4px; }
+.cmp-wrap { border-top: 1px solid var(--border); }
+.compare-table td.cmp-cell { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.compare-table td.cmp-cell > div { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.compare-table .res-dot { width: 7px; height: 7px; margin-right: 4px; }
+.cmp-head { vertical-align: bottom; }
+.cmp-head > span { display: block; font-weight: 400; }
+.cmp-index { display: inline-block !important; padding: 0 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-weight: 600 !important; margin-bottom: 2px; }
+.cmp-file { color: var(--text); font-weight: 600 !important; }

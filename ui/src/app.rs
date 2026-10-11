@@ -160,6 +160,11 @@ pub(crate) struct Store {
     pub(crate) review_checked: RwSignal<HashSet<subduer_types::TraceKey>>,
     /// The apply dialog is open with these changes (one per workload).
     pub(crate) apply_prompt: RwSignal<Option<Vec<subduer_types::RightsizeChange>>>,
+    /// Comparing these trace files, and the comparison.
+    pub(crate) compare_paths: RwSignal<Option<Vec<String>>>,
+    pub(crate) comparison: RwSignal<Option<Result<subduer_types::TraceComparison, String>>>,
+    /// Where the open review's report was last saved.
+    pub(crate) report_saved: RwSignal<Option<Result<String, String>>>,
 }
 
 impl Store {
@@ -247,6 +252,9 @@ impl Store {
             recent_traces: RwSignal::new(vec![]),
             review_checked: RwSignal::new(HashSet::new()),
             apply_prompt: RwSignal::new(None),
+            compare_paths: RwSignal::new(None),
+            comparison: RwSignal::new(None),
+            report_saved: RwSignal::new(None),
         }
     }
 

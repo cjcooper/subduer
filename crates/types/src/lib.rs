@@ -1163,6 +1163,9 @@ pub struct TraceKey {
 pub struct TraceReview {
     pub summary: TraceSummary,
     pub rows: Vec<ReviewRow>,
+    /// The note on the whole trace, saved in the file.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Usage of one workload container over the whole trace, against its
@@ -1200,6 +1203,9 @@ pub struct ReviewRow {
     pub mem_spare: Option<f64>,
     pub flags: Vec<ReviewFlag>,
     pub suggestion: Option<Suggestion>,
+    /// The note on this row's workload, saved in the file.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Something worth a look on a review row. Limits only matter when hit.
@@ -1350,6 +1356,35 @@ impl QuantityChange {
     pub fn changed(&self) -> bool {
         self.before != self.after
     }
+}
+
+/// Two or more traces side by side, oldest data first, matched by row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceComparison {
+    pub traces: Vec<TraceSummary>,
+    pub rows: Vec<CompareRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompareRow {
+    pub key: TraceKey,
+    /// One per trace, in `traces` order; `None` where the row isn't in that trace.
+    pub cells: Vec<Option<CompareCell>>,
+}
+
+/// A row's figures in one trace. CPU in millicores, memory in bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompareCell {
+    pub cpu_request: Option<f64>,
+    pub cpu_p95: f64,
+    pub cpu_max: f64,
+    pub mem_request: Option<f64>,
+    pub mem_max: f64,
+    pub avg_pods: f64,
+    /// OOM kills (restarts and events) and the worst throttled minute.
+    pub ooms: u32,
+    pub throttled: Option<f64>,
+    pub hours: f64,
 }
 
 /// What can be traced in one namespace.
