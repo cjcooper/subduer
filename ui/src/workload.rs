@@ -11,6 +11,7 @@ use subduer_types::{
     ContextInfo, DataChange, KindRef, Replicas, ResourceRow, has_workload_details, is_scalable_workload,
 };
 
+use crate::modal::Modal;
 use crate::app::Store;
 use crate::tauri::invoke;
 
@@ -790,8 +791,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal" class:prod=context.prod_like class:wide=op == Op::Rollback>
+                <Modal on_cancel=move |()| close() busy=busy prod=context.prod_like wide=op == Op::Rollback>
                         <h2>{title}</h2>
                         {body}
                         {context.prod_like.then(|| view! {
@@ -808,15 +808,14 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
                             // Leaving the Save dialog never saves; it goes back to the edit.
-                            <button on:click=move |_| close()>{if op == Op::Save { "Back to editing" } else { "Cancel" }}</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>{if op == Op::Save { "Back to editing" } else { "Cancel" }}</button>
                             <button
                                 class=if op == Op::Uninstall { "danger" } else { "primary" }
                                 prop:disabled=move || !ok()
                                 on:click=confirm.clone()
                             >{label}</button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             }
         })
     }

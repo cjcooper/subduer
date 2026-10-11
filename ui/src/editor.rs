@@ -420,13 +420,19 @@ pub fn EditorApp(label: String) -> impl IntoView {
             unlocked: bool,
         }
         let context = s.context.clone();
+        busy.set(true);
         spawn_local(async move {
             let _ = invoke::<_, ()>("set_unlocked", &Args { context, unlocked: true }).await;
+            busy.set(false);
             session.update(|s| {
                 if let Some(Ok(s)) = s {
                     s.unlocked = true;
                 }
             });
+            // Closed meanwhile (the window's close prompt): don't reopen as Save.
+            if !matches!(modal.get_untracked(), Some(Modal::Unlock)) {
+                return;
+            }
             typed.set(String::new());
             let text = ace.with_value(|a| a.as_ref().map(Ace::text)).unwrap_or_default();
             modal.set(Some(Modal::Confirm(summarize(line_diff(&original.get_untracked(), &text), 3))));
@@ -597,7 +603,7 @@ fn EditorModal(
     on_discard: Callback<After>,
 ) -> impl IntoView {
     let Some(Ok(s)) = session.get_untracked() else { return ().into_any() };
-    let close = move |_| {
+    let close = move || {
         typed.set(String::new());
         modal.set(None);
     };
@@ -610,10 +616,9 @@ fn EditorModal(
     match m {
         Modal::Unlock => {
             let context = s.context.clone();
-            let ok = move || !prod || typed.get().trim() == context;
+            let ok = move || !busy.get() && (!prod || typed.get().trim() == context);
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal" class:prod=prod>
+                <crate::modal::Modal on_cancel=move |()| close() busy=busy prod=prod>
                         <h2>"Allow changes?"</h2>
                         <p>"Context "<strong>{s.context.clone()}</strong>" is read-only. Saving needs changes allowed on it, as in the main window."</p>
                         {prod.then(|| view! {
@@ -621,11 +626,10 @@ fn EditorModal(
                             <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
                         })}
                         <div class="modal-actions">
-                            <button on:click=close>"Back to editing"</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>"Back to editing"</button>
                             <button class="danger" prop:disabled=move || !ok() on:click=move |_| on_unlock.run(())>"Allow changes"</button>
                         </div>
-                    </div>
-                </div>
+                </crate::modal::Modal>
             }
             .into_any()
         }
@@ -643,8 +647,7 @@ fn EditorModal(
                 })
                 .collect_view();
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal wide" class:prod=prod>
+                <crate::modal::Modal on_cancel=move |()| close() busy=busy prod=prod wide=true>
                         <h2>{format!("Save {}?", s.target.kind.kind)}</h2>
                         <p>"Save "{what}"? The server has checked it."</p>
                         <p class="muted">{change_summary(added, removed)}</p>
@@ -655,13 +658,12 @@ fn EditorModal(
                             <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
                         })}
                         <div class="modal-actions">
-                            <button on:click=close>"Back to editing"</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>"Back to editing"</button>
                             <button class="primary" prop:disabled=move || !ok() on:click=move |_| on_commit.run(())>
                                 {move || if busy.get() { "Saving…" } else { "Save" }}
                             </button>
                         </div>
-                    </div>
-                </div>
+                </crate::modal::Modal>
             }
             .into_any()
         }
@@ -671,16 +673,14 @@ fn EditorModal(
                 After::Reload => ("Reload and discard your edits?", "Discard and reload"),
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal">
+                <crate::modal::Modal on_cancel=move |()| close()>
                         <h2>{title}</h2>
                         <p>"Your changes to "<strong class="mono">{s.target.name.clone()}</strong>" haven't been saved. Nothing is saved unless you click "<strong>"Save"</strong></p>
                         <div class="modal-actions">
                             <button class="danger" on:click=move |_| on_discard.run(after)>{action}</button>
-                            <button class="primary" autofocus on:click=close>"Keep editing"</button>
+                            <button class="primary" autofocus on:click=move |_| close()>"Keep editing"</button>
                         </div>
-                    </div>
-                </div>
+                </crate::modal::Modal>
             }
             .into_any()
         }

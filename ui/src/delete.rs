@@ -7,6 +7,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{ContextInfo, KindRef, ResourceRow};
 
+use crate::modal::Modal;
 use crate::app::Store;
 use crate::tauri::invoke;
 
@@ -152,8 +153,7 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
                 None => ().into_any(),
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal" class:prod=context.prod_like>
+                <Modal on_cancel=move |()| close() busy=busy prod=context.prod_like>
                         <h2>{format!("Delete {}?", kind.kind)}</h2>
                         <p>
                             <strong class="mono">{row.name.clone()}</strong>
@@ -174,13 +174,12 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
                         })}
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| close()>"Cancel"</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>"Cancel"</button>
                             <button class="danger" prop:disabled=move || !ok() on:click=confirm.clone()>
                                 {move || if busy.get() { "Deleting…" } else { "Delete" }}
                             </button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             }
         })
     }

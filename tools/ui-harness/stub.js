@@ -52,6 +52,8 @@
   };
   window.__TAURI__ = {
     core: { invoke: async (cmd, args, opts) => {
+      if (cmd === params.get('hang')) return new Promise(() => {});
+      if (cmd === params.get('slow')) await new Promise((r) => setTimeout(r, 1500));
       if (cmd === 'watch_resources') { setTimeout(() => (listeners['resource-table'] || []).forEach((cb) => cb({ payload: table })), 50); return 1; }
       if (cmd === 'list_contexts') return { contexts: [{ name: ctxName, cluster: ctxName, namespace: null, prod_like: prod, unlocked }], current: ctxName };
       if (cmd === 'set_unlocked') { unlocked = true; return null; }
@@ -102,6 +104,8 @@
     if (params.get('browse')) setTimeout(() => [...document.querySelectorAll('.crumb')].find((b) => b.textContent === '/')?.click(), 3300);
     if (params.get('upload') === 'send') setTimeout(() => [...document.querySelectorAll('.modal button')].find((b) => b.textContent === 'Upload')?.click(), 3400);
   }
+  // again=<ms>: open the Download (or Upload) dialog again, as after closing it.
+  if (params.get('again')) setTimeout(() => [...document.querySelectorAll('.dsection-actions button')].find((b) => b.textContent === (params.get('download') ? 'Download' : 'Upload'))?.click(), Number(params.get('again')));
   if (hoverAt) setTimeout(() => {
     const c = document.querySelector('.lchart:not(.empty)'); if (!c) return;
     const r = c.getBoundingClientRect();

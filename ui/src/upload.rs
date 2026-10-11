@@ -9,6 +9,7 @@ use subduer_types::{DirListing, UploadOutcome, UploadTarget};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::modal::{Generation, Modal};
 use crate::app::Store;
 use crate::browser::{BrowseMode, FolderBrowser, folder_of, join};
 use crate::overview::fmt_bytes;
@@ -81,9 +82,13 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
     let suggestions = RwSignal::new(Vec::<String>::new());
     let browsing = RwSignal::new(false);
 
+    // Results of requests sent before the dialog last opened or closed are dropped.
+    let generation = Generation::new();
+
     let browse = move |path: String, suggest: bool| {
         let Some(prompt) = store.upload_prompt.get_untracked() else { return };
         browsing.set(true);
+        let sent = generation.now();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args {
@@ -98,6 +103,9 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
             // No /tmp: start at the root instead.
             if suggest && result.is_err() {
                 result = invoke::<_, DirListing>("browse_dir", &Args { path: "/".into(), ..args }).await;
+            }
+            if !generation.still(sent) {
+                return;
             }
             if let Ok(l) = &result {
                 if suggest {
@@ -117,6 +125,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
 
     // Fresh state each time the dialog opens.
     Effect::new(move |_| {
+        generation.next();
         if store.upload_prompt.with(Option::is_some) {
             file.set_value(None);
             file_label.set(None);
@@ -166,6 +175,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         };
         phase.set(Phase::Uploading);
         error.set(None);
+        let sent = generation.now();
         spawn_local(async move {
             let result = async {
                 let buffer = JsFuture::from(f.array_buffer()).await.map_err(|_| "Couldn't read the file.".to_owned())?;
@@ -176,6 +186,9 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                 invoke_bytes::<UploadOutcome>("upload_file", &bytes, &[("x-upload", &header)]).await
             }
             .await;
+            if !generation.still(sent) {
+                return;
+            }
             match result {
                 Ok(UploadOutcome::Uploaded { bytes, path }) => phase.set(Phase::Done { bytes, path }),
                 Ok(UploadOutcome::Exists { path }) => phase.set(Phase::Exists(path)),
@@ -187,6 +200,14 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         });
     };
     let close = move || store.upload_prompt.set(None);
+    // Esc: from "already exists", back to choosing; otherwise close.
+    let cancel = move || {
+        if matches!(phase.get_untracked(), Phase::Exists(_)) {
+            phase.set(Phase::Choosing);
+        } else {
+            close();
+        }
+    };
     let dest_ok = move || dest.with(|p| p.trim().starts_with('/'));
     let can_upload = move || file_label.with(|f| f.as_ref().is_some_and(|(_, size)| *size <= MAX_BYTES)) && dest_ok();
     // What the destination will mean once the file is chosen.
@@ -261,7 +282,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                         />
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| close()>"Cancel"</button>
+                            <button prop:disabled=uploading on:click=move |_| close()>"Cancel"</button>
                             <button class="primary" prop:disabled=move || uploading || !can_upload() on:click=move |_| send(false)>
                                 {if uploading { "Uploading…" } else { "Upload" }}
                             </button>
@@ -271,13 +292,11 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal wide">
-                        <h2>"Upload file"</h2>
-                        <p class="mono">{target}</p>
-                        {body}
-                    </div>
-                </div>
+                <Modal on_cancel=move |()| cancel() busy=Signal::derive(move || matches!(phase.get(), Phase::Uploading)) wide=true>
+                    <h2>"Upload file"</h2>
+                    <p class="mono">{target}</p>
+                    {body}
+                </Modal>
             }
         })
     }

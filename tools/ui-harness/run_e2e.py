@@ -173,6 +173,8 @@ SCENARIOS = [
     S("settings/dark-over-light", "settingsstub.js", "pick=dark", has=["data-theme=dark", "bg=rgb(22, 25, 30)"]),
     S("settings/saved-dark-restart", "settingsstub.js", "theme=dark", has=["data-theme=dark", "native=dark"]),
     S("settings/back-to-auto", "settingsstub.js", "theme=light&pick=auto", scheme=DARK, has=["data-theme=none", "saved=auto"]),
+    S("settings/outside-click-closes", "settingsstub.js", "open=1&click=outside", has=["dialog=closed"]),
+    S("settings/inside-click-stays", "settingsstub.js", "open=1&click=inside", has=["dialog=open"]),
     S("settings/no-auto", "settingsstub.js", "open=1&noauto=1", has=["buttons=Light*|Dark"], lacks=["Auto"]),
     # ---- YAML editing ----
     S("edit/button-opens-editor", "configstub.js", "kind=cm&yamledit=1",
@@ -205,6 +207,41 @@ SCENARIOS = [
     S("edit/window-close-asks", "editorstub.js", "edit=edit-1&change=1&closereq=1", has=["modal=Discard your edits?"], lacks=[",close"]),
     S("edit/window-close-clean", "editorstub.js", "edit=edit-1&closereq=1", has=["calls=start,close"]),
     S("edit/reload-dirty-asks", "editorstub.js", "edit=edit-1&change=1&reload=1&discard=1", has=["calls=start,start", "dirty=false"]),
+    # ---- Esc (esc.js) ----
+    # The detail panel: closes, except while typing; unsaved edits ask first.
+    S("esc/panel-closes", "configstub.js", "kind=cm&esc=2800", has=["before: dialog=none detail=yes after: dialog=none detail=no"]),
+    S("esc/panel-field-stays", "configstub.js", "kind=cm&esc=2800&escfrom=field", has=["from=field", "after: dialog=none detail=yes"]),
+    S("esc/panel-select-closes", "configstub.js", "kind=cm&esc=2800&escfrom=select", has=["from=select", "after: dialog=none detail=no"]),
+    S("esc/panel-unsaved-asks", "configstub.js", "kind=cm&edit=1&change=1&esc=2800",
+      has=["after: dialog=Discard unsaved changes? detail=yes"]),
+    # Modal's rules, once each (every dialog is a Modal, and must give it on_cancel):
+    # cancels from a text field, only the dialog, not on a held key's repeats, not while busy.
+    S("esc/delete", "stub.js", "pod=limited&ctx=prod&del=1&esc=dialog&escfrom=field",
+      has=["from=field", "before: dialog=Delete Pod?", "after: dialog=none detail=yes"]),
+    S("esc/held-closes-dialog-only", "stub.js", "pod=limited&del=1&esc=dialog&eschold=1",
+      has=["before: dialog=Delete Pod?", "after: dialog=none detail=yes"]),
+    S("esc/busy-delete", "stub.js", "pod=limited&del=2&hang=delete_resource&esc=busy",
+      has=["before: dialog=Delete Pod?", "after: dialog=Delete Pod? detail=yes"]),
+    S("esc/busy-editor-save", "editorstub.js", "edit=edit-1&change=1&save=1&confirm=1&hang=save&esc=busy",
+      has=["before: dialog=Save Deployment?", "modal=Save Deployment?", "calls=start,check,save"], lacks=[",close"]),
+    # Dialogs whose cancel is more than closing.
+    S("esc/unsaved-prompt-keeps", "configstub.js", "kind=cm&edit=1&change=1&leave=row&esc=3300",
+      has=["before: dialog=Discard unsaved changes?", "after: dialog=none detail=yes", "prompt=false", "editing=true", "unsaved=true"]),
+    S("esc/unlock", "configstub.js", "kind=cm&ctx=prod&locked=1&edit=1&change=1&save=1&esc=3400&escfrom=field",
+      has=["from=field", "before: dialog=Allow changes?", "after: dialog=none detail=yes"], lacks=["save_config_data"]),
+    S("esc/upload-replace-back", "stub.js", "pod=limited&upload=send&exists=1&esc=4200",
+      has=["before: dialog=Upload file", "after: dialog=Upload file"], lacks=["overwrite=true"]),
+    S("esc/busy-upload", "stub.js", "pod=limited&upload=send&hang=upload_file&esc=busy",
+      has=["before: dialog=Upload file", "after: dialog=Upload file detail=yes"]),
+    S("esc/busy-editor-unlock", "editorstub.js", "edit=edit-1&change=1&save=1&locked=1&confirm=1&hang=unlock&esc=busy",
+      has=["before: dialog=Allow changes?", "modal=Allow changes?"], lacks=["modal=Save"]),
+    # A late result from a dialog closed and reopened is dropped.
+    S("esc/download-late-dropped", "stub.js", "pod=limited&download=done&slow=download_file&esc=3800&again=4400",
+      has=["after: dialog=none", "Download file"], lacks=["/Users/me/Downloads/app.log"]),
+    S("esc/forward-late-ports-dropped", "fwd.js", "page=dialog&late=1&esc=2200",
+      has=["before: dialog=Port forward", "grafana-web"], lacks=["http-web"]),
+    S("esc/forward-loading", "fwd.js", "page=dialog&hang=forward_ports&esc=dialog",
+      has=["before: dialog=Port forward", "after: dialog=none detail=yes"]),
     # ---- Logs and shell windows ----
     S("logs/window", "logstub.js", "logs=app&merged=1", has=["GET /healthz", "web-7d9f-abcde/app", "Wrap"], lacks=["bad response"]),
     S("exec/window", "execstub.js", "exec=app", has=["Shell"]),
@@ -217,7 +254,10 @@ def build(out):
     for f in os.listdir(HARNESS):
         if f.endswith(".js"):
             shutil.copy(os.path.join(HARNESS, f), out)
-            page = index.replace("<head>", f'<head><script src="{f}"></script>', 1)
+            # esc.js rides along with every stub (it does nothing without `esc=`); it has no page of its own.
+            if f == "esc.js":
+                continue
+            page =index.replace("<head>", f'<head><script src="{f}"></script><script src="esc.js"></script>', 1)
             open(os.path.join(out, f"page-{f[:-3]}.html"), "w").write(page)
 
 

@@ -7,6 +7,7 @@ use serde::Serialize;
 use subduer_types::{ForwardInfo, ForwardRequest, ForwardSource, PortOption};
 use wasm_bindgen::{JsCast, JsValue};
 
+use crate::modal::Modal;
 use crate::app::Store;
 use crate::tauri::invoke;
 
@@ -82,6 +83,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
         error.set(None);
         started.set(None);
         busy.set(false);
+        let asked = prompt.clone();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args {
@@ -93,6 +95,10 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                 &Args { namespace: prompt.namespace, source: prompt.source },
             )
             .await;
+            // Cancelled while loading, maybe reopened for something else.
+            if store.forward_prompt.with_untracked(|p| p.as_ref() != Some(&asked)) {
+                return;
+            }
             if let Ok(first) = result.as_ref().map(|o| o.first().map(|p| p.port)) {
                 chosen.set(first);
                 local.set(first.map(|p| p.to_string()).unwrap_or_default());
@@ -142,7 +148,11 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                     }
                     .into_any()
                 }
-                (None, None) => view! { <p class="muted">"Loading ports…"</p> }.into_any(),
+                (None, None) => view! {
+                    <p class="muted">"Loading ports…"</p>
+                    <div class="modal-actions"><button on:click=move |_| close()>"Cancel"</button></div>
+                }
+                .into_any(),
                 (None, Some(Err(e))) => view! {
                     <p class="warn">{e}</p>
                     <div class="modal-actions"><button on:click=move |_| close()>"Close"</button></div>
@@ -194,7 +204,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                         </label>
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            <button on:click=move |_| close()>"Cancel"</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>"Cancel"</button>
                             <button
                                 class="primary"
                                 prop:disabled=move || busy.get() || chosen.get().is_none() || local_port().is_none()
@@ -206,13 +216,11 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                 }
             };
             view! {
-                <div class="modal-backdrop">
-                    <div class="modal">
-                        <h2>"Port forward"</h2>
-                        <p class="mono">{target}</p>
-                        {body}
-                    </div>
-                </div>
+                <Modal on_cancel=move |()| close() busy=busy>
+                    <h2>"Port forward"</h2>
+                    <p class="mono">{target}</p>
+                    {body}
+                </Modal>
             }
         })
     }
