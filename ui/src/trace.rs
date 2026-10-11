@@ -242,6 +242,10 @@ async fn stop(store: Store, reason: TraceEnd) {
         reason: TraceEnd,
     }
     let result = invoke::<_, TraceSummary>("stop_trace", &Args { reason }).await;
+    if let Ok(s) = &result {
+        let recent = crate::prefs::RecentTrace { path: s.path.clone(), context: s.context.clone(), what: scope_text(&s.scope), at: js_sys::Date::now() };
+        store.recent_traces.set(crate::prefs::remember_trace(recent));
+    }
     store.trace.set(None);
     store.trace_saved.set(Some(result));
 }
@@ -680,6 +684,11 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                     });
                 };
                 let gaps = s.gaps.len();
+                let review_path = s.path.clone();
+                let review = move |_| {
+                    store.trace_saved.set(None);
+                    crate::trace_review::open_file(store, review_path.clone());
+                };
                 view! {
                     <div class="modal-backdrop">
                         <div class="modal wide trace-modal">
@@ -699,6 +708,7 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                             })}
                             <div class="modal-actions">
                                 <button on:click=reveal>{crate::prefs::reveal_label()}</button>
+                                <button on:click=review>"Review"</button>
                                 <button class="primary" on:click=done>"Done"</button>
                             </div>
                         </div>

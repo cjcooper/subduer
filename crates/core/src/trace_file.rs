@@ -384,7 +384,6 @@ impl TraceFile {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }

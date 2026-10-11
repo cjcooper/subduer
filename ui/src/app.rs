@@ -150,11 +150,19 @@ pub(crate) struct Store {
     /// Switching to this context waits for the trace to be stopped, then runs `trace_then`.
     pub(crate) trace_switch: RwSignal<Option<String>>,
     pub(crate) trace_then: StoredValue<Option<Box<dyn FnOnce()>>, LocalStorage>,
+    /// Showing the Traces page, the file under review, its review and the selected row.
+    pub(crate) traces_open: RwSignal<bool>,
+    pub(crate) review_path: RwSignal<Option<String>>,
+    pub(crate) review: RwSignal<Option<Result<subduer_types::TraceReview, String>>>,
+    pub(crate) review_sel: RwSignal<Option<subduer_types::TraceKey>>,
+    pub(crate) recent_traces: RwSignal<Vec<crate::prefs::RecentTrace>>,
 }
 
 impl Store {
     fn new() -> Self {
-        Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load())
+        let store = Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load());
+        store.recent_traces.set(crate::prefs::load_recent_traces());
+        store
     }
 
     /// A fresh store from the saved preferences and the current time.
@@ -228,6 +236,11 @@ impl Store {
             trace_quit: RwSignal::new(None),
             trace_switch: RwSignal::new(None),
             trace_then: StoredValue::new_local(None),
+            traces_open: RwSignal::new(false),
+            review_path: RwSignal::new(None),
+            review: RwSignal::new(None),
+            review_sel: RwSignal::new(None),
+            recent_traces: RwSignal::new(vec![]),
         }
     }
 
@@ -518,7 +531,9 @@ pub fn App() -> impl IntoView {
             <div class="body">
                 <Sidebar store=store />
                 <main class="main">
-                    {move || if store.forwards_open.get() {
+                    {move || if store.traces_open.get() {
+                        view! { <crate::trace_review::TracesPage store=store /> }.into_any()
+                    } else if store.forwards_open.get() {
                         view! { <crate::forward::ForwardsPage store=store /> }.into_any()
                     } else if store.disconnected.with(Option::is_some) {
                         view! { <Disconnected store=store /> }.into_any()
@@ -805,9 +820,10 @@ fn Sidebar(store: Store) -> impl IntoView {
                     <Show when=move || kind_matches_text("Cluster", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
-                            class:active=move || store.overview_open.get() && !store.forwards_open.get()
+                            class:active=move || store.overview_open.get() && !store.forwards_open.get() && !store.traces_open.get()
                             on:click=move |_| guard(store, move || {
                                 store.forwards_open.set(false);
+                                store.traces_open.set(false);
                                 store.overview_open.set(true);
                             })
                         ><crate::icons::ClusterIcon /><span class="kind-label">"Cluster"</span></button>
@@ -815,10 +831,11 @@ fn Sidebar(store: Store) -> impl IntoView {
                     <Show when=move || kind_matches_text("Port Forwards", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
-                            class:active=move || store.forwards_open.get()
+                            class:active=move || store.forwards_open.get() && !store.traces_open.get()
                             title="Running port-forwards"
                             on:click=move |_| guard(store, move || {
                                 store.selected.set(None);
+                                store.traces_open.set(false);
                                 store.forwards_open.set(true);
                             })
                         >
@@ -828,6 +845,18 @@ fn Sidebar(store: Store) -> impl IntoView {
                                 let n = store.forwards.with(Vec::len);
                                 (n > 0).then(|| view! { <span class="count">{n}</span> })
                             }}
+                        </button>
+                    </Show>
+                    <Show when=move || kind_matches_text("Traces", &store.kind_filter.get().to_lowercase())>
+                        <button
+                            class="kind"
+                            class:active=move || store.traces_open.get()
+                            title="Recorded usage, for right-sizing"
+                            on:click=move |_| crate::trace_review::open_page(store)
+                        >
+                            <crate::icons::TracesIcon />
+                            <span class="kind-label">"Traces"</span>
+                            {move || store.trace.with(Option::is_some).then(|| view! { <span class="rec-dot" title="Recording" aria-label="Recording"></span> })}
                         </button>
                     </Show>
                     {move || kind_list(store, Category::TopLevel, in_category(Category::TopLevel))}
@@ -952,7 +981,7 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                 });
             let key = k.key();
             let active = move || {
-                !store.overview_open.get() && !store.forwards_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key)
+                !store.overview_open.get() && !store.forwards_open.get() && !store.traces_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key)
             };
             let label = k.kind.clone();
             let title = format!("{} ({})", k.plural, k.api_version());
@@ -970,6 +999,7 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                         guard(store, move || {
                             store.overview_open.set(false);
                             store.forwards_open.set(false);
+                                store.traces_open.set(false);
                             store.kind.set(Some(k));
                         })
                     }
@@ -1350,6 +1380,7 @@ fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name
     if name.is_empty() {
         store.overview_open.set(false);
         store.forwards_open.set(false);
+                                store.traces_open.set(false);
         store.selected.set(None);
         store.namespace.set(namespace);
         store.kind.set(Some(kind));
@@ -1361,6 +1392,7 @@ fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name
     };
     store.overview_open.set(false);
     store.forwards_open.set(false);
+                                store.traces_open.set(false);
     // A namespace filter that hides the object is widened to its namespace.
     if let (Some(ns), Some(filter)) = (&namespace, store.namespace.get_untracked())
         && *ns != filter

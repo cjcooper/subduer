@@ -2,6 +2,7 @@
 //!
 //! `cargo run -p subduer-core --example trace -- <context> <scope> <file> <minutes>`
 //! `cargo run -p subduer-core --example trace -- --summary <file>`
+//! `cargo run -p subduer-core --example trace -- --review <file> [<namespace/kind/name/container>]`
 //!
 //! `<scope>` is `cluster`, `ns:<a>[,<b>…]`, `<kind>:<ns>/<name>` (kind is
 //! deploy, sts, ds, job or cronjob) or `pod:<ns>/<name>`. The first pull
@@ -22,6 +23,12 @@ async fn main() -> subduer_core::Result<()> {
         && flag == "--summary"
     {
         print(&trace::read_summary(Path::new(file)).await?);
+        return Ok(());
+    }
+    if let [flag, file, rest @ ..] = &args[..]
+        && flag == "--review"
+    {
+        review(Path::new(file), rest.first().map(String::as_str))?;
         return Ok(());
     }
     let [context, scope, file, minutes] = &args[..] else {
@@ -50,6 +57,7 @@ async fn main() -> subduer_core::Result<()> {
 fn usage() -> ! {
     eprintln!("usage: trace <context> <cluster|ns:a,b|deploy:ns/name|sts:…|ds:…|job:…|cronjob:…|pod:ns/name> <file> <minutes>");
     eprintln!("       trace --summary <file>");
+    eprintln!("       trace --review <file> [<namespace/kind/name/container>]");
     std::process::exit(2);
 }
 
@@ -93,4 +101,46 @@ fn print(s: &TraceSummary) {
     for g in &s.gaps {
         println!("gap {:.0} min: {}", (g.end - g.start) / 60.0, g.reason);
     }
+}
+
+/// The right-sizing table, or one row's series and day-and-hour grid.
+fn review(path: &Path, key: Option<&str>) -> subduer_core::Result<()> {
+    use subduer_core::trace_review;
+    use subduer_core::types::TraceKey;
+    let r = trace_review::review(path, false)?;
+    print(&r.summary);
+    let Some(key) = key else {
+        println!("{:<44} {:>5} {:>7} {:>7} {:>7} {:>8} {:>9} {:>9}  suggestion / flags", "row", "pods", "cpu req", "p95", "max", "spare", "mem req", "peak");
+        for row in &r.rows {
+            let m = |v: Option<f64>| v.map_or("-".into(), |v| format!("{:.0}m", v));
+            let b = |v: Option<f64>| v.map_or("-".into(), |v| format!("{:.0}Mi", v / 1048576.0));
+            let k = &row.key;
+            println!(
+                "{:<44} {:>5.1} {:>7} {:>6.1}m {:>6.0}m {:>8} {:>9} {:>9}  {} {:?}",
+                format!("{}/{}/{}/{}", k.namespace, k.kind, k.name, k.container),
+                row.avg_pods,
+                m(row.cpu_request),
+                row.cpu_p95,
+                row.cpu_max,
+                m(row.cpu_spare),
+                b(row.mem_request),
+                b(Some(row.mem_max)),
+                row.suggestion.as_ref().map_or("-".into(), |s| format!("{:.0}m/{:.0}Mi", s.cpu_request, s.mem_request / 1048576.0)),
+                row.flags,
+            );
+        }
+        return Ok(());
+    };
+    let parts: Vec<&str> = key.splitn(4, '/').collect();
+    let [namespace, kind, name, container] = parts[..] else { usage() };
+    let key = TraceKey { namespace: namespace.into(), kind: kind.into(), name: name.into(), container: container.into() };
+    let s = trace_review::series(path, &key, None, None, 60)?;
+    println!("series {}..{} step {}s: {} cpu points, {} memory points, requests {:?}, limits {:?}, {} events, {} gaps",
+        s.start, s.end, s.step, s.cpu_avg.len(), s.mem_max.len(), s.cpu_request, s.mem_limit, s.events.len(), s.gaps.len());
+    let d = trace_review::daily(path, &key, &jiff::tz::TimeZone::system())?;
+    for day in &d.days {
+        let hours: Vec<String> = day.cpu.iter().map(|c| c.map_or("  .".into(), |c| format!("{c:3.0}"))).collect();
+        println!("{:<12} {}", day.label, hours.join(""));
+    }
+    Ok(())
 }

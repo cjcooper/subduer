@@ -170,6 +170,54 @@ fn reveal_label_for(desktop: Desktop) -> &'static str {
     }
 }
 
+const RECENT_TRACES_KEY: &str = "traces.recent";
+/// Recent traces kept.
+const RECENT_TRACES: usize = 12;
+
+/// A trace file recorded or opened recently, for the Traces page.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecentTrace {
+    pub path: String,
+    pub context: String,
+    /// What was traced, e.g. "namespace shop".
+    pub what: String,
+    /// When it was last opened or recorded (ms).
+    pub at: f64,
+}
+
+pub fn load_recent_traces() -> Vec<RecentTrace> {
+    storage()
+        .and_then(|s| s.get_item(RECENT_TRACES_KEY).ok().flatten())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_recent_traces(list: &[RecentTrace]) {
+    if let (Some(s), Ok(text)) = (storage(), serde_json::to_string(list)) {
+        let _ = s.set_item(RECENT_TRACES_KEY, &text);
+    }
+}
+
+/// Puts `trace` first (replacing an older entry for the same file) and saves.
+pub fn remember_trace(trace: RecentTrace) -> Vec<RecentTrace> {
+    let list = with_recent(load_recent_traces(), trace);
+    save_recent_traces(&list);
+    list
+}
+
+pub fn forget_trace(path: &str) -> Vec<RecentTrace> {
+    let list: Vec<RecentTrace> = load_recent_traces().into_iter().filter(|t| t.path != path).collect();
+    save_recent_traces(&list);
+    list
+}
+
+fn with_recent(mut list: Vec<RecentTrace>, trace: RecentTrace) -> Vec<RecentTrace> {
+    list.retain(|t| t.path != trace.path);
+    list.insert(0, trace);
+    list.truncate(RECENT_TRACES);
+    list
+}
+
 #[cfg(test)]
 #[path = "prefs_tests.rs"]
 mod tests_unit;

@@ -4,7 +4,7 @@ Stubs that fake `window.__TAURI__` so the UI can be rendered and screenshotted
 without the app or a cluster. See RUNBOOK.md section 3 for the full recipe.
 
 `run_e2e.py` turns them into an automated suite: it builds the UI, serves it
-with each stub, runs 172 scenarios in headless Chrome and checks the page title
+with each stub, runs 191 scenarios in headless Chrome and checks the page title
 (where stubs record what the app sent) and text. Run it with
 `python3 tools/ui-harness/run_e2e.py [filter…]`, or `--show <scenario>` to see
 what one scenario saw. Stubs must hand out increasing watch ids, as the app
@@ -44,6 +44,7 @@ python3 -m http.server 8765 &
 | `editorstub.js` | A YAML edit window (Ace) | `edit=edit-1`, `hang=save\|unlock` (the real save, or allowing changes, never returns), `change=1` (replicas 2→3), `bad=1` (a syntax error), `save=1`, `confirm=1`, `typed=1`, `locked=1`, `prod=1`, `dryfail=1` (the server rejects the edit), `cancel=1`, `reload=1`, `closereq=1` (the window's close is held), `keep=1` / `discard=1`. The title reports the commands sent, the dirty flag, the open dialog, whether Ace highlighted, its error count and the status bar. Steps are timed from when the YAML is loaded. |
 | `esc.js` | Loaded with every stub: presses Esc and reports the top dialog and detail panel before and after | `esc=dialog` (once a dialog is open), `esc=busy` (once its Cancel, the first action button, is disabled) or `esc=<ms>`, `eschold=1` (a key repeat follows), `escfrom=field` (from the dialog's text field, else the page's first one), `escfrom=select` (from the page's first dropdown) |
 | `tracestub.js` | Traces: Trace… button, start dialog, indicator, running panel, Stop, quit and context-switch prompts | `open=1`, `menu=1`, `this=1` (a pod's Trace… button), `level=cluster\|ns\|workloads\|pod`, `ns=<namespace>`, `pick=<name>`, `go=1` (Save as and start), `cancel=1` (the Save dialog is cancelled), `running=1`, `gaps=<n>`, `err=1`, `noprom=1`, `panel=1`, `stop=1`, `quit=1\|close=1` (the backend held quitting / closing), `switch=1` (picks acme-prd), `confirm=1`, `keep=1`, `x=1` (the × button), `esc=1` (Escape). The title reports the trace commands sent, the open dialogs and the indicator. |
+| `reviewstub.js` | Traces page and a trace's review: recent files, Open trace…, the right-sizing table, a row's charts and day-and-hour grid | `recent=1`, `running=1`, `page=1`, `open=1`, `cancel=1`, `bad=1`, `offline=1`, `file=1`, `sel=<name>`, `sort=<header>`, `flagged=1`, `ns=<namespace>`, `text=<filter>`, `quick=1h\|6h\|24h\|all`, `zoom=1` (drags across the CPU chart), `heat=mem`, `back=1`. The title reports the commands sent, the rows in order, the selected row, the active range and the grid's cells. |
 | `ov.js` | Cluster page | needs `ov.json`: `cargo run -p subduer-core --example overview -- <context> --json`, with node and namespace names replaced by generic ones |
 
 `appearance-previews.sh` regenerates the Appearance preview images in `ui/assets/` from `workloadstub.js`.

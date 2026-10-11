@@ -74,3 +74,13 @@ fn reveal_labels() {
     assert_eq!(reveal_label_for(Desktop::Windows), "Show in Explorer");
     assert_eq!(reveal_label_for(Desktop::Linux), "Show folder");
 }
+
+#[test]
+fn recent_traces_newest_first_without_repeats() {
+    let t = |path: &str, at: f64| RecentTrace { path: path.into(), context: "acme-uat".into(), what: "namespace shop".into(), at };
+    let list = with_recent(vec![t("/a", 1.0), t("/b", 2.0)], t("/b", 3.0));
+    assert_eq!(list.iter().map(|t| (t.path.as_str(), t.at)).collect::<Vec<_>>(), vec![("/b", 3.0), ("/a", 1.0)]);
+    let many = (0..20).fold(vec![], |list, i| with_recent(list, t(&format!("/{i}"), i as f64)));
+    assert_eq!(many.len(), 12);
+    assert_eq!(many[0].path, "/19");
+}

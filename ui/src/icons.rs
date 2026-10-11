@@ -258,6 +258,14 @@ pub fn LockIcon(#[prop(optional)] open: bool) -> impl IntoView {
     svg(if open { UNLOCK } else { LOCK })
 }
 
+/// A line over time with a record dot: recorded usage.
+const TRACES: &str = r#"<path d="M3 19h18"/><path d="M3 15l4-5 4 3 5-7 3 4"/><circle cx="19" cy="6" r="2"/>"#;
+
+#[component]
+pub fn TracesIcon() -> impl IntoView {
+    svg(TRACES)
+}
+
 /// Open/closed indicator for collapsible groups; rotates when `open`.
 #[component]
 pub fn Chevron(#[prop(into)] open: Signal<bool>) -> impl IntoView {

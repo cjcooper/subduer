@@ -530,5 +530,14 @@ async fn traces_start_report_and_stop() {
     assert!(!s().must_ask());
     let read = subduer_core::trace::read_summary(std::path::Path::new(&second)).await.unwrap();
     assert_eq!(read.end_reason, Some(TraceEnd::Quit));
+
+    // Review works on the file alone; this one has no usage (nothing was faked).
+    let review = trace::trace_review(s(), second.clone()).await.unwrap();
+    assert_eq!((review.summary.end_reason, review.rows.len()), (Some(TraceEnd::Quit), 0));
+    let key = subduer_core::types::TraceKey { namespace: "shop".into(), kind: "Pod".into(), name: "api-1".into(), container: "app".into() };
+    let err = trace::trace_series(second.clone(), key.clone(), None, None, 100).await.unwrap_err();
+    assert!(err.contains("isn't in this trace"), "{err}");
+    assert!(trace::trace_daily(second.clone(), key).await.is_err());
+    assert!(trace::trace_review(s(), "/etc/hosts".into()).await.unwrap_err().contains("trace file"));
     std::fs::remove_dir_all(&dir).unwrap();
 }

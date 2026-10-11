@@ -2315,6 +2315,7 @@ dependencies = [
 name = "k8s-subduer"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -4646,6 +4647,7 @@ dependencies = [
  "leptos",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "subduer-types",
  "wasm-bindgen",
  "wasm-bindgen-futures",

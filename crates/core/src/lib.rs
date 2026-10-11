@@ -26,6 +26,7 @@ pub mod testing;
 pub mod table;
 pub mod trace;
 pub mod trace_file;
+pub mod trace_review;
 pub mod upload;
 pub mod usage;
 pub mod watch;

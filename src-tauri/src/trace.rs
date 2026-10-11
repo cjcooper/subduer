@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use subduer_core::trace::Trace;
-use subduer_core::types::{TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets};
+use subduer_core::types::{TraceDaily, TraceEnd, TraceKey, TraceReview, TraceScope, TraceSeries, TraceStatus, TraceSummary, TraceTargets};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::oneshot;
@@ -28,8 +28,8 @@ pub struct TraceRunner {
     running: tokio::sync::Mutex<Option<Running>>,
     /// Mirrors `running.is_some()` for the window-close hold, which can't await.
     active: AtomicBool,
-    /// Files this app recorded, which Show in Finder may reveal.
-    written: std::sync::Mutex<HashSet<PathBuf>>,
+    /// Files this app recorded or opened, which Show in Finder may reveal.
+    known: std::sync::Mutex<HashSet<PathBuf>>,
 }
 
 struct Running {
@@ -136,7 +136,7 @@ pub async fn start_trace<R: Runtime>(
     let status = trace.status();
     *running = Some(Running { trace, stop: Some(stop), done });
     runner.active.store(true, Ordering::SeqCst);
-    runner.written.lock().unwrap().insert(path);
+    runner.known.lock().unwrap().insert(path);
     drop(running);
     let _ = app.emit(TRACE_CHANGED, Some(&status));
     Ok(status)
@@ -164,10 +164,57 @@ pub async fn stop_trace<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState
 #[tauri::command]
 pub fn reveal_trace(state: State<'_, AppState>, path: String) -> CmdResult<()> {
     let path = PathBuf::from(path);
-    if !state.traces.written.lock().unwrap().contains(&path) {
-        return Err("only traces recorded in this session can be revealed".into());
+    if !state.traces.known.lock().unwrap().contains(&path) {
+        return Err("only traces recorded or opened in this session can be revealed".into());
     }
     crate::upload::reveal(&path)
+}
+
+/// The native Open dialog for a trace file, starting in Documents. `None` if cancelled.
+#[tauri::command]
+pub async fn choose_trace_to_open<R: Runtime>(app: AppHandle<R>) -> CmdResult<Option<String>> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = oneshot::channel();
+    let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_title("Open trace");
+    if let Ok(dir) = app.path().document_dir() {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    Ok(Some(path.into_path().map_err(|e| e.to_string())?.display().to_string()))
+}
+
+/// Runs a file read off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> subduer_core::Result<T> + Send + 'static) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?.map_err(|e| e.user_message())
+}
+
+/// Reads a trace file for review: its header and the right-sizing table.
+/// Works without a cluster; a trace still being recorded can be read too.
+#[tauri::command]
+pub async fn trace_review(state: State<'_, AppState>, path: String) -> CmdResult<TraceReview> {
+    let path = PathBuf::from(path);
+    let recording = state.traces.status().await.is_some_and(|s| Path::new(&s.path) == path);
+    let read = path.clone();
+    let review = blocking(move || subduer_core::trace_review::review(&read, recording)).await?;
+    state.traces.known.lock().unwrap().insert(path);
+    Ok(review)
+}
+
+/// One review row's usage between `start` and `end` (its whole span when
+/// absent), in about `points` buckets.
+#[tauri::command]
+pub async fn trace_series(path: String, key: TraceKey, start: Option<f64>, end: Option<f64>, points: u32) -> CmdResult<TraceSeries> {
+    blocking(move || subduer_core::trace_review::series(Path::new(&path), &key, start, end, points.clamp(10, 2000))).await
+}
+
+/// One review row's usage by local day and hour.
+#[tauri::command]
+pub async fn trace_daily(path: String, key: TraceKey) -> CmdResult<TraceDaily> {
+    blocking(move || subduer_core::trace_review::daily(Path::new(&path), &key, &jiff::tz::TimeZone::system())).await
 }
 
 #[cfg(test)]

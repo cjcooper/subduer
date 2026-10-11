@@ -1148,6 +1148,148 @@ pub struct TraceStatus {
     pub stopping: bool,
 }
 
+/// One row of a trace review: a container of a workload (or a bare pod).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TraceKey {
+    pub namespace: String,
+    /// Deployment, StatefulSet, DaemonSet, CronJob, Job, ReplicaSet, or Pod.
+    pub kind: String,
+    pub name: String,
+    pub container: String,
+}
+
+/// A trace file read for review: its header and one row per container.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceReview {
+    pub summary: TraceSummary,
+    pub rows: Vec<ReviewRow>,
+}
+
+/// Usage of one workload container over the whole trace, against its
+/// requests. CPU in millicores, memory in bytes. Percentiles are over every
+/// pod-minute (each pod's average for the minute); maxima are the highest
+/// any pod reached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewRow {
+    pub key: TraceKey,
+    /// Pods seen, and how many ran at once on average.
+    pub pods: u32,
+    pub avg_pods: f64,
+    /// Minutes with data, and pod-minutes.
+    pub minutes: u64,
+    pub pod_minutes: u64,
+    /// Rollouts seen (new pod-template hashes after the first).
+    pub rollouts: u32,
+    /// Share of pod-minutes sampled by the app rather than Prometheus.
+    pub local_share: f64,
+    /// The latest requests and limits.
+    pub cpu_request: Option<f64>,
+    pub cpu_limit: Option<f64>,
+    pub mem_request: Option<f64>,
+    pub mem_limit: Option<f64>,
+    pub cpu_p50: f64,
+    pub cpu_p95: f64,
+    pub cpu_p99: f64,
+    pub cpu_max: f64,
+    pub mem_p95: f64,
+    pub mem_max: f64,
+    /// Requested but unused, over all pods: (request − p95 CPU) × average
+    /// pods, and (request − peak memory) × average pods. Negative when
+    /// usage is above the request. `None` without a request.
+    pub cpu_spare: Option<f64>,
+    pub mem_spare: Option<f64>,
+    pub flags: Vec<ReviewFlag>,
+    pub suggestion: Option<Suggestion>,
+}
+
+/// Something worth a look on a review row. Limits only matter when hit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ReviewFlag {
+    /// The worst minute had this share of CPU periods throttled (0..1).
+    Throttled { worst: f64 },
+    /// Peak memory reached this share of the limit (≥ 0.9).
+    NearMemoryLimit { share: f64 },
+    /// Restarts whose last termination was OOMKilled.
+    OomKilled { count: u32 },
+    /// The kernel killed a process for memory without the container restarting.
+    OomEvents { count: u32 },
+    /// Other restarts.
+    Restarts { count: u32 },
+    NoCpuRequest,
+    NoMemoryRequest,
+    /// Requests changed during the trace; the figures cover both.
+    RequestsChanged,
+    /// Less than a day of data: daily peaks may be missing.
+    ShortData { hours: f64 },
+    /// Too little data to suggest anything.
+    TooLittleData { hours: f64 },
+    /// The suggested memory request is above the memory limit, so applying
+    /// it as is would be rejected.
+    AboveMemoryLimit,
+}
+
+/// Suggested requests, and what they rest on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Suggestion {
+    /// Millicores and bytes, rounded up to tidy values.
+    pub cpu_request: f64,
+    pub mem_request: f64,
+    /// e.g. "p95 CPU and peak memory × 1.15 over 4d 2h (11,520 pod-minutes), 3 rollouts, no OOM kills".
+    pub basis: String,
+}
+
+/// One container of a workload over a span of a trace, folded into buckets
+/// to suit the chart. Times in unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceSeries {
+    pub start: f64,
+    pub end: f64,
+    /// Bucket size in seconds.
+    pub step: f64,
+    /// Per bucket: the average pod's usage, and the busiest pod's peak.
+    pub cpu_avg: Series,
+    pub cpu_max: Series,
+    pub mem_avg: Series,
+    pub mem_max: Series,
+    /// Pods running, on average over each bucket.
+    pub pods: Series,
+    /// Requests and limits as change points (the value holds until the next).
+    pub cpu_request: Series,
+    pub cpu_limit: Series,
+    pub mem_request: Series,
+    pub mem_limit: Series,
+    pub events: Vec<TraceEventMark>,
+    pub gaps: Vec<TraceGap>,
+    /// The whole trace's span for this container, for zooming back out.
+    pub full_start: f64,
+    pub full_end: f64,
+}
+
+/// A restart or OOM kill, for the chart's markers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceEventMark {
+    pub t: f64,
+    /// "restart" or "oom".
+    pub kind: String,
+    pub reason: Option<String>,
+    pub count: u32,
+}
+
+/// Usage by local day and hour, for spotting daily patterns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceDaily {
+    pub days: Vec<TraceDay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceDay {
+    /// e.g. "Mon 12 Oct".
+    pub label: String,
+    /// 24 hours: p95 CPU (millicores) and peak memory (bytes); `None` without data.
+    pub cpu: Vec<Option<f64>>,
+    pub mem: Vec<Option<f64>>,
+}
+
 /// What can be traced in one namespace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceTargets {

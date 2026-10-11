@@ -161,6 +161,10 @@ pub fn run() {
             trace::trace_status,
             trace::stop_trace,
             trace::reveal_trace,
+            trace::choose_trace_to_open,
+            trace::trace_review,
+            trace::trace_series,
+            trace::trace_daily,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
