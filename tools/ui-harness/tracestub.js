@@ -6,8 +6,8 @@
 //   stop=1 (Stop trace), quit=1|close=1 (the backend held quitting / closing),
 //   switch=1 (picks the other context), confirm=1 (the prompt's stop button), keep=1 (Keep tracing),
 //   this=1 (selects a pod and clicks Trace… in its panel), menu=1 (the Trace… menu item),
-//   x=1 (the dialog's × button), esc=1 (presses Escape).
-// The title reports the trace commands sent (with args) and which dialogs are open.
+//   x=1 (the dialog's × button), esc=1 (presses Escape), hang=1 (stopping never finishes).
+// The title reports the trace commands sent (with args), which dialogs are open and whether the detail panel shows.
 (function () {
   const params = new URLSearchParams(location.search);
   const listeners = {};
@@ -58,6 +58,7 @@
         return running;
       }
       if (cmd === 'stop_trace' || cmd === 'close_discarding') {
+        if (params.get('hang')) return new Promise(() => {});
         const s = running;
         running = null;
         return cmd === 'close_discarding' ? null : {
@@ -118,6 +119,6 @@
     const ind = document.querySelector('.trace-indicator');
     const indicator = ind ? ind.textContent.trim() + (ind.querySelector('.trace-warn') ? ' (warn)' : '') : 'none';
     document.title = `sent=${sent.filter((s) => !s.startsWith('connect')).join(' ; ')} dialogs=${dialogs || 'none'} indicator=${indicator}`
-      + ` connects=${sent.filter((s) => s.startsWith('connect')).length}`;
+      + ` connects=${sent.filter((s) => s.startsWith('connect')).length} detail=${document.querySelector('aside.detail') ? 'yes' : 'no'}`;
   });
 })();

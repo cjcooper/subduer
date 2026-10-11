@@ -12,6 +12,7 @@ use serde::Serialize;
 use subduer_types::{ContainerRequests, QuantityChange, ReviewRow, RightsizeChange, RightsizePreview};
 
 use crate::app::Store;
+use crate::modal::Modal;
 use crate::tauri::invoke;
 
 /// Kinds whose pod template can take new requests.
@@ -251,47 +252,45 @@ pub(crate) fn ApplyDialog(store: Store) -> impl IntoView {
             move |_| store.unlock_prompt.set(Some(ctx.clone()))
         };
         Some(view! {
-            <div class="modal-backdrop">
-                <div class="modal wide apply-modal" class:prod=prod>
-                    <div class="modal-head">
-                        <h2>"Apply suggested requests"</h2>
-                        <button class="close" title="Close" aria-label="Close" prop:disabled=move || applying.get() on:click=move |_| close()>"×"</button>
-                    </div>
-                    <p>"On "<strong>{name.clone()}</strong>". Each workload gets one change, so its pods roll out once. Limits only change where a new request would be above them."</p>
-                    <div class="apply-cards">{cards}</div>
-                    {locked.then(|| view! {
-                        <div class="apply-locked">
-                            <span class="warn-text">{format!("{name} is read-only.")}</span>
-                            <button class="btn small" on:click=unlock>"Allow changes…"</button>
-                        </div>
-                    })}
-                    {(prod && !locked).then(|| view! {
-                        <p>{format!("{name} looks like production. Type its name to apply:")}</p>
-                        <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
-                    })}
-                    <div class="modal-actions">
-                        {move || if done() {
-                            view! { <button class="primary" on:click=move |_| {
-                                store.review_checked.set(HashSet::new());
-                                close();
-                            }>"Done"</button> }.into_any()
-                        } else {
-                            view! {
-                                <button prop:disabled=move || applying.get() on:click=move |_| close()>"Cancel"</button>
-                                <button class="danger" prop:disabled=move || !ready() on:click=apply>
-                                    {move || if applying.get() {
-                                        "Applying…".to_owned()
-                                    } else if n() == 1 {
-                                        "Apply to 1 workload".to_owned()
-                                    } else {
-                                        format!("Apply to {} workloads", n())
-                                    }}
-                                </button>
-                            }.into_any()
-                        }}
-                    </div>
+            <Modal on_cancel=move |()| close() busy=applying prod=prod wide=true class="apply-modal">
+                <div class="modal-head">
+                    <h2>"Apply suggested requests"</h2>
+                    <button class="close" title="Close (Esc)" aria-label="Close" prop:disabled=move || applying.get() on:click=move |_| close()>"×"</button>
                 </div>
-            </div>
+                <p>"On "<strong>{name.clone()}</strong>". Each workload gets one change, so its pods roll out once. Limits only change where a new request would be above them."</p>
+                <div class="apply-cards">{cards}</div>
+                {locked.then(|| view! {
+                    <div class="apply-locked">
+                        <span class="warn-text">{format!("{name} is read-only.")}</span>
+                        <button class="btn small" on:click=unlock>"Allow changes…"</button>
+                    </div>
+                })}
+                {(prod && !locked).then(|| view! {
+                    <p>{format!("{name} looks like production. Type its name to apply:")}</p>
+                    <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
+                })}
+                <div class="modal-actions">
+                    {move || if done() {
+                        view! { <button class="primary" on:click=move |_| {
+                            store.review_checked.set(HashSet::new());
+                            close();
+                        }>"Done"</button> }.into_any()
+                    } else {
+                        view! {
+                            <button prop:disabled=move || applying.get() on:click=move |_| close()>"Cancel"</button>
+                            <button class="danger" prop:disabled=move || !ready() on:click=apply>
+                                {move || if applying.get() {
+                                    "Applying…".to_owned()
+                                } else if n() == 1 {
+                                    "Apply to 1 workload".to_owned()
+                                } else {
+                                    format!("Apply to {} workloads", n())
+                                }}
+                            </button>
+                        }.into_any()
+                    }}
+                </div>
+            </Modal>
         })
     }
 }

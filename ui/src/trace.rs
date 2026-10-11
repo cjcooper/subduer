@@ -9,6 +9,7 @@ use serde::Serialize;
 use subduer_types::{KindRef, ResourceRow, TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets, TraceWorkload};
 
 use crate::app::Store;
+use crate::modal::Modal;
 use crate::tauri::{NoArgs, invoke, listen};
 
 /// Backend events: the menu's Trace… item, and a trace starting or ending.
@@ -297,26 +298,8 @@ pub(crate) fn TraceThisButton(store: Store, row: ResourceRow) -> impl IntoView {
     }
 }
 
-/// Escape closes the trace dialog (unless it's starting or stopping) and
-/// the saved summary.
-fn close_on_escape(store: Store) {
-    let handle = window_event_listener(leptos::ev::keydown, move |ev| {
-        if ev.key() != "Escape" || store.trace_busy.get_untracked() {
-            return;
-        }
-        if store.trace_saved.with_untracked(Option::is_some) {
-            store.trace_saved.set(None);
-        } else if store.trace_open.get_untracked() {
-            store.trace_open.set(false);
-            store.trace_draft.set(None);
-        }
-    });
-    on_cleanup(move || handle.remove());
-}
-
 #[component]
 pub(crate) fn TraceDialog(store: Store) -> impl IntoView {
-    close_on_escape(store);
     let close = move || {
         store.trace_open.set(false);
         store.trace_draft.set(None);
@@ -378,22 +361,20 @@ fn RunningPanel(store: Store, close: Callback<()>) -> impl IntoView {
         })
     };
     view! {
-        <div class="modal-backdrop" on:click=move |_| close.run(())>
-            <div class="modal wide trace-modal" on:click=|ev| ev.stop_propagation()>
-                <div class="modal-head">
-                    <h2><span class="rec-dot" aria-hidden="true"></span>"Trace running"</h2>
-                    <button class="close" title="Close" aria-label="Close" on:click=move |_| close.run(())>"×"</button>
-                </div>
-                {body}
-                <div class="modal-actions">
-                    <button
-                        class="danger"
-                        prop:disabled=move || stopping.get() || store.trace.with(|t| t.as_ref().is_some_and(|t| t.stopping))
-                        on:click=do_stop
-                    >{move || if stopping.get() { "Stopping…" } else { "Stop trace" }}</button>
-                </div>
+        <Modal on_cancel=close busy=stopping wide=true dismiss_outside=true class="trace-modal">
+            <div class="modal-head">
+                <h2><span class="rec-dot" aria-hidden="true"></span>"Trace running"</h2>
+                <button class="close" title="Close (Esc)" aria-label="Close" prop:disabled=move || stopping.get() on:click=move |_| close.run(())>"×"</button>
             </div>
-        </div>
+            {body}
+            <div class="modal-actions">
+                <button
+                    class="danger"
+                    prop:disabled=move || stopping.get() || store.trace.with(|t| t.as_ref().is_some_and(|t| t.stopping))
+                    on:click=do_stop
+                >{move || if stopping.get() { "Stopping…" } else { "Stop trace" }}</button>
+            </div>
+        </Modal>
     }
 }
 
@@ -629,32 +610,30 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
 
     let ready = move || draft().and_then(|d| d.scope()).is_some();
     view! {
-        <div class="modal-backdrop" on:click=move |_| if !busy.get_untracked() { close.run(()) }>
-            <div class="modal wide trace-modal" on:click=|ev| ev.stop_propagation()>
-                <div class="modal-head">
-                    <h2>"Start a trace"</h2>
-                    <button class="close" title="Close" aria-label="Close" prop:disabled=move || busy.get() on:click=move |_| close.run(())>"×"</button>
-                </div>
-                <p class="muted">
-                    "Records CPU and memory for as long as the app stays open, beyond the hour or two Prometheus keeps, "
-                    "so requests can be right-sized later. It backfills what Prometheus still has."
-                </p>
-                <div class="trace-levels" role="radiogroup" aria-label="What to trace">
-                    {level_choice(Level::Cluster, "Whole cluster", "Every pod")}
-                    {level_choice(Level::Namespaces, "Namespaces", "One or more")}
-                    {level_choice(Level::Workloads, "Workloads", "Deployments, StatefulSets…")}
-                    {level_choice(Level::Pod, "Pod", "A single pod")}
-                </div>
-                <div class="trace-targets">{targets_view}</div>
-                {move || error.get().map(|e| view! { <p class="warn-text">{e}</p> })}
-                <div class="modal-actions">
-                    <button prop:disabled=move || busy.get() on:click=move |_| close.run(())>"Cancel"</button>
-                    <button class="primary" prop:disabled=move || busy.get() || !ready() on:click=start>
-                        {move || if busy.get() { "Starting…" } else { "Save as and start…" }}
-                    </button>
-                </div>
+        <Modal on_cancel=close busy=busy wide=true dismiss_outside=true class="trace-modal">
+            <div class="modal-head">
+                <h2>"Start a trace"</h2>
+                <button class="close" title="Close (Esc)" aria-label="Close" prop:disabled=move || busy.get() on:click=move |_| close.run(())>"×"</button>
             </div>
-        </div>
+            <p class="muted">
+                "Records CPU and memory for as long as the app stays open, beyond the hour or two Prometheus keeps, "
+                "so requests can be right-sized later. It backfills what Prometheus still has."
+            </p>
+            <div class="trace-levels" role="radiogroup" aria-label="What to trace">
+                {level_choice(Level::Cluster, "Whole cluster", "Every pod")}
+                {level_choice(Level::Namespaces, "Namespaces", "One or more")}
+                {level_choice(Level::Workloads, "Workloads", "Deployments, StatefulSets…")}
+                {level_choice(Level::Pod, "Pod", "A single pod")}
+            </div>
+            <div class="trace-targets">{targets_view}</div>
+            {move || error.get().map(|e| view! { <p class="warn-text">{e}</p> })}
+            <div class="modal-actions">
+                <button prop:disabled=move || busy.get() on:click=move |_| close.run(())>"Cancel"</button>
+                <button class="primary" prop:disabled=move || busy.get() || !ready() on:click=start>
+                    {move || if busy.get() { "Starting…" } else { "Save as and start…" }}
+                </button>
+            </div>
+        </Modal>
     }
 }
 
@@ -662,6 +641,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
 #[component]
 pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
     let done = move |_| store.trace_saved.set(None);
+    let on_cancel = move |()| store.trace_saved.set(None);
     move || {
         let result = store.trace_saved.get()?;
         Some(match result {
@@ -690,46 +670,42 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                     crate::trace_review::open_file(store, review_path.clone());
                 };
                 view! {
-                    <div class="modal-backdrop">
-                        <div class="modal wide trace-modal">
-                            <div class="modal-head">
-                                <h2>"Trace saved"</h2>
-                                <button class="close" title="Close" aria-label="Close" on:click=done>"×"</button>
-                            </div>
-                            <dl class="trace-facts">
-                                <dt>"Context"</dt><dd>{s.context.clone()}</dd>
-                                <dt>"Traced"</dt><dd>{scope_text(&s.scope)}</dd>
-                                <dt>"Data covers"</dt><dd>{span}</dd>
-                                <dt>"Holds"</dt><dd>{format!("{} pods, {} containers", s.pods, s.containers)}</dd>
-                                <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
-                            </dl>
-                            {(gaps > 0).then(|| view! {
-                                <p class="warn-text">{if gaps == 1 { "1 gap with no data.".to_owned() } else { format!("{gaps} gaps with no data.") }}</p>
-                            })}
-                            <div class="modal-actions">
-                                <button on:click=reveal>{crate::prefs::reveal_label()}</button>
-                                <button on:click=review>"Review"</button>
-                                <button class="primary" on:click=done>"Done"</button>
-                            </div>
+                    <Modal on_cancel=on_cancel wide=true class="trace-modal">
+                        <div class="modal-head">
+                            <h2>"Trace saved"</h2>
+                            <button class="close" title="Close (Esc)" aria-label="Close" on:click=done>"×"</button>
                         </div>
-                    </div>
+                        <dl class="trace-facts">
+                            <dt>"Context"</dt><dd>{s.context.clone()}</dd>
+                            <dt>"Traced"</dt><dd>{scope_text(&s.scope)}</dd>
+                            <dt>"Data covers"</dt><dd>{span}</dd>
+                            <dt>"Holds"</dt><dd>{format!("{} pods, {} containers", s.pods, s.containers)}</dd>
+                            <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
+                        </dl>
+                        {(gaps > 0).then(|| view! {
+                            <p class="warn-text">{if gaps == 1 { "1 gap with no data.".to_owned() } else { format!("{gaps} gaps with no data.") }}</p>
+                        })}
+                        <div class="modal-actions">
+                            <button on:click=reveal>{crate::prefs::reveal_label()}</button>
+                            <button on:click=review>"Review"</button>
+                            <button class="primary" on:click=done>"Done"</button>
+                        </div>
+                    </Modal>
                 }
                 .into_any()
             }
             Err(e) => view! {
-                <div class="modal-backdrop">
-                    <div class="modal">
-                        <div class="modal-head">
-                            <h2>"The trace didn't close cleanly"</h2>
-                            <button class="close" title="Close" aria-label="Close" on:click=done>"×"</button>
-                        </div>
-                        <p class="warn-text">{e}</p>
-                        <p class="muted">"Data up to the last pull is still in the file."</p>
-                        <div class="modal-actions">
-                            <button class="primary" on:click=done>"OK"</button>
-                        </div>
+                <Modal on_cancel=on_cancel>
+                    <div class="modal-head">
+                        <h2>"The trace didn't close cleanly"</h2>
+                        <button class="close" title="Close (Esc)" aria-label="Close" on:click=done>"×"</button>
                     </div>
-                </div>
+                    <p class="warn-text">{e}</p>
+                    <p class="muted">"Data up to the last pull is still in the file."</p>
+                    <div class="modal-actions">
+                        <button class="primary" on:click=done>"OK"</button>
+                    </div>
+                </Modal>
             }
             .into_any(),
         })
@@ -741,6 +717,7 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
 pub(crate) fn TraceQuitDialog(store: Store) -> impl IntoView {
     let busy = RwSignal::new(false);
     let cancel = move |_| store.trace_quit.set(None);
+    let on_cancel = move |()| store.trace_quit.set(None);
     move || {
         let quit = store.trace_quit.get()?;
         let status = store.trace.get_untracked();
@@ -770,20 +747,18 @@ pub(crate) fn TraceQuitDialog(store: Store) -> impl IntoView {
         };
         let action = if quit { "Stop trace and quit" } else { "Stop trace and close" };
         Some(view! {
-            <div class="modal-backdrop">
-                <div class="modal">
-                    <h2>"A trace is running"</h2>
-                    <p>"Tracing "<strong>{what}</strong>"."</p>
-                    <p>{if quit { "Quitting stops it. The file is saved first." } else { "Closing the window stops it. The file is saved first." }}</p>
-                    {dirty.map(|d| view! { <p class="warn-text">"Your unsaved edits to "<strong class="mono">{d}</strong>" will be lost."</p> })}
-                    <div class="modal-actions">
-                        <button prop:disabled=move || busy.get() on:click=cancel>"Keep tracing"</button>
-                        <button class="danger" prop:disabled=move || busy.get() on:click=confirm>
-                            {move || if busy.get() { "Stopping…" } else { action }}
-                        </button>
-                    </div>
+            <Modal on_cancel=on_cancel busy=busy>
+                <h2>"A trace is running"</h2>
+                <p>"Tracing "<strong>{what}</strong>"."</p>
+                <p>{if quit { "Quitting stops it. The file is saved first." } else { "Closing the window stops it. The file is saved first." }}</p>
+                {dirty.map(|d| view! { <p class="warn-text">"Your unsaved edits to "<strong class="mono">{d}</strong>" will be lost."</p> })}
+                <div class="modal-actions">
+                    <button prop:disabled=move || busy.get() on:click=cancel>"Keep tracing"</button>
+                    <button class="danger" prop:disabled=move || busy.get() on:click=confirm>
+                        {move || if busy.get() { "Stopping…" } else { action }}
+                    </button>
                 </div>
-            </div>
+            </Modal>
         })
     }
 }
@@ -792,10 +767,11 @@ pub(crate) fn TraceQuitDialog(store: Store) -> impl IntoView {
 #[component]
 pub(crate) fn TraceSwitchDialog(store: Store) -> impl IntoView {
     let busy = RwSignal::new(false);
-    let cancel = move |_| {
+    let keep = move || {
         store.trace_then.set_value(None);
         store.trace_switch.set(None);
     };
+    let cancel = move |_| keep();
     let confirm = move |_| {
         busy.set(true);
         spawn_local(async move {
@@ -811,18 +787,16 @@ pub(crate) fn TraceSwitchDialog(store: Store) -> impl IntoView {
         let to = store.trace_switch.get()?;
         let from = store.trace.get_untracked().map(|s| s.context).unwrap_or_default();
         Some(view! {
-            <div class="modal-backdrop">
-                <div class="modal">
-                    <h2>"Stop the trace?"</h2>
-                    <p>"A trace of "<strong>{from}</strong>" is running. Switching to "<strong>{to}</strong>" stops it; the file is saved first."</p>
-                    <div class="modal-actions">
-                        <button prop:disabled=move || busy.get() on:click=cancel>"Keep tracing"</button>
-                        <button class="danger" prop:disabled=move || busy.get() on:click=confirm>
-                            {move || if busy.get() { "Stopping…" } else { "Stop trace and switch" }}
-                        </button>
-                    </div>
+            <Modal on_cancel=move |()| keep() busy=busy>
+                <h2>"Stop the trace?"</h2>
+                <p>"A trace of "<strong>{from}</strong>" is running. Switching to "<strong>{to}</strong>" stops it; the file is saved first."</p>
+                <div class="modal-actions">
+                    <button prop:disabled=move || busy.get() on:click=cancel>"Keep tracing"</button>
+                    <button class="danger" prop:disabled=move || busy.get() on:click=confirm>
+                        {move || if busy.get() { "Stopping…" } else { "Stop trace and switch" }}
+                    </button>
                 </div>
-            </div>
+            </Modal>
         })
     }
 }

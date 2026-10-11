@@ -33,6 +33,8 @@ pub fn Modal(
     #[prop(optional)] wide: bool,
     /// Clicking outside the card cancels too.
     #[prop(optional)] dismiss_outside: bool,
+    /// Extra classes on the card, for a dialog's own layout.
+    #[prop(optional)] class: &'static str,
     children: Children,
 ) -> impl IntoView {
     listen_once();
@@ -54,7 +56,7 @@ pub fn Modal(
     view! {
         // Newer dialogs draw over older ones (the stylesheet's base is 10).
         <div class="modal-backdrop" style:z-index=(10 + depth).to_string() node_ref=backdrop on:click=outside>
-            <div class="modal" class:prod=prod class:wide=wide>
+            <div class=format!("modal {class}") class:prod=prod class:wide=wide>
                 {children()}
             </div>
         </div>

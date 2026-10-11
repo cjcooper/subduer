@@ -7,7 +7,8 @@
 // Applying: apply=1 (Apply… on the selected row), check=<name,name> (ticks rows), applysel=1 (Apply selected),
 // go=1 (the dialog's Apply button), ctx=prod (the trace and connection are acme-prd), typed=1, locked=1,
 // unlock=1 (Allow changes… then confirms), other=1 (connected to another context than the trace's),
-// refuse=1 (the dry run for db is refused), fail=1 (applying worker fails), copy=1 (Copy values snippet).
+// refuse=1 (the dry run for db is refused), fail=1 (applying worker fails), copy=1 (Copy values snippet),
+// hang=1 (applying never finishes), unlockesc=1 (Allow changes…, then Escape).
 // Phase 5: note=<text> (adds a note on the trace), wnote=<text> (on the selected row's workload), noted=1 (the
 // file already has notes), compare=1 (ticks two recent files, then Compare 2…), cmpwith=1 (Compare with… from a
 // review), changed=1 (Requests changed only), export=1 (Export report…), exportfail=1, leave=1 (leaves while editing).
@@ -138,6 +139,7 @@
           effect: 'Rolls out new pods, following the workload\'s update strategy.' };
       }
       if (cmd === 'rightsize_apply') {
+        if (params.get('hang')) return new Promise(() => {});
         if (params.get('fail') && args.change.name === 'worker') throw 'admission webhook "policy.acme.io" denied the request';
         return null;
       }
@@ -207,6 +209,10 @@
     step(() => button('Allow changes…')?.click(), 1200);
     step(() => { const i = document.querySelector('.confirm-input'); if (i) { i.value = ctxName; i.dispatchEvent(new Event('input', { bubbles: true })); } });
     step(() => button('Allow changes')?.click());
+  }
+  if (params.get('unlockesc')) {
+    step(() => button('Allow changes…')?.click(), 1200);
+    step(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
   }
   if (params.get('copy')) step(() => button('Copy values snippet')?.click(), 1200);
   if (params.get('typed')) step(() => { const i = document.querySelector('.apply-modal .confirm-input'); if (i) { i.value = ctxName; i.dispatchEvent(new Event('input', { bubbles: true })); } }, 1200);
