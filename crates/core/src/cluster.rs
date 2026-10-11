@@ -1,6 +1,7 @@
 //! Discovery and one-shot reads.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -73,6 +74,26 @@ pub async fn list_namespaces(client: &Client) -> Result<Vec<String>> {
         .collect();
     names.sort();
     Ok(names)
+}
+
+/// How long [`check_connection`] waits. Long enough for an exec plugin to
+/// fetch a fresh token; a dropped VPN often means no answer at all.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// One cheap request (`/version`) to tell whether the cluster still answers
+/// with these credentials. Forbidden means it does: the server knew who was
+/// asking. No answer within [`CHECK_TIMEOUT`] counts as an error, since the
+/// client has no read timeout and a request on a connection a dropped VPN
+/// left open would otherwise wait forever.
+pub async fn check_connection(client: &Client) -> Result<()> {
+    match tokio::time::timeout(CHECK_TIMEOUT, client.apiserver_version()).await {
+        Err(_) => Err(crate::Error::Message(format!(
+            "no answer from the cluster in {}s; check your network or VPN",
+            CHECK_TIMEOUT.as_secs()
+        ))),
+        Ok(Err(kube::Error::Api(status))) if status.code == 403 => Ok(()),
+        Ok(other) => other.map(drop).map_err(Into::into),
+    }
 }
 
 pub fn api_resource(kind: &KindRef) -> ApiResource {

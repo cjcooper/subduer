@@ -23,6 +23,12 @@ const OPEN_SETTINGS: &str = "open-settings";
 /// Backend event: closing the window or quitting was held for unsaved edits.
 const UNSAVED_CLOSE: &str = "unsaved-close";
 
+/// How often a connected context is checked, so a dropped VPN is noticed
+/// even when nothing else is failing (a watch on a dead connection just waits).
+const PROBE_EVERY: Duration = Duration::from_secs(10);
+/// Failed checks in a row before the context counts as disconnected.
+const MAX_PROBE_FAILURES: u32 = 3;
+
 /// Seconds between background refreshes of the selected pod's details.
 const POD_REFRESH: Duration = Duration::from_secs(15);
 
@@ -33,6 +39,21 @@ pub(crate) struct Store {
     pub(crate) context: RwSignal<Option<String>>,
     pub(crate) cluster: RwSignal<Option<ClusterInfo>>,
     pub(crate) connecting: RwSignal<bool>,
+    /// Why the context isn't connected (connecting failed, or the connection
+    /// was lost); the main area then offers Connect instead of retrying.
+    pub(crate) disconnected: RwSignal<Option<String>>,
+    /// Bumped on every connect; results from an older connection are dropped
+    /// (on a dead VPN they may arrive very late, or never).
+    pub(crate) generation: RwSignal<u32>,
+    /// Background connection checks that failed in a row, and whether one is
+    /// in flight.
+    pub(crate) probe_failures: RwSignal<u32>,
+    pub(crate) probing: RwSignal<bool>,
+    /// Bumped by Retry to restart a watch that gave up.
+    pub(crate) watch_retry: RwSignal<u32>,
+    /// Cluster page refreshes that failed in a row; polling stops at
+    /// `overview::MAX_FAILURES`.
+    pub(crate) overview_failures: RwSignal<u32>,
     pub(crate) error: RwSignal<Option<String>>,
     pub(crate) kind: RwSignal<Option<KindRef>>,
     /// `None` = all namespaces. Kept when switching kinds.
@@ -128,6 +149,12 @@ impl Store {
             context: RwSignal::new(None),
             cluster: RwSignal::new(None),
             connecting: RwSignal::new(false),
+            disconnected: RwSignal::new(None),
+            generation: RwSignal::new(0),
+            probe_failures: RwSignal::new(0),
+            probing: RwSignal::new(false),
+            watch_retry: RwSignal::new(0),
+            overview_failures: RwSignal::new(0),
             error: RwSignal::new(None),
             kind: RwSignal::new(None),
             namespace: RwSignal::new(None),
@@ -218,17 +245,27 @@ impl Store {
         struct Args<'a> {
             context: &'a str,
         }
+        // Connecting again after losing the connection keeps the namespace.
+        let resume = self.disconnected.get_untracked().is_some() && self.context.get_untracked().as_deref() == Some(&context);
         self.connecting.set(true);
+        self.generation.update(|g| *g += 1);
+        self.probe_failures.set(0);
+        self.probing.set(false);
+        self.overview_loading.set(false);
+        self.disconnected.set(None);
         self.error.set(None);
         self.cluster.set(None);
         self.overview.set(None);
         self.overview_error.set(None);
+        self.overview_failures.set(0);
         self.table.set(None);
         self.selected.set(None);
         self.context.set(Some(context.clone()));
         match invoke::<_, ClusterInfo>("connect", &Args { context: &context }).await {
             Ok(info) => {
-                // Start in the context's default namespace when it has one.
+                let current = self.namespace.get_untracked();
+                let kept = resume && current.as_ref().is_none_or(|ns| info.namespaces.contains(ns));
+                // Otherwise start in the context's default namespace when it has one.
                 let default_ns = self
                     .contexts
                     .get_untracked()
@@ -236,15 +273,70 @@ impl Store {
                     .find(|c| c.name == context)
                     .and_then(|c| c.namespace)
                     .filter(|ns| info.namespaces.contains(ns));
-                self.namespace.set(default_ns);
+                self.namespace.set(if kept { current } else { default_ns });
                 // Keep the selected kind if this cluster has it, else show Pods.
                 let keep = self.kind.get_untracked().and_then(|k| find_kind(&info.kinds, &k.key()));
                 self.kind.set(keep.or_else(|| find_kind(&info.kinds, "core/Pod")));
                 self.cluster.set(Some(info));
             }
-            Err(e) => self.error.set(Some(format!("connect to {context}: {e}"))),
+            Err(e) => self.disconnected.set(Some(e)),
         }
         self.connecting.set(false);
+    }
+
+    /// Something kept failing (a watch gave up, refreshes failed): ask the
+    /// backend once whether the cluster still answers. If it doesn't, stop
+    /// everything and offer Connect; otherwise the failing view shows Retry.
+    pub(crate) fn gave_up(self) {
+        let generation = self.generation.get_untracked();
+        spawn_local(async move {
+            let check = invoke::<_, ()>("check_connection", &NoArgs {}).await;
+            if let Err(e) = check
+                && self.generation.get_untracked() == generation
+                && self.cluster.with_untracked(Option::is_some)
+            {
+                self.lose(e);
+            }
+        });
+    }
+
+    /// The background check: [`MAX_PROBE_FAILURES`] failures in a row (a
+    /// dropped VPN, say) count as a lost connection.
+    fn probe(self) {
+        if self.probing.get_untracked() || self.connecting.get_untracked() || self.cluster.with_untracked(Option::is_none) {
+            return;
+        }
+        self.probing.set(true);
+        let generation = self.generation.get_untracked();
+        spawn_local(async move {
+            let check = invoke::<_, ()>("check_connection", &NoArgs {}).await;
+            if self.generation.get_untracked() != generation {
+                return;
+            }
+            self.probing.set(false);
+            match check {
+                Ok(()) => self.probe_failures.set(0),
+                Err(e) => {
+                    self.probe_failures.update(|n| *n += 1);
+                    if self.probe_failures.get_untracked() >= MAX_PROBE_FAILURES && self.cluster.with_untracked(Option::is_some) {
+                        self.lose(e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Stops the watch and refreshes. The selection and detail panel stay,
+    /// so unsaved edits there aren't dropped; Connect asks about them.
+    fn lose(self, reason: String) {
+        self.disconnected.set(Some(reason));
+        self.cluster.set(None);
+        self.table.set(None);
+        self.overview.set(None);
+        self.overview_error.set(None);
+        spawn_local(async move {
+            let _ = invoke::<_, ()>("stop_watch", &NoArgs {}).await;
+        });
     }
 }
 
@@ -260,6 +352,9 @@ pub fn App() -> impl IntoView {
         listen::<ResourceTable>(events::RESOURCE_TABLE, move |table| {
             if table.watch_id >= store.min_watch_id.get_untracked() {
                 store.min_watch_id.set(table.watch_id);
+                if table.stopped {
+                    store.gave_up();
+                }
                 let pending = store.pending_select.get_untracked();
                 let row = pending.and_then(|id| table.rows.iter().find(|r| r.id == id).cloned());
                 store.table.set(Some(table));
@@ -308,6 +403,7 @@ pub fn App() -> impl IntoView {
     });
 
     set_interval(move || store.now.set(js_sys::Date::now()), Duration::from_secs(5));
+    set_interval(move || store.probe(), PROBE_EVERY);
     // Title bars and native controls follow the Appearance setting too.
     Effect::new(move |_| {
         #[derive(Serialize)]
@@ -336,7 +432,9 @@ pub fn App() -> impl IntoView {
     crate::overview::start_refresh(store);
     set_interval(
         move || {
-            let has_details = store.selected.with_untracked(Option::is_some) && selected_has_details(store);
+            let has_details = store.cluster.with_untracked(Option::is_some)
+                && store.selected.with_untracked(Option::is_some)
+                && selected_has_details(store);
             if has_details && store.detail_tab.get_untracked() == DetailTab::Details {
                 crate::pod_detail::load(store, true);
             }
@@ -352,6 +450,7 @@ pub fn App() -> impl IntoView {
             namespace: Option<String>,
         }
         let connected = store.cluster.with(Option::is_some);
+        store.watch_retry.track();
         let kind = store.kind.get();
         let namespace = store.namespace.get();
         if store.needs_overview() {
@@ -385,6 +484,8 @@ pub fn App() -> impl IntoView {
                 <main class="main">
                     {move || if store.forwards_open.get() {
                         view! { <crate::forward::ForwardsPage store=store /> }.into_any()
+                    } else if store.disconnected.with(Option::is_some) {
+                        view! { <Disconnected store=store /> }.into_any()
                     } else if store.overview_open.get() {
                         view! { <crate::overview::Overview store=store /> }.into_any()
                     } else {
@@ -405,6 +506,29 @@ pub fn App() -> impl IntoView {
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
+        </div>
+    }
+}
+
+/// Shown instead of the page when connecting failed or the connection was
+/// lost: nothing retries until Connect is clicked.
+#[component]
+fn Disconnected(store: Store) -> impl IntoView {
+    let connect = move |_| {
+        if let Some(ctx) = store.context.get_untracked() {
+            guard(store, move || spawn_local(store.connect(ctx)));
+        }
+    };
+    view! {
+        <div class="disconnected">
+            <h1>{move || format!("Not connected to {}", store.context.get().unwrap_or_default())}</h1>
+            <p class="muted">
+                "Stopped trying after repeated failures. If your credentials have expired, sign in again, then Connect."
+            </p>
+            <pre class="reason">{move || store.disconnected.get()}</pre>
+            <button class="btn primary" prop:disabled=move || store.connecting.get() on:click=connect>
+                {move || if store.connecting.get() { "Connecting…" } else { "Connect" }}
+            </button>
         </div>
     }
 }
@@ -862,8 +986,15 @@ fn ResourceView(store: Store) -> impl IntoView {
                 on:input=move |ev| store.row_filter.set(event_target_value(&ev))
             />
         </div>
-        {move || store.table.get().and_then(|t| t.error).map(|e| view! {
-            <div class="warn">"Watch error (retrying): " {e}</div>
+        {move || store.table.get().and_then(|t| Some((t.error?, t.stopped))).map(|(e, stopped)| if stopped {
+            view! {
+                <div class="warn">
+                    "Stopped after repeated failures: " {e}
+                    " "<button class="btn small" on:click=move |_| store.watch_retry.update(|n| *n += 1)>"Retry"</button>
+                </div>
+            }.into_any()
+        } else {
+            view! { <div class="warn">"Watch error (retrying): " {e}</div> }.into_any()
         })}
         {move || store.node_page().then(|| store.overview_error.get()).flatten().map(|e| view! {
             <div class="warn">{e}</div>

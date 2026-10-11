@@ -1,11 +1,17 @@
 //! Kubeconfig contexts and per-context clients.
 
+use std::time::Duration;
+
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 
 use crate::safety::{SafetyGate, is_prod_like};
 use crate::types::{ContextInfo, ContextList};
 use crate::{Error, Result};
+
+/// How long opening a connection may take (kube's default is 30s). With a
+/// VPN down, private API addresses often don't refuse; they just don't answer.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads the kubeconfig (honours `$KUBECONFIG`).
 pub fn load_kubeconfig() -> Result<Kubeconfig> {
@@ -45,7 +51,8 @@ pub async fn client_for(kubeconfig: &Kubeconfig, context: &str) -> Result<Client
         context: Some(context.to_owned()),
         ..Default::default()
     };
-    let config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options).await?;
+    let mut config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options).await?;
+    config.connect_timeout = Some(CONNECT_TIMEOUT);
     Ok(Client::try_from(config)?)
 }
 

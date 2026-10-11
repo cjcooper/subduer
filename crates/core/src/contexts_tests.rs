@@ -79,6 +79,7 @@ fn empty_kubeconfig_lists_nothing() {
 async fn client_for_known_context() {
     // Builds a client without contacting the server.
     let client = client_for(&kubeconfig(), "acme-uat").await.unwrap();
+    assert_eq!(CONNECT_TIMEOUT, std::time::Duration::from_secs(10));
     assert_eq!(client.default_namespace(), "shop");
 }
 

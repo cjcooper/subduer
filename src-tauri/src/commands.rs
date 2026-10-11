@@ -50,6 +50,15 @@ pub async fn connect(state: State<'_, AppState>, context: String) -> CmdResult<C
     })
 }
 
+/// Asked by the UI after a watch or a refresh gives up: an error means the
+/// connection itself is gone (an expired token, say), and the UI offers
+/// Connect instead of retrying.
+#[tauri::command]
+pub async fn check_connection(state: State<'_, AppState>) -> CmdResult<()> {
+    let client = connected_client(&state).await?;
+    cluster::check_connection(&client).await.map_err(err)
+}
+
 /// Unlocking is confirmed in the UI (twice for production-like contexts).
 #[tauri::command]
 pub fn set_unlocked(state: State<'_, AppState>, context: String, unlocked: bool) {

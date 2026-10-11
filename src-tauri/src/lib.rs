@@ -93,6 +93,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_contexts,
             commands::connect,
+            commands::check_connection,
             commands::set_unlocked,
             commands::watch_resources,
             commands::stop_watch,

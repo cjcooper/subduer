@@ -279,6 +279,9 @@ pub struct ResourceTable {
     pub rows: Vec<ResourceRow>,
     /// Set when the watch failed; `rows` holds the last good state.
     pub error: Option<String>,
+    /// The watch gave up after repeated failures and has ended.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// Tauri event names.

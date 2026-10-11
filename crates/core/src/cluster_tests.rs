@@ -172,3 +172,28 @@ async fn get_yaml_errors() {
     assert!(get_yaml(&client, &crate::helm::release_kind(), Some("shop"), "web").await.is_err());
     assert!(api.calls_to("GET", "/api/v1/namespaces/shop/secrets").len() == 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn connection_check_gives_up_on_a_silent_cluster() {
+    // Like a connection a dropped VPN left open: the request is never answered.
+    let service = tower::service_fn(|_req: http::Request<kube::client::Body>| {
+        std::future::pending::<std::result::Result<http::Response<kube::client::Body>, std::convert::Infallible>>()
+    });
+    let client = Client::new(service, "default");
+    let start = tokio::time::Instant::now();
+    let err = check_connection(&client).await.unwrap_err();
+    assert_eq!(start.elapsed(), CHECK_TIMEOUT);
+    assert!(err.to_string().contains("no answer from the cluster"), "{err}");
+}
+
+#[tokio::test]
+async fn connection_check_reads_the_version() {
+    let api = MockApi::new();
+    api.on("GET", "/version", json!({"major": "1", "minor": "36", "gitVersion": "v1.36.0"}));
+    check_connection(&api.client()).await.unwrap();
+    api.on_error("GET", "/version", 403, "Forbidden", "forbidden");
+    check_connection(&api.client()).await.unwrap();
+    api.on_error("GET", "/version", 401, "Unauthorized", "Unauthorized");
+    let err = check_connection(&api.client()).await.unwrap_err();
+    assert!(err.to_string().contains("Unauthorized"), "{err}");
+}

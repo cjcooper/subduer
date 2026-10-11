@@ -43,6 +43,7 @@ async fn reads_need_a_connection() {
     assert_eq!(commands::pod_details(s(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::pod_history(s(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::cluster_overview(s()).await.unwrap_err(), not);
+    assert_eq!(commands::check_connection(s()).await.unwrap_err(), not);
     assert_eq!(commands::get_yaml(s(), deployment(), Some("shop".into()), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::workload_details(s(), deployment(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::workload_history(s(), deployment(), "shop".into(), "api".into()).await.unwrap_err(), not);
@@ -57,6 +58,16 @@ async fn reads_need_a_connection() {
     assert_eq!(browse.await.unwrap_err(), not);
     let watch = commands::watch_resources(app.handle().clone(), s(), deployment(), None);
     assert_eq!(watch.await.unwrap_err(), not);
+}
+
+#[tokio::test]
+async fn connection_check_reports_expired_credentials() {
+    let api = MockApi::new();
+    api.on("GET", "/version", json!({"major": "1", "minor": "36", "gitVersion": "v1.36.0"}));
+    let app = connected(&api).await;
+    commands::check_connection(app.state()).await.unwrap();
+    api.on_error("GET", "/version", 401, "Unauthorized", "Unauthorized");
+    assert!(commands::check_connection(app.state()).await.unwrap_err().contains("Unauthorized"));
 }
 
 #[tokio::test]

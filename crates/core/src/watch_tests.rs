@@ -89,6 +89,67 @@ async fn errors_are_reported_with_the_last_rows() {
     assert!(error.contains("forbidden"), "{error}");
 }
 
+/// Runs the watch to its end and returns every table it emitted.
+async fn all_tables(client: kube::Client, kind: KindRef) -> Vec<ResourceTable> {
+    let out = std::sync::Mutex::new(vec![]);
+    watch_table(client, kind, Some("shop".into()), 42, |t| out.lock().unwrap().push(t)).await;
+    out.into_inner().unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_watch_gives_up_after_max_attempts() {
+    let api = MockApi::new();
+    api.on_error("GET", CMS, 401, "Unauthorized", "Unauthorized");
+    let k = kind("", "v1", "ConfigMap", "configmaps", true);
+    let out = all_tables(api.client(), k).await;
+    assert_eq!(out.len(), MAX_ATTEMPTS as usize);
+    assert!(out[..out.len() - 1].iter().all(|t| !t.stopped && t.error.is_some()));
+    let last = out.last().unwrap();
+    assert!(last.stopped);
+    assert!(last.error.as_deref().unwrap().contains("Unauthorized"), "{last:?}");
+    assert_eq!(api.calls_to("GET", CMS).len(), MAX_ATTEMPTS as usize);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_helm_watch_gives_up_too() {
+    let api = MockApi::new();
+    api.on_error("GET", "/api/v1/namespaces/shop/secrets", 401, "Unauthorized", "Unauthorized");
+    let out = all_tables(api.client(), crate::helm::release_kind()).await;
+    assert_eq!(out.len(), MAX_ATTEMPTS as usize);
+    assert!(out.last().unwrap().stopped);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retries_back_off_instead_of_running_every_second() {
+    let api = MockApi::new();
+    api.on_error("GET", CMS, 401, "Unauthorized", "Unauthorized");
+    let k = kind("", "v1", "ConfigMap", "configmaps", true);
+    let start = tokio::time::Instant::now();
+    all_tables(api.client(), k).await;
+    // 0.8 + 1.6 + 3.2 + 6.4s, give or take jitter; without the fix, about 4s.
+    assert!(start.elapsed() > Duration::from_secs(8), "{:?}", start.elapsed());
+}
+
+#[test]
+fn a_success_resets_the_failure_count() {
+    type E = Result<watcher::Event<()>, watcher::Error>;
+    let mut f = Failures::default();
+    for _ in 1..MAX_ATTEMPTS {
+        assert!(!f.failed());
+    }
+    f.seen(&E::Ok(watcher::Event::Init));
+    assert!(f.failed(), "Init isn't a success");
+    let mut f = Failures::default();
+    for _ in 1..MAX_ATTEMPTS {
+        assert!(!f.failed());
+    }
+    f.seen(&E::Ok(watcher::Event::InitDone));
+    for _ in 1..MAX_ATTEMPTS {
+        assert!(!f.failed());
+    }
+    assert!(f.failed());
+}
+
 #[tokio::test]
 async fn events_are_sorted_most_recent_first_across_namespaces() {
     let api = MockApi::new();

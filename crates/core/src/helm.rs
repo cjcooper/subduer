@@ -26,6 +26,7 @@ use kube::{Client, ResourceExt};
 use serde_json::{Value, json};
 
 use crate::safety::SafetyGate;
+use crate::watch::{Backoff, Failures};
 use crate::types::{
     Category, Column, ColumnKind, InfoRow, InfoSection, InfoTable, InfoTableRow, KindInfo, KindRef, ObjectDetails,
     ObjectLink, ResourceRow, ResourceTable,
@@ -164,12 +165,13 @@ where
         None => Api::all(client.clone()),
     };
     let config = watcher::Config::default().labels(SELECTOR);
-    let mut stream = watcher(api, config).default_backoff().boxed();
+    let mut stream = watcher(api, config).backoff(Backoff::new()).boxed();
     let mut revisions: BTreeMap<String, Revision> = BTreeMap::new();
     let mut pending: Option<BTreeMap<String, Revision>> = None;
     // Decoded chart info per Secret; a revision's chart never changes.
     let mut charts: HashMap<String, ChartInfo> = HashMap::new();
     let mut dirty = false;
+    let mut failures = Failures::default();
     let mut ticker = tokio::time::interval(THROTTLE);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let table = |rows: Vec<ResourceRow>, error: Option<String>| ResourceTable {
@@ -177,12 +179,14 @@ where
         columns: columns(),
         rows,
         error,
+        stopped: false,
     };
 
     loop {
         tokio::select! {
             event = stream.next() => {
                 let Some(event) = event else { break };
+                failures.seen(&event);
                 let insert = |map: &mut BTreeMap<String, Revision>, meta: &PartialObjectMeta<Secret>| {
                     if let Some(r) = Revision::from_meta(meta) {
                         map.insert(secret_key(&r.namespace, &r.secret), r);
@@ -205,7 +209,12 @@ where
                     }
                     Err(err) => {
                         tracing::warn!(%err, "helm release watch error");
-                        emit(table(rows(&revisions, &charts), Some(err.to_string())));
+                        let stopped = failures.failed();
+                        emit(ResourceTable { stopped, ..table(rows(&revisions, &charts), Some(err.to_string())) });
+                        if stopped {
+                            tracing::warn!("helm release watch gave up");
+                            return;
+                        }
                     }
                 }
             }

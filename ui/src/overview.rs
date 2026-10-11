@@ -14,6 +14,8 @@ use crate::columns::ResizableTh;
 use crate::tauri::{NoArgs, invoke};
 
 const REFRESH: Duration = Duration::from_secs(30);
+/// Failed refreshes in a row before polling stops; Refresh starts it again.
+pub(crate) const MAX_FAILURES: u32 = 3;
 /// Bars shown per namespace chart; the rest fold into "Other".
 const TOP_NAMESPACES: usize = 8;
 
@@ -21,7 +23,7 @@ const TOP_NAMESPACES: usize = 8;
 const FRESH_MS: f64 = 10_000.0;
 
 /// Fetches when a page that needs it opens or the cluster changes, then every
-/// 30s while one is open.
+/// 30s while one is open, until [`MAX_FAILURES`] fetches in a row fail.
 pub fn start_refresh(store: Store) {
     Effect::new(move |_| {
         if store.needs_overview() && store.cluster.with(Option::is_some) {
@@ -30,7 +32,8 @@ pub fn start_refresh(store: Store) {
     });
     set_interval(
         move || {
-            if untrack(|| store.needs_overview() && store.cluster.with(Option::is_some)) {
+            let failing = store.overview_failures.get_untracked() >= MAX_FAILURES;
+            if !failing && untrack(|| store.needs_overview() && store.cluster.with(Option::is_some)) {
                 refresh(store, true);
             }
         },
@@ -48,18 +51,29 @@ fn refresh(store: Store, force: bool) {
         return;
     }
     store.overview_loading.set(true);
-    let context = store.context.get_untracked();
+    let generation = store.generation.get_untracked();
     spawn_local(async move {
         let result = invoke::<_, ClusterOverview>("cluster_overview", &NoArgs {}).await;
-        // Drop the result if the user switched clusters meanwhile.
-        if store.context.get_untracked() == context {
-            match result {
-                Ok(data) => {
-                    store.overview.set(Some(data));
-                    store.overview_error.set(None);
-                    store.overview_at.set(js_sys::Date::now());
+        // Drop the result if the user connected again meanwhile (another
+        // cluster, or the same one after a dropped VPN); connect resets loading.
+        if store.generation.get_untracked() != generation {
+            return;
+        }
+        match result {
+            Ok(data) => {
+                store.overview_failures.set(0);
+                store.overview.set(Some(data));
+                store.overview_error.set(None);
+                store.overview_at.set(js_sys::Date::now());
+            }
+            Err(e) => {
+                store.overview_failures.update(|n| *n += 1);
+                if store.overview_failures.get_untracked() >= MAX_FAILURES {
+                    store.overview_error.set(Some(format!("Stopped refreshing after repeated failures: {e}")));
+                    store.gave_up();
+                } else {
+                    store.overview_error.set(Some(e));
                 }
-                Err(e) => store.overview_error.set(Some(e)),
             }
         }
         store.overview_loading.set(false);
@@ -107,7 +121,10 @@ pub fn RefreshStatus(store: Store) -> impl IntoView {
         <button
             class="btn"
             prop:disabled=move || store.overview_loading.get()
-            on:click=move |_| refresh(store, true)
+            on:click=move |_| {
+                store.overview_failures.set(0);
+                refresh(store, true);
+            }
         >{move || if store.overview_loading.get() { "Refreshing…" } else { "Refresh" }}</button>
     }
 }

@@ -240,6 +240,13 @@ table.resources { width: 100%; border-collapse: collapse; }
 .badge-free, .badge-no-pods { color: var(--muted); }
 
 .warn { margin: 0 16px 8px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }
+/* Not connected: the reason and a Connect button */
+.disconnected { padding: 32px 24px; max-width: 720px; }
+.disconnected h1 { margin: 0 0 8px; }
+.disconnected .reason {
+  margin: 12px 0 16px; padding: 8px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text);
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .error-bar {
   padding: 8px 14px; background: var(--danger-soft); color: var(--danger);
   border-top: 1px solid var(--danger); cursor: pointer; display: flex;
