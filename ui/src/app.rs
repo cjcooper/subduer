@@ -136,6 +136,20 @@ pub(crate) struct Store {
     /// Secret values the user chose to reveal for the selected pod, by
     /// (secret, key). Cleared whenever the selection changes.
     pub(crate) revealed: RwSignal<HashMap<(String, String), Result<String, String>>>,
+    /// The running trace, kept current by backend events and polling.
+    pub(crate) trace: RwSignal<Option<subduer_types::TraceStatus>>,
+    /// The trace dialog is open, and the start form's choices.
+    pub(crate) trace_open: RwSignal<bool>,
+    pub(crate) trace_draft: RwSignal<Option<crate::trace::Draft>>,
+    /// The trace dialog is starting or stopping a trace; it stays open.
+    pub(crate) trace_busy: RwSignal<bool>,
+    /// A trace just stopped: its summary, or why it didn't close cleanly.
+    pub(crate) trace_saved: RwSignal<Option<Result<subduer_types::TraceSummary, String>>>,
+    /// Closing (`false`) or quitting (`true`) is held for the running trace.
+    pub(crate) trace_quit: RwSignal<Option<bool>>,
+    /// Switching to this context waits for the trace to be stopped, then runs `trace_then`.
+    pub(crate) trace_switch: RwSignal<Option<String>>,
+    pub(crate) trace_then: StoredValue<Option<Box<dyn FnOnce()>>, LocalStorage>,
 }
 
 impl Store {
@@ -206,6 +220,14 @@ impl Store {
             history_loading: RwSignal::new(false),
             detail_collapsed: RwSignal::new(HashSet::new()),
             revealed: RwSignal::new(HashMap::new()),
+            trace: RwSignal::new(None),
+            trace_open: RwSignal::new(false),
+            trace_draft: RwSignal::new(None),
+            trace_busy: RwSignal::new(false),
+            trace_saved: RwSignal::new(None),
+            trace_quit: RwSignal::new(None),
+            trace_switch: RwSignal::new(None),
+            trace_then: StoredValue::new_local(None),
         }
     }
 
@@ -383,19 +405,23 @@ pub fn App() -> impl IntoView {
             spawn_local(async move { store.refresh_contexts().await });
         })
         .await;
-        // Closing the window or quitting was held for unsaved edits.
+        // Closing the window or quitting was held for unsaved edits or a
+        // running trace.
         listen::<bool>(UNSAVED_CLOSE, move |quit| {
-            guard(store, move || {
-                #[derive(Serialize)]
-                struct Args {
-                    quit: bool,
-                }
-                spawn_local(async move {
-                    let _ = invoke::<_, ()>("close_discarding", &Args { quit }).await;
+            crate::trace::on_close_held(store, quit, move || {
+                guard(store, move || {
+                    #[derive(Serialize)]
+                    struct Args {
+                        quit: bool,
+                    }
+                    spawn_local(async move {
+                        let _ = invoke::<_, ()>("close_discarding", &Args { quit }).await;
+                    });
                 });
             });
         })
         .await;
+        crate::trace::listen_events(store).await;
         crate::forward::load(store);
         store.refresh_contexts().await;
         if let Some(ctx) = store.context.get_untracked() {
@@ -405,6 +431,15 @@ pub fn App() -> impl IntoView {
 
     set_interval(move || store.now.set(js_sys::Date::now()), Duration::from_secs(5));
     set_interval(move || store.probe(), PROBE_EVERY);
+    // The trace indicator's last pull, gaps and sampled pods.
+    set_interval(
+        move || {
+            if store.trace.with_untracked(Option::is_some) {
+                crate::trace::refresh(store);
+            }
+        },
+        crate::trace::STATUS_EVERY,
+    );
     // Title bars and native controls follow the Appearance setting too.
     Effect::new(move |_| {
         #[derive(Serialize)]
@@ -504,6 +539,10 @@ pub fn App() -> impl IntoView {
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
             <crate::download::DownloadDialog store=store />
+            <crate::trace::TraceDialog store=store />
+            <crate::trace::TraceSavedDialog store=store />
+            <crate::trace::TraceQuitDialog store=store />
+            <crate::trace::TraceSwitchDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
@@ -542,9 +581,12 @@ fn TopBar(store: Store) -> impl IntoView {
         let select = event_target::<web_sys::HtmlSelectElement>(&ev);
         let ctx = select.value();
         select.set_value(&store.context.get_untracked().unwrap_or_default());
-        guard(store, move || {
-            select.set_value(&ctx);
-            spawn_local(store.connect(ctx));
+        // A trace of the current context stops first; then unsaved edits ask.
+        crate::trace::before_switch(store, ctx.clone(), move || {
+            guard(store, move || {
+                select.set_value(&ctx);
+                spawn_local(store.connect(ctx));
+            });
         });
     };
     let on_namespace = move |ev: leptos::ev::Event| {
@@ -595,6 +637,7 @@ fn TopBar(store: Store) -> impl IntoView {
             </label>
             <span class="spacer"></span>
             {move || store.connecting.get().then(|| view! { <span class="muted">"Connecting…"</span> })}
+            <crate::trace::TraceButton store=store />
             <LockToggle store=store />
         </header>
     }
@@ -1472,6 +1515,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <ServiceForwardButton store=store row=row.clone() />
                             <WorkloadLogsButton store=store row=row.clone() />
                             <crate::workload::WorkloadButtons store=store row=row.clone() />
+                            <crate::trace::TraceThisButton store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
                             <button class="close" title="Close (Esc)" on:click=close>"×"</button>
                         </div>

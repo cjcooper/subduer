@@ -236,14 +236,14 @@ async fn history_falls_back_to_local_samples() {
     assert_eq!(history.source, subduer_core::types::HistorySource::Local);
 }
 
-#[test]
-fn small_commands() {
+#[tokio::test]
+async fn small_commands() {
     let app = app();
     let s = || app.state::<AppState>();
     commands::set_unsaved(s(), true);
     assert!(s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
     // No main window in the mock: closing just clears the flag.
-    commands::close_discarding(app.handle().clone(), s(), false);
+    commands::close_discarding(app.handle().clone(), s(), false).await.unwrap();
     assert!(!s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
     // `set_app_theme` isn't called: Tauri's mock runtime doesn't implement
     // `set_theme`. The headless UI suite checks the requests it gets.
@@ -464,4 +464,71 @@ async fn edit_windows_load_save_and_guard_unsaved_edits() {
     assert!(crate::editor::editor_save(stray, app.state(), String::new(), true).await.is_err());
     let none = self::app();
     assert!(crate::editor::open_editor(none.handle().clone(), none.state(), target).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn traces_start_report_and_stop() {
+    use crate::trace;
+    use subduer_core::types::{TraceEnd, TraceScope};
+    let api = MockApi::new();
+    // No Prometheus: the trace keeps only the app's own samples.
+    api.on("GET", "/api/v1/services", list("ServiceList", vec![]));
+    api.on("GET", "/api/v1/namespaces/shop/pods", list("PodList", vec![pod("shop", "api-1", "node-a", json!({}))]));
+    for (path, kind) in [
+        ("/apis/apps/v1/namespaces/shop/deployments", "DeploymentList"),
+        ("/apis/apps/v1/namespaces/shop/statefulsets", "StatefulSetList"),
+        ("/apis/apps/v1/namespaces/shop/daemonsets", "DaemonSetList"),
+        ("/apis/batch/v1/namespaces/shop/cronjobs", "CronJobList"),
+    ] {
+        api.on("GET", path, list(kind, vec![]));
+    }
+    let job = |name: &str, owner: Option<&str>| {
+        let refs: Vec<serde_json::Value> =
+            owner.iter().map(|o| json!({"apiVersion": "batch/v1", "kind": "CronJob", "name": o, "uid": "u"})).collect();
+        object("batch/v1", "Job", Some("shop"), name, json!({"metadata": {"ownerReferences": refs}}))
+    };
+    api.on("GET", "/apis/batch/v1/namespaces/shop/jobs", list("JobList", vec![job("nightly-1", Some("nightly")), job("once", None)]));
+    let app = connected(&api).await;
+    let s = || app.state::<AppState>();
+    let dir = std::env::temp_dir().join(format!("subduer-tauri-trace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("shop").display().to_string();
+    let scope = TraceScope::Namespaces(vec!["shop".into()]);
+
+    let targets = trace::trace_targets(s(), "shop".into()).await.unwrap();
+    assert_eq!(targets.workloads.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), vec!["once"]);
+    assert_eq!(targets.pods, vec!["api-1"]);
+
+    // Only the connected context.
+    let other = trace::start_trace(app.handle().clone(), s(), "acme-prd".into(), scope.clone(), file.clone());
+    assert_eq!(other.await.unwrap_err(), "not connected to acme-prd");
+    assert_eq!(trace::trace_status(s()).await.unwrap(), None);
+    assert!(!s().must_ask());
+
+    let status = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope.clone(), file.clone()).await.unwrap();
+    assert_eq!(status.path, format!("{file}.trace"));
+    assert_eq!((status.context.as_str(), status.prometheus, status.stopping), (CTX, false, false));
+    assert!(s().must_ask(), "closing and quitting ask while a trace runs");
+    let again = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, file.clone());
+    assert!(again.await.unwrap_err().contains("already running"));
+    assert_eq!(trace::trace_status(s()).await.unwrap().unwrap().path, status.path);
+    // Only files this app recorded can be revealed.
+    assert!(trace::reveal_trace(s(), "/etc/hosts".into()).unwrap_err().contains("only traces recorded"));
+
+    let summary = trace::stop_trace(app.handle().clone(), s(), TraceEnd::Stopped).await.unwrap();
+    assert_eq!(summary.end_reason, Some(TraceEnd::Stopped));
+    assert_eq!(summary.context, CTX);
+    assert!(!s().must_ask());
+    assert_eq!(trace::trace_status(s()).await.unwrap(), None);
+    assert_eq!(trace::stop_trace(app.handle().clone(), s(), TraceEnd::Stopped).await.unwrap_err(), "no trace is running");
+
+    // Quitting stops a running trace, with Quit as the reason.
+    let scope = TraceScope::Pod { namespace: "shop".into(), name: "api-1".into() };
+    let second = dir.join("second.trace").display().to_string();
+    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, second.clone()).await.unwrap();
+    commands::close_discarding(app.handle().clone(), s(), false).await.unwrap();
+    assert!(!s().must_ask());
+    let read = subduer_core::trace::read_summary(std::path::Path::new(&second)).await.unwrap();
+    assert_eq!(read.end_reason, Some(TraceEnd::Quit));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

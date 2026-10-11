@@ -1126,6 +1126,36 @@ pub enum TraceEnd {
     ConnectionLost,
 }
 
+/// A running trace, for the indicator. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceStatus {
+    pub context: String,
+    pub path: String,
+    pub scope: TraceScope,
+    pub started: f64,
+    /// The span the file covers so far (backfill reaches before `started`).
+    pub data_start: f64,
+    pub data_end: f64,
+    /// Whether a Prometheus was found; without one only the app's samples are kept.
+    pub prometheus: bool,
+    pub last_pull: Option<f64>,
+    /// Why the last pull failed; cleared by the next one that works.
+    pub last_error: Option<String>,
+    pub gaps: u32,
+    /// Running pods Prometheus misses, sampled by the app.
+    pub sampled_pods: u32,
+    /// Stop was asked for; the last pull and the file's close are under way.
+    pub stopping: bool,
+}
+
+/// What can be traced in one namespace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceTargets {
+    pub workloads: Vec<TraceWorkload>,
+    /// Running pods, by name.
+    pub pods: Vec<String>,
+}
+
 /// A span with no data for the whole trace, in unix seconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceGap {

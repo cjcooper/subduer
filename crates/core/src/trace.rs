@@ -22,7 +22,7 @@ use crate::quantity::{bytes, millicores};
 use crate::trace_file::{
     BUCKET_SECS, Batch, Bucket, ContainerKey, Event, EventKind, Owner, Resources, Source, Stat, TraceFile,
 };
-use crate::types::{TraceEnd, TraceScope, TraceSummary, TraceWorkload};
+use crate::types::{KindRef, TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets, TraceWorkload};
 use crate::{Error, Result};
 
 /// Spacing of the raw points folded into each minute.
@@ -63,12 +63,28 @@ type OwnerMap = HashMap<(String, String), (String, String)>;
 /// A trace being recorded.
 pub struct Trace {
     client: Client,
+    context: String,
+    path: std::path::PathBuf,
+    started: f64,
     scope: TraceScope,
     selectors: Vec<Selector>,
     prometheus: Option<Prometheus>,
     retention_secs: f64,
     file: Arc<Mutex<TraceFile>>,
     state: tokio::sync::Mutex<State>,
+    /// What the indicator shows; never held across a request, so reading it
+    /// doesn't wait for a pull.
+    live: Mutex<Live>,
+}
+
+#[derive(Default)]
+struct Live {
+    data_start: i64,
+    data_end: i64,
+    last_pull: Option<f64>,
+    last_error: Option<String>,
+    gaps: u32,
+    sampled_pods: u32,
 }
 
 #[derive(Default)]
@@ -126,6 +142,7 @@ impl Trace {
             None => DEFAULT_RETENTION_SECS,
         };
         let (path, context, scope_copy) = (path.to_owned(), context.to_owned(), scope.clone());
+        let (path_kept, context_kept) = (path.clone(), context.clone());
         let prom_name = prometheus.as_ref().map(|p| format!("{}/{}", p.namespace, p.service));
         let file = tokio::task::spawn_blocking(move || -> Result<TraceFile> {
             let file = TraceFile::create(&path, overwrite, &context, &scope_copy, now)?;
@@ -138,14 +155,20 @@ impl Trace {
         .await
         .map_err(|e| Error::Message(e.to_string()))??;
         let backfill = (retention_secs as i64 - RETENTION_MARGIN_SECS).clamp(0, BACKFILL_MAX_SECS);
+        let covered_until = align_up(now as i64 - backfill);
+        let data_start = if prometheus.is_some() { covered_until } else { align_down(now as i64) };
         let trace = Trace {
             client,
+            context: context_kept,
+            path: path_kept,
+            started: now,
             selectors: selectors(&scope),
             scope,
             prometheus,
             retention_secs,
             file: Arc::new(Mutex::new(file)),
-            state: tokio::sync::Mutex::new(State { covered_until: align_up(now as i64 - backfill), ..State::default() }),
+            state: tokio::sync::Mutex::new(State { covered_until, ..State::default() }),
+            live: Mutex::new(Live { data_start, data_end: data_start, ..Live::default() }),
         };
         if let Err(e) = trace.pull().await {
             tracing::warn!(error = %e, "first trace pull failed");
@@ -159,6 +182,29 @@ impl Trace {
 
     pub fn has_prometheus(&self) -> bool {
         self.prometheus.is_some()
+    }
+
+    /// How the trace is going, from memory.
+    pub fn status(&self) -> TraceStatus {
+        let live = self.live.lock().unwrap();
+        TraceStatus {
+            context: self.context.clone(),
+            path: self.path.display().to_string(),
+            scope: self.scope.clone(),
+            started: self.started,
+            data_start: live.data_start as f64,
+            data_end: live.data_end as f64,
+            prometheus: self.prometheus.is_some(),
+            last_pull: live.last_pull,
+            last_error: live.last_error.clone(),
+            gaps: live.gaps,
+            sampled_pods: live.sampled_pods,
+            stopping: false,
+        }
+    }
+
+    fn note(&self, f: impl FnOnce(&mut Live)) {
+        f(&mut self.live.lock().unwrap());
     }
 
     /// How often to pull: every ten minutes, or half the retention if that's shorter.
@@ -211,6 +257,7 @@ impl Trace {
         if self.prometheus.is_some() && !matches!(pulled, Ok(Ok(_))) {
             let (start, end) = (state.covered_until, align_up(now as i64));
             self.with_file(move |f| f.add_gap(start, end, "the last pull before stopping failed")).await?;
+            self.note(|l| l.gaps += 1);
         }
         let batch = local_batch(&mut state, i64::MAX);
         drop(state);
@@ -236,6 +283,7 @@ impl Trace {
         if state.covered_until < floor {
             let start = state.covered_until;
             self.with_file(move |f| f.add_gap(start, floor, "Prometheus no longer held this data")).await?;
+            self.note(|l| l.gaps += 1);
             state.covered_until = floor;
         }
         let first = (state.covered_until - OVERLAP_SECS).max(floor);
@@ -245,6 +293,7 @@ impl Trace {
             let end = (from + CHUNK_SECS).min(to);
             let Some(raw) = self.fetch(prom, from, end).await else {
                 self.with_file(move |f| f.log_pull(now, from, end, 0, Some("Prometheus didn't answer"))).await?;
+                self.note(|l| l.last_error = Some("Prometheus didn't answer".into()));
                 return Err(Error::Message("Prometheus didn't answer".into()));
             };
             let batch = build_batch(&raw, &mut state.memory);
@@ -259,6 +308,12 @@ impl Trace {
             report.series = report.series.max(series);
             from = end;
         }
+        let covered = state.covered_until;
+        self.note(|l| {
+            l.last_pull = Some(now as f64);
+            l.last_error = None;
+            l.data_end = l.data_end.max(covered);
+        });
         Ok(report)
     }
 
@@ -317,7 +372,14 @@ impl Trace {
             }
         }
         drop(state);
+        let written_until = batch.usage.iter().map(|(_, b)| b.t + BUCKET_SECS).max();
         self.with_file(move |f| f.write(&batch)).await?;
+        self.note(|l| {
+            l.sampled_pods = sampled as u32;
+            if let Some(t) = written_until {
+                l.data_end = l.data_end.max(t);
+            }
+        });
         Ok(sampled)
     }
 
@@ -955,11 +1017,14 @@ async fn local_usage(client: &Client, pods: &[LocalPod]) -> HashMap<(String, Str
     if metrics_server {
         return out;
     }
-    let mut nodes: Vec<&str> = pods.iter().filter_map(|p| p.node.as_deref()).collect();
+    let mut nodes: Vec<String> = pods.iter().filter_map(|p| p.node.clone()).collect();
     nodes.sort_unstable();
     nodes.dedup();
     let summaries: Vec<(String, Option<Value>)> = stream::iter(nodes)
-        .map(|n| async move { (n.to_owned(), crate::usage::kubelet_summary(client, n).await) })
+        .map(|n| async move {
+            let summary = crate::usage::kubelet_summary(client, &n).await;
+            (n, summary)
+        })
         .buffer_unordered(KUBELET_CONCURRENCY)
         .collect()
         .await;
@@ -971,6 +1036,54 @@ async fn local_usage(client: &Client, pods: &[LocalPod]) -> HashMap<(String, Str
             Some(((p.namespace.clone(), p.name.clone()), usage))
         })
         .collect()
+}
+
+/// What can be traced in a namespace: its workloads (Jobs a CronJob made
+/// are left out; trace the CronJob) and its running pods, each sorted by name.
+pub async fn targets(client: &Client, namespace: &str) -> Result<TraceTargets> {
+    use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+    use k8s_openapi::api::batch::v1::{CronJob, Job};
+    let (deployments, statefulsets, daemonsets, cronjobs, jobs, pods) = (
+        Api::<Deployment>::namespaced(client.clone(), namespace),
+        Api::<StatefulSet>::namespaced(client.clone(), namespace),
+        Api::<DaemonSet>::namespaced(client.clone(), namespace),
+        Api::<CronJob>::namespaced(client.clone(), namespace),
+        Api::<Job>::namespaced(client.clone(), namespace),
+        Api::<Pod>::namespaced(client.clone(), namespace),
+    );
+    let (lp, running) = (ListParams::default(), ListParams::default().fields("status.phase=Running"));
+    let (deployments, statefulsets, daemonsets, cronjobs, jobs, pods) = tokio::join!(
+        deployments.list_metadata(&lp),
+        statefulsets.list_metadata(&lp),
+        daemonsets.list_metadata(&lp),
+        cronjobs.list_metadata(&lp),
+        jobs.list_metadata(&lp),
+        pods.list_metadata(&running),
+    );
+    let names = |items: Vec<kube::core::ObjectMeta>| -> Vec<String> { items.into_iter().filter_map(|m| m.name).collect() };
+    let mut workloads = Vec::new();
+    let mut add = |kind: KindRef, names: Vec<String>| {
+        workloads.extend(names.into_iter().map(|name| TraceWorkload { kind: kind.clone(), namespace: namespace.to_owned(), name }));
+    };
+    add(workload_kind("apps", "Deployment", "deployments"), names(deployments?.items.into_iter().map(|o| o.metadata).collect()));
+    add(workload_kind("apps", "StatefulSet", "statefulsets"), names(statefulsets?.items.into_iter().map(|o| o.metadata).collect()));
+    add(workload_kind("apps", "DaemonSet", "daemonsets"), names(daemonsets?.items.into_iter().map(|o| o.metadata).collect()));
+    add(workload_kind("batch", "CronJob", "cronjobs"), names(cronjobs?.items.into_iter().map(|o| o.metadata).collect()));
+    let standalone = jobs?
+        .items
+        .into_iter()
+        .map(|o| o.metadata)
+        .filter(|m| !m.owner_references.iter().flatten().any(|o| o.kind == "CronJob"))
+        .collect();
+    add(workload_kind("batch", "Job", "jobs"), names(standalone));
+    workloads.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.kind.kind.cmp(&b.kind.kind)));
+    let mut pods = names(pods?.items.into_iter().map(|o| o.metadata).collect());
+    pods.sort();
+    Ok(TraceTargets { workloads, pods })
+}
+
+fn workload_kind(group: &str, kind: &str, plural: &str) -> KindRef {
+    KindRef { group: group.into(), version: "v1".into(), kind: kind.into(), plural: plural.into(), namespaced: true }
 }
 
 /// Opens a trace file and reads its header.

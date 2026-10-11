@@ -711,3 +711,51 @@ button.link:hover { text-decoration: underline; }
 .diff-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
 .diff-del .diff-mark { color: var(--danger); }
 .diff-skip { padding: 2px 8px; color: var(--muted); font-style: italic; }
+
+/* Traces: the top-bar button and indicator, and their dialogs. */
+.trace-btn { padding: 4px 10px; }
+.trace-indicator {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  background: var(--danger-soft); color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  font-variant-numeric: tabular-nums; line-height: 1.3;
+}
+.trace-indicator.attention { background: var(--warn-bg); color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border)); }
+.rec-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--danger); flex-shrink: 0;
+  animation: rec-pulse 2s ease-in-out infinite;
+}
+.trace-modal h2 .rec-dot { margin-right: 8px; vertical-align: middle; }
+@keyframes rec-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .rec-dot { animation: none; } }
+.trace-warn { flex-shrink: 0; }
+.trace-levels { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.trace-level {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+}
+.trace-level input { position: absolute; opacity: 0; pointer-events: none; }
+.trace-level.on { border-color: var(--accent); background: var(--accent-soft); }
+.trace-level:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.trace-level-name { font-weight: 600; }
+.trace-targets { min-height: 120px; }
+.trace-pickers { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.trace-pickers .field select { min-width: 200px; }
+.trace-filter {
+  width: 100%; padding: 4px 8px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+.trace-pickers .trace-filter { margin-bottom: 0; flex: 1; }
+.trace-options {
+  max-height: 220px; overflow-y: auto; padding: 4px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+.trace-option { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 4px; cursor: pointer; }
+.trace-option:hover { background: var(--row-hover); }
+.trace-option .muted { margin-left: auto; }
+.trace-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0; }
+.trace-facts dt { color: var(--muted); }
+.trace-facts dd { margin: 0; }
+.trace-facts .path { overflow-wrap: anywhere; }

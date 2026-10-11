@@ -476,3 +476,52 @@ async fn listing_failures_keep_the_previous_pods() {
     drop(state);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn status_follows_pulls_samples_and_gaps() {
+    let api = MockApi::new();
+    with_prometheus(&api);
+    let (trace, dir) = start(&api, "status", TraceScope::Cluster).await;
+    let s = trace.status();
+    assert_eq!((s.context.as_str(), s.prometheus, s.gaps, s.stopping), ("acme-uat", true, 0, false));
+    assert!(s.path.ends_with("t.trace"));
+    assert!(s.last_pull.is_some() && s.last_error.is_none());
+    // Backfill reaches about two hours before the start; the data runs up to now.
+    assert!((s.data_end - s.data_start - 6900.0).abs() <= 60.0, "{s:?}");
+
+    trace.state.lock().await.covered_until = NOW - 10_000;
+    trace.pull_at(NOW).await.unwrap();
+    assert_eq!(trace.status().gaps, 1);
+    assert_eq!(trace.status().data_end, NOW as f64);
+
+    api.on_error("GET", &format!("{PROM}/query_range"), 503, "ServiceUnavailable", "down");
+    let _ = trace.pull_at(NOW + 600).await;
+    assert_eq!(trace.status().last_error.as_deref(), Some("Prometheus didn't answer"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn targets_list_workloads_and_running_pods() {
+    let api = MockApi::new();
+    let meta = |kind: &str, items: Vec<Value>| list(kind, items);
+    let named = |api_version: &str, kind: &str, name: &str, extra: Value| object(api_version, kind, Some("shop"), name, extra);
+    api.on("GET", "/apis/apps/v1/namespaces/shop/deployments", meta("DeploymentList", vec![named("apps/v1", "Deployment", "web", json!({}))]));
+    api.on("GET", "/apis/apps/v1/namespaces/shop/statefulsets", meta("StatefulSetList", vec![named("apps/v1", "StatefulSet", "db", json!({}))]));
+    api.on("GET", "/apis/apps/v1/namespaces/shop/daemonsets", meta("DaemonSetList", vec![]));
+    api.on("GET", "/apis/batch/v1/namespaces/shop/cronjobs", meta("CronJobList", vec![named("batch/v1", "CronJob", "nightly", json!({}))]));
+    let owned = json!({"metadata": {"ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob", "name": "nightly", "uid": "u"}]}});
+    api.on("GET", "/apis/batch/v1/namespaces/shop/jobs", meta("JobList", vec![
+        named("batch/v1", "Job", "nightly-29861700", owned),
+        named("batch/v1", "Job", "migrate", json!({})),
+    ]));
+    api.on("GET", "/api/v1/namespaces/shop/pods", meta("PodList", vec![pod("shop", "web-2", "n1", json!({})), pod("shop", "db-0", "n1", json!({}))]));
+    let t = targets(&api.client(), "shop").await.unwrap();
+    let names: Vec<(&str, &str)> = t.workloads.iter().map(|w| (w.kind.kind.as_str(), w.name.as_str())).collect();
+    assert_eq!(names, vec![("StatefulSet", "db"), ("Job", "migrate"), ("CronJob", "nightly"), ("Deployment", "web")]);
+    assert_eq!(t.workloads[0].kind.group, "apps");
+    assert_eq!(t.pods, vec!["db-0", "web-2"]);
+    assert!(api.calls_to("GET", "/api/v1/namespaces/shop/pods")[0].query.contains("status.phase"));
+    // One list failing fails the whole listing.
+    api.on_error("GET", "/apis/apps/v1/namespaces/shop/daemonsets", 403, "Forbidden", "daemonsets is forbidden");
+    assert!(targets(&api.client(), "shop").await.unwrap_err().to_string().contains("forbidden"));
+}

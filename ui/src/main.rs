@@ -15,6 +15,7 @@ mod overview;
 mod pod_detail;
 mod prefs;
 mod tauri;
+mod trace;
 mod upload;
 mod workload;
 mod object_detail;

@@ -11,9 +11,9 @@ use tauri::{AppHandle, Emitter, State, Runtime};
 
 use crate::{AppState, Session};
 
-type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -441,15 +441,20 @@ pub fn set_unsaved(state: State<'_, AppState>, unsaved: bool) {
     state.unsaved.store(unsaved, Ordering::SeqCst);
 }
 
-/// Closes the main window (or quits) after the user chose to discard edits.
+/// Closes the main window (or quits) after the user chose to discard edits
+/// and stop any running trace. The trace's file is closed first.
 #[tauri::command]
-pub fn close_discarding<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, quit: bool) {
+pub async fn close_discarding<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, quit: bool) -> CmdResult<()> {
+    if let Some(Err(e)) = state.traces.stop(subduer_types::TraceEnd::Quit).await {
+        tracing::warn!(error = %e, "closing the trace on quit failed");
+    }
     state.unsaved.store(false, Ordering::SeqCst);
     if quit {
         app.exit(0);
     } else if let Some(main) = tauri::Manager::get_webview_window(&app, "main") {
         let _ = main.close();
     }
+    Ok(())
 }
 
 /// Reveals one Secret value on explicit user request. The value is returned

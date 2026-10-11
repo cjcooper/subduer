@@ -6,6 +6,7 @@ mod forward;
 mod logs;
 mod menu;
 mod shell_env;
+mod trace;
 mod upload;
 
 use std::sync::Mutex;
@@ -41,13 +42,20 @@ pub struct AppState {
     /// The UI holds edits that haven't been saved: closing the window or
     /// quitting asks it first (event `UNSAVED_CLOSE`).
     pub unsaved: AtomicBool,
+    /// The running trace, if any; closing or quitting asks first too.
+    pub traces: trace::TraceRunner,
 }
 
-/// Sent to the main window when a close or quit is held for unsaved edits;
-/// the payload is `true` for quitting the app.
+/// Sent to the main window when a close or quit is held for unsaved edits
+/// or a running trace; the payload is `true` for quitting the app.
 pub const UNSAVED_CLOSE: &str = "unsaved-close";
 
 impl AppState {
+    /// Closing or quitting needs the UI to ask first.
+    pub fn must_ask(&self) -> bool {
+        self.unsaved.load(Ordering::SeqCst) || self.traces.is_active()
+    }
+
     pub fn stop_watch(&self) {
         if let Some(handle) = self.watch.lock().unwrap().take() {
             handle.abort();
@@ -70,6 +78,7 @@ pub fn run() {
     desktop_entry::ensure();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             menu::install(app.handle())?;
@@ -82,9 +91,7 @@ pub fn run() {
                     tauri::WindowEvent::CloseRequested { api, .. } if editor::ask_dirty(&handle) => {
                         api.prevent_close();
                     }
-                    tauri::WindowEvent::CloseRequested { api, .. }
-                        if handle.state::<AppState>().unsaved.load(Ordering::SeqCst) =>
-                    {
+                    tauri::WindowEvent::CloseRequested { api, .. } if handle.state::<AppState>().must_ask() => {
                         api.prevent_close();
                         let _ = window.emit_to("main", UNSAVED_CLOSE, false);
                     }
@@ -148,16 +155,23 @@ pub fn run() {
             commands::expand_claim,
             commands::set_reclaim_policy,
             commands::close_discarding,
+            trace::trace_targets,
+            trace::choose_trace_file,
+            trace::start_trace,
+            trace::trace_status,
+            trace::stop_trace,
+            trace::reveal_trace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Cmd+Q with unsaved edits: ask the UI first. `app.exit` from
-            // `close_discarding` clears the flag before exiting.
+            // Cmd+Q with unsaved edits or a running trace: ask the UI first.
+            // `close_discarding` stops the trace and clears the flag before
+            // exiting.
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if editor::ask_dirty(app) {
                     api.prevent_exit();
-                } else if app.state::<AppState>().unsaved.load(Ordering::SeqCst) {
+                } else if app.state::<AppState>().must_ask() {
                     api.prevent_exit();
                     let _ = app.emit_to("main", UNSAVED_CLOSE, true);
                 }

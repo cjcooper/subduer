@@ -88,9 +88,14 @@ pub fn reveal_download<R: Runtime>(app: tauri::AppHandle<R>, path: String) -> Re
     if !path.starts_with(&dir) {
         return Err("only files in the Downloads folder can be revealed".into());
     }
+    reveal(&path)
+}
+
+/// Shows a file in Finder or Explorer (selected), or opens its folder on Linux.
+pub(crate) fn reveal(path: &std::path::Path) -> Result<(), String> {
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
-        c.arg("-R").arg(&path);
+        c.arg("-R").arg(path);
         c
     } else if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("explorer");
@@ -98,7 +103,7 @@ pub fn reveal_download<R: Runtime>(app: tauri::AppHandle<R>, path: String) -> Re
         c
     } else {
         let mut c = std::process::Command::new("xdg-open");
-        c.arg(&dir);
+        c.arg(path.parent().unwrap_or(path));
         c
     };
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())

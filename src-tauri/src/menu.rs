@@ -1,6 +1,7 @@
 //! The app menu: Tauri's default, with an About item that carries the app
-//! icon and says who makes the app, a Settings… item (⌘, / Ctrl+,) and a
-//! Quit item on every system (⌘Q, Ctrl+Q on Linux, Exit / Alt+F4 on Windows).
+//! icon and says who makes the app, a Settings… item (⌘, / Ctrl+,), a
+//! Trace… item under Window, and a Quit item on every system (⌘Q, Ctrl+Q on
+//! Linux, Exit / Alt+F4 on Windows).
 //! Without an explicit icon, macOS shows a generic one whenever the binary
 //! isn't running from a bundle (`cargo tauri dev`).
 
@@ -12,8 +13,11 @@ const ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
 pub const MAKER: &str = "it-problems";
 const SETTINGS_ID: &str = "settings";
 const QUIT_ID: &str = "quit";
+const TRACE_ID: &str = "trace";
 /// Sent to the main window to open its Settings dialog.
 pub const OPEN_SETTINGS: &str = "open-settings";
+/// Sent to the main window to open the trace dialog (start, or the running one).
+pub const OPEN_TRACE: &str = "open-trace";
 
 fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
     let info = app.package_info();
@@ -57,15 +61,33 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             first.insert(&PredefinedMenuItem::separator(app)?, 1)?;
         }
     }
+    // Trace…: at the end of Window (or of the first menu if there's none).
+    let trace = MenuItem::with_id(app, TRACE_ID, "Trace…", true, None::<&str>)?;
+    let window_menu = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(sub) if sub.text().is_ok_and(|t| t == "Window") => Some(sub),
+        _ => None,
+    });
+    let trace_menu = window_menu.or_else(|| match menu.items().ok()?.into_iter().next() {
+        Some(MenuItemKind::Submenu(first)) => Some(first),
+        _ => None,
+    });
+    if let Some(sub) = trace_menu {
+        sub.append(&PredefinedMenuItem::separator(app)?)?;
+        sub.append(&trace)?;
+    }
     app.on_menu_event(|app, event| {
         if event.id() == QUIT_ID {
-            // Goes through `RunEvent::ExitRequested`, which holds for unsaved edits.
+            // Goes through `RunEvent::ExitRequested`, which holds for unsaved
+            // edits and a running trace.
             app.exit(0);
-        } else if event.id() == SETTINGS_ID
+        } else if let Some(name) = [(SETTINGS_ID, OPEN_SETTINGS), (TRACE_ID, OPEN_TRACE)]
+            .iter()
+            .find(|(id, _)| event.id() == *id)
+            .map(|(_, name)| *name)
             && let Some(main) = app.get_webview_window("main")
         {
             let _ = main.set_focus();
-            let _ = main.emit_to("main", OPEN_SETTINGS, ());
+            let _ = main.emit_to("main", name, ());
         }
     });
     // macOS lists open windows (main and logs) under Window once it knows
