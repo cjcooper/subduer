@@ -1,5 +1,6 @@
 //! The app menu: Tauri's default, with an About item that carries the app
-//! icon and says who makes the app, and a Settings… item (⌘, / Ctrl+,).
+//! icon and says who makes the app, a Settings… item (⌘, / Ctrl+,) and a
+//! Quit item on every system (⌘Q, Ctrl+Q on Linux, Exit / Alt+F4 on Windows).
 //! Without an explicit icon, macOS shows a generic one whenever the binary
 //! isn't running from a bundle (`cargo tauri dev`).
 
@@ -10,6 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 const ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
 pub const MAKER: &str = "it-problems";
 const SETTINGS_ID: &str = "settings";
+const QUIT_ID: &str = "quit";
 /// Sent to the main window to open its Settings dialog.
 pub const OPEN_SETTINGS: &str = "open-settings";
 
@@ -42,6 +44,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     {
         submenu.insert(&about, position)?;
     }
+    add_quit(app, &menu)?;
     // Settings…: after About on macOS (where apps keep it), first in the
     // first (File) menu elsewhere.
     let settings = MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, Some("CmdOrCtrl+,"))?;
@@ -55,7 +58,10 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         }
     }
     app.on_menu_event(|app, event| {
-        if event.id() == SETTINGS_ID
+        if event.id() == QUIT_ID {
+            // Goes through `RunEvent::ExitRequested`, which holds for unsaved edits.
+            app.exit(0);
+        } else if event.id() == SETTINGS_ID
             && let Some(main) = app.get_webview_window("main")
         {
             let _ = main.set_focus();
@@ -73,6 +79,31 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         }
     }
     app.set_menu(menu)?;
+    Ok(())
+}
+
+/// macOS: the default menu's Quit (⌘Q) already asks the app first, so it
+/// stays. Windows: the default File › Quit has no shortcut and posts a raw
+/// quit message that skips the unsaved-edits hold; it becomes File › Exit,
+/// labelled Alt+F4 but not bound to it, so Alt+F4 still closes only the
+/// focused window (closing the main window quits). Linux: the default menu
+/// has no File menu, so add one with Quit (Ctrl+Q).
+#[cfg_attr(target_os = "macos", allow(unused_variables))]
+fn add_quit<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
+    #[cfg(windows)]
+    if let Some(MenuItemKind::Submenu(file)) = menu.items()?.into_iter().next() {
+        let items = file.items()?;
+        if let Some(MenuItemKind::Predefined(quit)) = items.last() {
+            file.remove(quit)?;
+        }
+        file.append(&PredefinedMenuItem::separator(app)?)?;
+        file.append(&MenuItem::with_id(app, QUIT_ID, "Exit\tAlt+F4", true, None::<&str>)?)?;
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let quit = MenuItem::with_id(app, QUIT_ID, "Quit", true, Some("Ctrl+Q"))?;
+        menu.insert(&tauri::menu::Submenu::with_items(app, "File", true, &[&quit])?, 0)?;
+    }
     Ok(())
 }
 
