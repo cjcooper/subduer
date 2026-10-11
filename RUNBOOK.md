@@ -2,7 +2,7 @@
 
 How to pick this project back up. It covers what exists, how to run and verify it, the decisions behind it, and what's next. `README.md` is the short user-facing summary; this file is the working notes.
 
-_Last updated: 2026-10-11 (Quit everywhere; giving up on failing connections; Arch Linux setup; Linux app icon; Esc closes dialogs and the detail panel)._
+_Last updated: 2026-10-11 (Traces phase 1: capture and the .trace file)._
 
 ## 0. Where things stand (read first)
 
@@ -35,6 +35,8 @@ _Last updated: 2026-10-11 (Quit everywhere; giving up on failing connections; Ar
 - **Storage section checked on UAT (2026-10-10):** `config` read the EFS claim and volume (static, no class), the `gp2` class and the EFS CSI driver with its nodes. `config_dry_run` was accepted for the PV reclaim policy. The PVC expand dry run was refused by the server ("only dynamically provisioned pvc can be resized"), and the panel says so and hides Expand. The locked gate refused both real calls. Disk usage isn't available there: the kubelet on Fargate doesn't report it.
 - **Network section checked on UAT (2026-10-10):** `config` read a NodePort Service, a headless Service, an EndpointSlice, Endpoints and the `alb` IngressClass; endpoints, links and statuses matched `kubectl`. UAT has no Ingresses or NetworkPolicies, so those are covered by unit tests and the harness only.
 - **Config section checked on UAT (2026-10-10):** `config` read an HPA (KEDA-owned, external metric), the coredns PDB, a Helm-managed ConfigMap, a Secret (sizes only), a webhook configuration, a Lease and a PriorityClass. `config_dry_run` was accepted for a ConfigMap save, a Secret save and an HPA range. A save from a stale resourceVersion was refused with the "changed by someone else" message, and the locked gate refused the real calls. Nothing was written. The dry-run key was not persisted.
+- **Traces, phase 1 (capture and file format), not committed:** `crates/core/src/trace.rs` (new; pulls, the app's own samples, the run loop), `trace_file.rs` (new; the SQLite `.trace` format), their `*_tests.rs` (24 tests), `examples/trace.rs` (new), the types (`TraceScope`, `TraceWorkload`, `TraceEnd`, `TraceGap`, `TraceSummary`), `rusqlite` (bundled) in core, `Prometheus::get` and `discover_prometheus` made `pub(crate)`, `pod_metrics_api`/`metrics_containers` likewise, and DaemonSet pod names in `workload::pod_name_regex`. No UI or Tauri commands yet (phase 2). See "Traces" in section 7.
+- **Traces checked on UAT (2026-10-11):** `trace` backfilled 114 min for `deploy:kube-system/coredns` (owners resolved to the Deployment with its pod-template-hash; requests 100m/70Mi, memory limit 170Mi; no throttling column without a CPU limit). A 3-minute `cluster` trace: 54 pods, 77 containers, 118 min, 332 KiB; only Prometheus' own pod was sampled by the app (every other running pod is in cAdvisor; the 17 pods without usage are finished Job pods kube-state-metrics still lists). CronJob pods resolved through `kube_job_owner`. About 37 bytes per container-minute, so ~55 MB/day per 1,000 containers.
 - **Open questions for the user:**
   - Should port-forwards on prod contexts require unlocking? (Currently not gated.)
   - Should revealing secrets require unlocking?
@@ -127,6 +129,8 @@ cargo run -p subduer-core --example smoke    -- <context> [group/Kind]   # kinds
 cargo run -p subduer-core --example overview -- <context> [--json]      # Cluster page data
 cargo run -p subduer-core --example pod      -- <context> <ns> <pod>     # Pod Details data, never fetches secret values
 cargo run -p subduer-core --example history  -- <context> <ns> <pod>     # last-hour CPU/memory; shows which Prometheus it found
+cargo run -p subduer-core --example trace    -- <context> <cluster|ns:a,b|deploy:ns/name|sts:…|ds:…|job:…|cronjob:…|pod:ns/name> <file> <minutes>   # records a trace (backfill + minutes), prints its summary; the file must not exist
+cargo run -p subduer-core --example trace    -- --summary <file>          # a trace file's header and counts
 cargo run -p subduer-core --example helm     -- <context> <ns> <release> # Helm release summary (no values/manifest)
 cargo run -p subduer-core --example delete_dry_run -- <context> <group/Kind> <ns|-> <name>   # server-side dry run, never deletes
 cargo run -p subduer-core --example workload -- <context> <apps/Deployment|apps/StatefulSet|batch/Job|batch/CronJob> <ns> <name>   # Details data + history source; no env values or secrets
@@ -195,6 +199,8 @@ crates/core    all cluster logic, no UI deps
   download.rs    file download out of a container (`cat` streamed to a .part file, then renamed)
   usage.rs       kubelet /stats/summary helpers (per pod, per node totals)
   history.rs     last-hour pod usage: Prometheus (found once per connection) or app-recorded samples
+  trace.rs       traces: Prometheus pulls into one-minute buckets, the app's samples for pods Prometheus misses, the run loop
+  trace_file.rs  the .trace file (SQLite): schema, writes, summary
   quantity.rs    "500m"/"1.5Gi" -> numbers
 src-tauri      Tauri app: AppState (gate, session, one watch), commands.rs, shell_env.rs
 ui             Leptos CSR app
@@ -511,6 +517,23 @@ Smaller items that have come up:
 - Upload/download of folders (tar), and a progress indicator for big files.
 - Clean up unused icons that `cargo tauri icon` generated (`android/`, `ios/`, `Square*.png`, `StoreLogo.png`, `icon.ico`). The user hadn't approved deleting them.
 - `response.json` at the repo root (`{"status":"success"}`) has an unknown origin and wasn't created during this work.
+
+### Traces (designed with the user 2026-10-11; phase 1 built)
+
+Why: Prometheus keeps only 1–2 h (UAT: `retention.time` 2h, 30 s scrapes), so right-sizing needs usage kept for days. The worry is over-provisioning: requests far above real usage.
+
+- **Name:** a "trace". Started by choice; runs while the app is open. No background or tray mode.
+- **Scope levels:** Cluster (current context), Namespace (one or more), Workload (one or more Deployments/StatefulSets/DaemonSets/CronJobs, matched by pod-name pattern as in `workload_history`, so new pods are picked up), Pod (ends with the pod). Also "Trace this…" from Details tabs. One context per trace.
+- **Capture:** Prometheus range queries `by (namespace, pod, container)`, pulled at about half the server's retention (read from `/status/flags`) with overlap, deduped. Backfill whatever Prometheus still holds at start. Pods Prometheus doesn't cover (Fargate, Prometheus itself: 17 of 50 on UAT) are sampled from metrics-server/kubelet stats while running, and each workload records its data source. Missed spans are stored as gaps and shown.
+- **What's recorded:** CPU and memory usage; requests and limits over time; owners (`kube_pod_owner`, `kube_replicaset_owner`) and pod template hash (so rollouts split); restarts, last terminated reason (OOMKilled), `container_oom_events_total`; CPU throttling (only exists for containers with CPU limits); replica counts. `kube_pod_labels` isn't exported on UAT, so labels come from the API.
+- **Storage:** one SQLite `.trace` file per trace (bundled `rusqlite`, WAL), chosen with **Save as** when starting. 1-minute buckets of min/avg/max throughout (measured on UAT: ~37 bytes per container-minute, ~55 MB/day per 1,000 containers); charts re-bucket by zoom with `GROUP BY`. Each pull is one transaction. No secrets or env values in the file; names, numbers, labels and notes only. A Recent traces list remembers paths.
+- **While running:** an indicator in the chrome (context, duration, gaps) with Stop, plus a Window-menu entry. Closing or quitting uses the unsaved-edits hold with "Stop trace and quit" / Cancel (combined with any unsaved-YAML prompt). Stop/quit does one final pull (about 10 s cap; on timeout it's a gap), writes end time and reason, commits and closes. A file left without an end time is marked "ended unexpectedly" when next opened. Switching context during a trace warns and stops it.
+- **Review (works offline, no kubeconfig):** Open trace… or drop a file. Charts over the whole span with request and limit lines and gaps; a time-of-day view. The **right-sizing table**: per workload and container, current request, CPU p50/p95/p99/max, memory max, waste (request − p95) as the default sort, and risk flags (throttling, memory ≥ 90% of limit, OOMKilled, restarts, no request set). Notes on the trace and per workload, saved in the file. **Compare** two or more traces by workload and container (before/after).
+- **Suggestions (adjustable in Settings later):** CPU request = p95; memory request = max × 1.15. Limits aren't suggested; they're only flagged when hit, except that a memory request above the current limit is called out. No suggestion when data is thin or gaps cover busy hours; each suggestion lists its basis.
+- **Apply:** only when connected to the trace's cluster. Patches `spec.template.spec.containers[].resources.requests`, single row or selected rows, through the safety gate with a server dry-run diff (typed name on prod). Helm-managed workloads get a warning that `helm upgrade` will reset them, plus **Copy values snippet**.
+- **Export:** a standalone HTML report (table and charts) for people without the app.
+- **As built (phase 1):** `Trace::start` finds Prometheus, reads `storage.tsdb.retention.time`, creates the file and backfills up to 2 h (retention less 5 min). `Trace::run(stop)` pulls every 10 min (or half the retention) and samples every 30 s until `stop` resolves with a `TraceEnd`, then `finish` does a last pull (10 s limit; a failure is a gap), writes pending samples and switches the file out of WAL. Pulls re-read 5 min of overlap in chunks of up to an hour: raw points every 15 s for CPU (rate 2m), memory and throttling, folded into minutes; requests, limits, restarts, last termination reason and OOM events every minute, stored only as changes; owners from `kube_pod_owner` → `kube_replicaset_owner`/`kube_job_owner` as instant `max_over_time` queries. A failed pull is logged in the `pulls` table and retried by the next; falling behind retention records a gap. The app's samples: running pods in scope (listed every 2 min) less those with cAdvisor data in the last 5 min, from metrics-server or else kubelet stats, one minute written once it's over; Prometheus data replaces them, they never replace Prometheus'. CPU is stored in microcores and memory in bytes; `application_id` "SUBT" and `meta.format` 1 identify the file. Opening a file with no end that isn't being recorded reports `unfinished`.
+- **Phases:** 1) capture and the `.trace` format, with an `examples/trace.rs` read-only check against UAT; 2) trace controls, indicator and the quit hold; 3) review charts and the right-sizing table; 4) Apply and Copy values snippet; 5) Compare and HTML export.
 
 ## 8. Working conventions
 

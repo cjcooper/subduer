@@ -1098,5 +1098,72 @@ pub struct DownloadResult {
     pub bytes: u64,
 }
 
+/// What a trace records, within one context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceScope {
+    Cluster,
+    Namespaces(Vec<String>),
+    /// Deployments, StatefulSets, DaemonSets, Jobs or CronJobs. Pods are
+    /// matched by name pattern, so ones started during the trace count.
+    Workloads(Vec<TraceWorkload>),
+    /// One pod; its data stops when the pod goes away.
+    Pod { namespace: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceWorkload {
+    pub kind: KindRef,
+    pub namespace: String,
+    pub name: String,
+}
+
+/// Why a trace ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceEnd {
+    Stopped,
+    Quit,
+    ContextChanged,
+    ConnectionLost,
+}
+
+/// A span with no data for the whole trace, in unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceGap {
+    pub start: f64,
+    pub end: f64,
+    pub reason: String,
+}
+
+/// The header of a trace file and how much it holds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceSummary {
+    pub path: String,
+    pub context: String,
+    pub scope: TraceScope,
+    /// When recording started, in unix seconds.
+    pub started: f64,
+    /// When recording ended; `None` while running, or if the app ended
+    /// without closing it (see `unfinished`).
+    pub ended: Option<f64>,
+    pub end_reason: Option<TraceEnd>,
+    /// The file has no end and isn't being recorded: the app crashed or was
+    /// killed. Data up to `data_end` is intact.
+    pub unfinished: bool,
+    /// The span covered by samples (backfill reaches before `started`).
+    pub data_start: Option<f64>,
+    pub data_end: Option<f64>,
+    /// `namespace/service` of the Prometheus used, if any.
+    pub prometheus: Option<String>,
+    /// Prometheus' retention in seconds, as read from its flags.
+    pub retention_secs: Option<f64>,
+    pub pods: u64,
+    pub containers: u64,
+    /// One-minute samples from Prometheus and from the app itself.
+    pub prometheus_samples: u64,
+    pub local_samples: u64,
+    pub gaps: Vec<TraceGap>,
+    pub file_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests;

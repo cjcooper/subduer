@@ -24,6 +24,8 @@ pub mod storage;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod table;
+pub mod trace;
+pub mod trace_file;
 pub mod upload;
 pub mod usage;
 pub mod watch;

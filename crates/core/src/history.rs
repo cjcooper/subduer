@@ -45,7 +45,7 @@ impl Prometheus {
         )
     }
 
-    async fn get(&self, client: &Client, endpoint: &str, params: &[(&str, &str)]) -> Option<Value> {
+    pub(crate) async fn get(&self, client: &Client, endpoint: &str, params: &[(&str, &str)]) -> Option<Value> {
         let query = form_urlencoded::Serializer::new(String::new()).extend_pairs(params).finish();
         let request = http::Request::get(format!("{}?{query}", self.api_path(endpoint)))
             .body(Vec::new())
@@ -315,7 +315,7 @@ fn by_container(data: &Value) -> HashMap<String, Series> {
 
 /// Finds a Prometheus service that answers queries. Needs permission to list
 /// services cluster-wide and to use the service proxy; `None` otherwise.
-async fn discover_prometheus(client: &Client) -> Option<Prometheus> {
+pub(crate) async fn discover_prometheus(client: &Client) -> Option<Prometheus> {
     let services = Api::<Service>::all(client.clone()).list(&ListParams::default()).await.ok()?;
     let mut candidates: Vec<(u8, Prometheus)> = services
         .items

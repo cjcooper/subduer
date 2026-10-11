@@ -364,7 +364,7 @@ pub(crate) async fn namespace_usage(client: &Client, namespace: &str) -> Option<
     )
 }
 
-fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
+pub(crate) fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
     let ar = ApiResource {
         group: "metrics.k8s.io".into(),
         version: "v1beta1".into(),
@@ -375,7 +375,7 @@ fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
     Api::namespaced_with(client.clone(), namespace, &ar)
 }
 
-fn metrics_containers(metrics: &DynamicObject) -> Option<HashMap<String, (f64, f64)>> {
+pub(crate) fn metrics_containers(metrics: &DynamicObject) -> Option<HashMap<String, (f64, f64)>> {
     Some(
         metrics.data["containers"]
             .as_array()?

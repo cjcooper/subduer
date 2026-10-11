@@ -25,6 +25,7 @@ tracing = "0.1"
 tower = { version = "0.5", features = ["util"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [features]
 # Exposes `subduer_core::testing` (a fake Kubernetes API server) to other

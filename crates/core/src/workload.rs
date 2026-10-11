@@ -180,6 +180,8 @@ pub fn pod_name_regex(kind: &KindRef, name: &str) -> String {
     let name = name.replace('.', r"\\.");
     match kind.kind.as_str() {
         "StatefulSet" => format!("{name}-[0-9]+"),
+        // <daemonset>-<5 random characters>
+        "DaemonSet" => format!("{name}-[a-z0-9]{{5}}"),
         // <job>[-<completion index>]-<5 random characters>
         "Job" => format!("{name}(-[0-9]+)?-[a-z0-9]{{5}}"),
         // Jobs are <cronjob>-<scheduled minute>, or <cronjob>-manual-<suffix> from Run now.
