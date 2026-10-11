@@ -625,12 +625,12 @@ fn LockToggle(store: Store) -> impl IntoView {
     view! {
         {move || store.current_context().map(|ctx| {
             let (class, label, title) = if ctx.unlocked {
-                ("lock unlocked", "🔓 Writable", "Changes are allowed. Click to make read-only.")
+                ("lock unlocked", "Writable", "Changes are allowed. Click to make read-only.")
             } else {
-                ("lock", "🔒 Read-only", "Click to allow changes to this context.")
+                ("lock", "Read-only", "Click to allow changes to this context.")
             };
             let class = if ctx.prod_like { format!("{class} prod") } else { class.to_owned() };
-            view! { <button class=class title=title on:click=toggle>{label}</button> }
+            view! { <button class=class title=title on:click=toggle><crate::icons::LockIcon open=ctx.unlocked />{label}</button> }
         })}
     }
 }
