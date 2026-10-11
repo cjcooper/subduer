@@ -541,3 +541,32 @@ async fn traces_start_report_and_stop() {
     assert!(trace::trace_review(s(), "/etc/hosts".into()).await.unwrap_err().contains("trace file"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn rightsizing_needs_the_context_and_the_gate() {
+    use subduer_core::types::{ContainerRequests, RightsizeChange};
+    let path = "/apis/apps/v1/namespaces/shop/deployments/web";
+    let api = MockApi::new();
+    let web = object("apps/v1", "Deployment", Some("shop"), "web", json!({"spec": {"template": {"spec": {"containers": [
+        {"name": "app", "image": "acme/web:1", "resources": {"requests": {"cpu": "500m"}}}]}}}}));
+    api.on("GET", path, web.clone());
+    api.on("PATCH", path, web);
+    let app = connected(&api).await;
+    let s = || app.state::<AppState>();
+    let change = RightsizeChange {
+        kind: "Deployment".into(),
+        namespace: "shop".into(),
+        name: "web".into(),
+        containers: vec![ContainerRequests { container: "app".into(), cpu_request: Some(50.0), mem_request: None }],
+    };
+    let other = commands::rightsize_preview(s(), "acme-prd".into(), change.clone()).await.unwrap_err();
+    assert_eq!(other, "connected to acme-uat now, not acme-prd; nothing was previewed");
+    let preview = commands::rightsize_preview(s(), CTX.into(), change.clone()).await.unwrap();
+    assert_eq!(preview.containers[0].cpu_request.after.as_deref(), Some("50m"));
+    assert!(api.calls_to("PATCH", path)[0].query.contains("dryRun=All"));
+    let locked = commands::rightsize_apply(s(), CTX.into(), change.clone()).await.unwrap_err();
+    assert!(locked.contains("read-only"), "{locked}");
+    unlock(&app);
+    commands::rightsize_apply(s(), CTX.into(), change).await.unwrap();
+    assert!(!api.calls_to("PATCH", path).pop().unwrap().query.contains("dryRun"));
+}

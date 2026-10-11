@@ -156,6 +156,10 @@ pub(crate) struct Store {
     pub(crate) review: RwSignal<Option<Result<subduer_types::TraceReview, String>>>,
     pub(crate) review_sel: RwSignal<Option<subduer_types::TraceKey>>,
     pub(crate) recent_traces: RwSignal<Vec<crate::prefs::RecentTrace>>,
+    /// Review rows ticked for Apply selected.
+    pub(crate) review_checked: RwSignal<HashSet<subduer_types::TraceKey>>,
+    /// The apply dialog is open with these changes (one per workload).
+    pub(crate) apply_prompt: RwSignal<Option<Vec<subduer_types::RightsizeChange>>>,
 }
 
 impl Store {
@@ -241,6 +245,8 @@ impl Store {
             review: RwSignal::new(None),
             review_sel: RwSignal::new(None),
             recent_traces: RwSignal::new(vec![]),
+            review_checked: RwSignal::new(HashSet::new()),
+            apply_prompt: RwSignal::new(None),
         }
     }
 
@@ -558,6 +564,7 @@ pub fn App() -> impl IntoView {
             <crate::trace::TraceSavedDialog store=store />
             <crate::trace::TraceQuitDialog store=store />
             <crate::trace::TraceSwitchDialog store=store />
+            <crate::rightsize::ApplyDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}

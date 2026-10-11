@@ -165,6 +165,8 @@ pub fn run() {
             trace::trace_review,
             trace::trace_series,
             trace::trace_daily,
+            commands::rightsize_preview,
+            commands::rightsize_apply,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

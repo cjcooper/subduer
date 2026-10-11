@@ -890,3 +890,20 @@ table.figures .num { text-align: right; }
 .heat-scale .heat-cell { width: 18px; }
 .heat-head-row { display: flex; align-items: center; gap: 6px; margin-top: 14px; }
 .heat-head-row .chart-title { margin: 0 !important; }
+
+/* Applying suggestions: row checkboxes, the suggestion's Apply…, the apply dialog. */
+.review-table .pick { width: 28px; padding-right: 0; cursor: default; }
+.apply-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.apply-note { margin-top: 8px !important; }
+.apply-modal { width: 640px; max-height: calc(100vh - 64px); display: flex; flex-direction: column; }
+.apply-cards { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; margin: 4px 0; }
+.apply-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.apply-card-head { gap: 8px; }
+.apply-card-head .ok-text, .apply-card-head .warn-text { margin-left: auto; font-size: 12px; }
+.apply-card p { margin: 6px 0 0; }
+.apply-table td.num, .apply-table th.num { white-space: nowrap; }
+.helm-note { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.helm-note p { flex: 1; margin: 0 !important; }
+.apply-locked { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.ok-text { color: var(--ok); }
+.small { font-size: 12px; }

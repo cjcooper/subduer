@@ -257,6 +257,27 @@ pub async fn run_cron_job(state: State<'_, AppState>, context: String, namespace
 
 /// The connected client, provided `context` (what a confirmation dialog
 /// showed) is still the connected one. `done` names the change for the error.
+/// What applying new requests to one workload would do: planned values, the
+/// Helm release, and a server dry run. Needs the change's context to be the
+/// connected one; changes nothing, so not gated.
+#[tauri::command]
+pub async fn rightsize_preview(
+    state: State<'_, AppState>,
+    context: String,
+    change: subduer_types::RightsizeChange,
+) -> CmdResult<subduer_types::RightsizePreview> {
+    let client = client_for_change(&state, &context, "previewed").await?;
+    subduer_core::rightsize::preview(&client, &change).await.map_err(|e| e.user_message())
+}
+
+/// Applies new requests to one workload (one patch, one rollout), checked
+/// like `delete_resource`.
+#[tauri::command]
+pub async fn rightsize_apply(state: State<'_, AppState>, context: String, change: subduer_types::RightsizeChange) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "changed").await?;
+    subduer_core::rightsize::apply(&client, &state.gate, &context, &change).await.map_err(|e| e.user_message())
+}
+
 async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {
     let session = state.session.read().await;
     let session = session.as_ref().ok_or("not connected to a cluster")?;

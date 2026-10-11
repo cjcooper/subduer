@@ -43,7 +43,7 @@ fn stop(store: Store, id: u64) {
     });
 }
 
-fn copy(text: &str) {
+pub(crate) fn copy(text: &str) {
     let navigator = js_sys::Reflect::get(&window(), &"navigator".into()).unwrap_or(JsValue::UNDEFINED);
     let clipboard = js_sys::Reflect::get(&navigator, &"clipboard".into()).unwrap_or(JsValue::UNDEFINED);
     if let Ok(write) = js_sys::Reflect::get(&clipboard, &"writeText".into())

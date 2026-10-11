@@ -33,6 +33,7 @@ pub(crate) fn open_file(store: Store, path: String) {
         store.forwards_open.set(false);
         store.traces_open.set(true);
         store.review_sel.set(None);
+        store.review_checked.set(Default::default());
         store.review_path.set(Some(path));
         load(store);
     });
@@ -144,6 +145,17 @@ pub(crate) fn flag_explain(f: &ReviewFlag) -> String {
     }
 }
 
+/// Whether suggestions from this review can be applied now: only while
+/// connected to the cluster it was recorded on. The reason when not.
+pub(crate) fn apply_blocked(store: Store) -> Option<String> {
+    let trace_context = store.review.with(|r| r.as_ref()?.as_ref().ok().map(|r| r.summary.context.clone()))?;
+    let connected = store.cluster.with(Option::is_some) && store.disconnected.with(Option::is_none);
+    match store.context.get() {
+        Some(c) if c == trace_context && connected => None,
+        _ => Some(format!("Connect to {trace_context} to apply suggestions.")),
+    }
+}
+
 /// Sort key: critical first.
 fn severity(f: &ReviewFlag) -> u8 {
     match flag_level(f) {
@@ -248,6 +260,26 @@ fn spare_cell(v: Option<f64>, measure: Measure) -> impl IntoView {
 
 fn opt(v: Option<f64>, measure: Measure) -> String {
     v.map_or("—".into(), |v| measure.fmt(v))
+}
+
+/// Apply… for one row, or why it can't be applied.
+fn apply_row(store: Store, row: &ReviewRow) -> impl IntoView + use<> {
+    let note = if !crate::rightsize::applicable_kind(&row.key.kind) {
+        Some(format!("A {}'s requests can't be changed here.", row.key.kind))
+    } else {
+        apply_blocked(store)
+    };
+    let row = row.clone();
+    match note {
+        Some(n) => view! { <p class="muted small apply-note">{n}</p> }.into_any(),
+        None => view! {
+            <div class="apply-row">
+                <button class="btn small primary" on:click=move |_| crate::rightsize::ask(store, std::slice::from_ref(&row))>"Apply…"</button>
+                <span class="muted small">"Previews with the server first."</span>
+            </div>
+        }
+        .into_any(),
+    }
 }
 
 // --- The page --------------------------------------------------------------------
@@ -435,8 +467,21 @@ fn ReviewView(store: Store) -> impl IntoView {
                     Some(s) => format!("{} · {}", Measure::Cpu.fmt(s.cpu_request), Measure::Memory.fmt(s.mem_request)),
                     None => "—".into(),
                 };
+                let can = crate::rightsize::applicable(&row);
+                let check_key = row.key.clone();
+                let checked = { let k = row.key.clone(); move || store.review_checked.with(|c| c.contains(&k)) };
                 view! {
                     <tr class:selected=selected on:click=move |_| store.review_sel.set(Some(key.clone()))>
+                        <td class="pick" on:click=|ev| ev.stop_propagation()>
+                            <input
+                                type="checkbox"
+                                aria-label="Choose for Apply selected"
+                                title=if can { "Choose for Apply selected" } else { "No suggestion that can be applied" }
+                                prop:disabled=!can
+                                prop:checked=checked
+                                on:change=move |_| store.review_checked.update(|c| if !c.remove(&check_key) { c.insert(check_key.clone()); })
+                            />
+                        </td>
                         <td>
                             <div class="review-name">{row.key.name.clone()}</div>
                             <div class="muted small">{format!("{} · {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
@@ -458,6 +503,27 @@ fn ReviewView(store: Store) -> impl IntoView {
             <table class="resources review-table">
                 <thead>
                     <tr>
+                        <th class="pick">
+                            <input
+                                type="checkbox"
+                                aria-label="Choose every row shown"
+                                title="Choose every row shown that has a suggestion"
+                                prop:checked=move || {
+                                    let shown: Vec<_> = rows().into_iter().filter(crate::rightsize::applicable).map(|r| r.key).collect();
+                                    !shown.is_empty() && store.review_checked.with(|c| shown.iter().all(|k| c.contains(k)))
+                                }
+                                on:change=move |_| {
+                                    let shown: Vec<_> = rows().into_iter().filter(crate::rightsize::applicable).map(|r| r.key).collect();
+                                    store.review_checked.update(|c| {
+                                        if shown.iter().all(|k| c.contains(k)) {
+                                            for k in &shown { c.remove(k); }
+                                        } else {
+                                            c.extend(shown);
+                                        }
+                                    });
+                                }
+                            />
+                        </th>
                         {th("Workload", SortBy::Workload, false)}
                         {th("Pods", SortBy::Pods, true)}
                         {th("CPU request", SortBy::CpuRequest, true)}
@@ -513,6 +579,25 @@ fn ReviewView(store: Store) -> impl IntoView {
                             "Needs attention only"
                         </label>
                         <span class="spacer"></span>
+                        {move || {
+                            let n = store.review_checked.with(|c| c.len());
+                            let blocked = apply_blocked(store);
+                            (n > 0).then(|| view! {
+                                <button
+                                    class="btn small primary"
+                                    prop:disabled=blocked.is_some()
+                                    title=blocked.clone().unwrap_or_else(|| "Preview, then apply the suggested requests".into())
+                                    on:click=move |_| {
+                                        let checked = store.review_checked.get_untracked();
+                                        let rows: Vec<ReviewRow> = store.review.with_untracked(|r| match r {
+                                            Some(Ok(r)) => r.rows.iter().filter(|row| checked.contains(&row.key)).cloned().collect(),
+                                            _ => vec![],
+                                        });
+                                        crate::rightsize::ask(store, &rows);
+                                    }
+                                >{format!("Apply selected ({n})…")}</button>
+                            })
+                        }}
                         <span class="muted small">{move || {
                             let n = rows().len();
                             let hint = if store.review_sel.with(Option::is_none) && n > 0 { " · select one for its charts" } else { "" };
@@ -624,6 +709,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                         {line(Measure::Cpu, row.cpu_request, s.cpu_request)}
                         {line(Measure::Memory, row.mem_request, s.mem_request)}
                         <p class="muted small">{format!("Based on {}.", s.basis)}</p>
+                        {apply_row(store, &row)}
                     </div>
                 }
                 .into_any()

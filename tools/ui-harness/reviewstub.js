@@ -4,10 +4,18 @@
 // first recent file), sel=<name> (selects that row), sort=<header text> (clicks that header), flagged=1 (Needs
 // attention only), ns=<namespace>, text=<filter>, quick=1h|6h|24h|all, zoom=1 (drags across the CPU chart),
 // heat=mem, back=1 (← Traces), bad=1 (the file isn't a trace), offline=1 (connecting fails).
+// Applying: apply=1 (Apply… on the selected row), check=<name,name> (ticks rows), applysel=1 (Apply selected),
+// go=1 (the dialog's Apply button), ctx=prod (the trace and connection are acme-prd), typed=1, locked=1,
+// unlock=1 (Allow changes… then confirms), other=1 (connected to another context than the trace's),
+// refuse=1 (the dry run for db is refused), fail=1 (applying worker fails), copy=1 (Copy values snippet).
 // The title reports the commands sent, the table's rows in order, the selected row and what's shown.
 (function () {
   const params = new URLSearchParams(location.search);
   const listeners = {};
+  const ctxName = params.get('ctx') === 'prod' ? 'acme-prd' : 'acme-uat';
+  let unlocked = !params.get('locked');
+  let copied = '';
+  navigator.clipboard && (navigator.clipboard.writeText = async (t) => { copied = t; });
   const sent = [];
   const H = 3600, now = Math.floor(Date.now() / 1000 / 60) * 60, start = now - 3 * 24 * H;
   try {
@@ -50,7 +58,7 @@
     }),
   ];
   const summary = {
-    path: '', context: 'acme-uat', scope: { Namespaces: ['shop', 'ops'] }, started: start, ended: params.get('running') ? null : now,
+    path: '', context: params.get('other') ? 'acme-stg' : ctxName, scope: { Namespaces: ['shop', 'ops'] }, started: start, ended: params.get('running') ? null : now,
     end_reason: params.get('running') ? null : 'Stopped', unfinished: false, data_start: start - 6900, data_end: now,
     prometheus: 'monitoring/prometheus', retention_secs: 7200, pods: 10, containers: 12, prometheus_samples: 30000, local_samples: 300,
     gaps: [{ start: start + 30 * H, end: start + 32 * H, reason: 'Prometheus no longer held this data' }], file_bytes: 4000000,
@@ -108,8 +116,28 @@
   window.__TAURI__ = {
     core: { invoke: async (cmd, args) => {
       if (/trace|choose/.test(cmd)) sent.push(cmd + (cmd === 'trace_series' && args.start ? ':zoomed' : ''));
-      if (cmd === 'list_contexts') return { contexts: [{ name: 'acme-uat', cluster: 'acme-uat', namespace: null, prod_like: false, unlocked: false }], current: 'acme-uat' };
-      if (cmd === 'connect') { if (params.get('offline')) throw 'no answer from the cluster in 10s; check your network or VPN'; return { context: 'acme-uat', kinds, namespaces: ['shop'] }; }
+      if (cmd.startsWith('rightsize')) sent.push(`${cmd}:${args.change.name}@${args.context}`);
+      if (cmd === 'list_contexts') return { contexts: [{ name: ctxName, cluster: ctxName, namespace: null, prod_like: ctxName === 'acme-prd', unlocked }], current: ctxName };
+      if (cmd === 'set_unlocked') { unlocked = args.unlocked; return null; }
+      if (cmd === 'connect') { if (params.get('offline')) throw 'no answer from the cluster in 10s; check your network or VPN'; return { context: args.context, kinds, namespaces: ['shop'] }; }
+      if (cmd === 'rightsize_preview') {
+        const c = args.change;
+        const q = (before, after) => ({ before, after });
+        const MiB = (n) => `${n}Mi`;
+        const containers = c.containers.map((w) => ({
+          web: { container: w.container, injected: false, cpu_request: q('1500m', '15m'), cpu_limit: q(null, null), mem_request: q('6Gi', MiB(2944)), mem_limit: q('6Gi', '6Gi') },
+          worker: { container: w.container, injected: false, cpu_request: q('700m', '1350m'), cpu_limit: q('1', '1350m'), mem_request: q('2Gi', MiB(1480)), mem_limit: q(null, null) },
+          db: { container: w.container, injected: false, cpu_request: q(null, '610m'), cpu_limit: q('1', '1'), mem_request: q(null, MiB(1104)), mem_limit: q('1000Mi', MiB(1104)) },
+        }[c.name]));
+        const helm = c.name === 'web' ? 'shop-web' : null;
+        return { change: c, helm_release: helm, helm_snippet: helm ? '# Helm release shop-web: Deployment shop/web\nresources:\n  requests:\n    cpu: 15m\n' : null,
+          containers, blocked: null, dry_run_error: params.get('refuse') && c.name === 'db' ? 'exceeded quota: shop-quota, requested: requests.memory=1104Mi' : null,
+          effect: 'Rolls out new pods, following the workload\'s update strategy.' };
+      }
+      if (cmd === 'rightsize_apply') {
+        if (params.get('fail') && args.change.name === 'worker') throw 'admission webhook "policy.acme.io" denied the request';
+        return null;
+      }
       if (cmd === 'trace_status') return params.get('running') ? { context: 'acme-uat', path: '/Users/me/Documents/acme-uat-shop-now.trace', scope: { Namespaces: ['shop'] },
         started: start, data_start: start, data_end: now, prometheus: true, last_pull: now - 60, last_error: null, gaps: 0, sampled_pods: 0, stopping: false } : null;
       if (cmd === 'choose_trace_to_open') return params.get('cancel') ? null : '/Users/me/Documents/shared-acme-uat.trace';
@@ -149,6 +177,19 @@
       ev('pointerdown', 0.5); ev('pointermove', 0.7); ev('pointerup', 0.7);
     }, 700);
   }
+  if (params.get('check')) for (const name of params.get('check').split(',')) {
+    step(() => [...document.querySelectorAll('.review-table tbody tr')].find((r) => r.querySelector('.review-name')?.textContent === name)?.querySelector('.pick input')?.click());
+  }
+  if (params.get('applysel')) step(() => [...document.querySelectorAll('button')].find((b) => b.textContent.startsWith('Apply selected'))?.click());
+  if (params.get('apply')) step(() => button('Apply…', document.querySelector('.review-detail') || document)?.click(), 700);
+  if (params.get('unlock')) {
+    step(() => button('Allow changes…')?.click(), 1200);
+    step(() => { const i = document.querySelector('.confirm-input'); if (i) { i.value = ctxName; i.dispatchEvent(new Event('input', { bubbles: true })); } });
+    step(() => button('Allow changes')?.click());
+  }
+  if (params.get('copy')) step(() => button('Copy values snippet')?.click(), 1200);
+  if (params.get('typed')) step(() => { const i = document.querySelector('.apply-modal .confirm-input'); if (i) { i.value = ctxName; i.dispatchEvent(new Event('input', { bubbles: true })); } }, 1200);
+  if (params.get('go')) step(() => document.querySelector('.apply-modal .danger')?.click(), 1200);
   if (params.get('heat') === 'mem') step(() => button('Memory peak', document.querySelector('.review-detail') || document)?.click());
   if (params.get('back')) step(() => button('← Traces')?.click());
   setTimeout(() => {
@@ -157,6 +198,8 @@
     const range = [...document.querySelectorAll('.range-row .toggle.on')].map((b) => b.textContent).join('|') || 'none';
     const heat = document.querySelectorAll('.heat-cell[class*=" l"]').length;
     document.title = `sent=${sent.join(',')} rows=${order || 'none'} detail=${detail} range=${range} heat=${heat}`
-      + ` page=${document.querySelector('.traces-page h1')?.textContent || 'none'}`;
+      + ` page=${document.querySelector('.traces-page h1')?.textContent || 'none'}`
+      + ` dialogs=${[...document.querySelectorAll('.modal h2')].map((h) => h.textContent.trim()).join('|') || 'none'}`
+      + ` applybtn=${document.querySelector('.apply-modal .danger')?.disabled === false ? 'on' : 'off'} copied=${copied ? 'yes' : 'no'}`;
   }, t + 1500);
 })();

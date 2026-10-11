@@ -14,6 +14,7 @@ mod namespace;
 mod overview;
 mod pod_detail;
 mod prefs;
+mod rightsize;
 mod tauri;
 mod trace;
 mod trace_chart;

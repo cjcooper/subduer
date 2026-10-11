@@ -1290,6 +1290,68 @@ pub struct TraceDay {
     pub mem: Vec<Option<f64>>,
 }
 
+/// New requests for some containers of one workload, applied as one patch
+/// (so the workload rolls out once).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RightsizeChange {
+    /// Deployment, StatefulSet, DaemonSet or CronJob.
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    pub containers: Vec<ContainerRequests>,
+}
+
+/// CPU in millicores, memory in bytes; `None` leaves that request alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerRequests {
+    pub container: String,
+    pub cpu_request: Option<f64>,
+    pub mem_request: Option<f64>,
+}
+
+/// What applying a change would do, checked by a server dry run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RightsizePreview {
+    pub change: RightsizeChange,
+    /// The Helm release that owns the workload: its next upgrade puts the
+    /// old values back unless the chart's values change too.
+    pub helm_release: Option<String>,
+    /// For Helm-managed workloads: `resources:` blocks to put in the chart's values.
+    pub helm_snippet: Option<String>,
+    pub containers: Vec<ContainerPreview>,
+    /// Why it can't be applied (unsupported kind, nothing to change, …).
+    pub blocked: Option<String>,
+    /// The server's answer to the dry run when it refused the patch.
+    pub dry_run_error: Option<String>,
+    /// e.g. "Rolls out new pods" or "Applies from the next scheduled run".
+    pub effect: String,
+}
+
+/// One container's requests and limits before and after, as quantities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerPreview {
+    pub container: String,
+    /// Not in the workload's pod template: added by an admission webhook, so
+    /// it can't be changed here.
+    pub injected: bool,
+    pub cpu_request: QuantityChange,
+    pub cpu_limit: QuantityChange,
+    pub mem_request: QuantityChange,
+    pub mem_limit: QuantityChange,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuantityChange {
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+impl QuantityChange {
+    pub fn changed(&self) -> bool {
+        self.before != self.after
+    }
+}
+
 /// What can be traced in one namespace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceTargets {

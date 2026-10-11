@@ -19,6 +19,7 @@ pub mod overview;
 pub mod pod_details;
 pub mod quantity;
 pub mod rbac;
+pub mod rightsize;
 pub mod safety;
 pub mod storage;
 #[cfg(any(test, feature = "test-support"))]
