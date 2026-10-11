@@ -5,6 +5,8 @@ Regenerate the platform icons with:
   python3 src-tauri/icons/make_icon.py src-tauri/icons/icon.svg
   rsvg-convert -w 1024 -h 1024 src-tauri/icons/icon.svg -o src-tauri/icons/app-icon.png
   cargo tauri icon src-tauri/icons/app-icon.png -o src-tauri/icons
+  rsvg-convert -w 256 -h 256 src-tauri/icons/icon.svg -o src-tauri/icons/256x256.png
+  rsvg-convert -w 48 -h 48 src-tauri/icons/icon.svg -o src-tauri/icons/48x48.png
 
 Design: a 7-spoke helm (the Kubernetes motif) set in a control dial; the amber
 handle is the pointer and the amber arc shows how far the dial is turned.

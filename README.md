@@ -19,6 +19,7 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
 - The system's webview build packages (Tauri's prerequisites):
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
   - Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`
+  - Linux (Arch): `sudo pacman -S --needed webkit2gtk-4.1 gtk3 librsvg libsoup3 base-devel patchelf file`
   - Windows: Visual Studio Build Tools with "Desktop development with C++"; WebView2 is built into Windows 10 and 11
 - At runtime: `kubectl`-style kubeconfig access, and the `helm` CLI for Helm rollback and delete
 
