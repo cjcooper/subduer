@@ -242,7 +242,7 @@ table.resources { width: 100%; border-collapse: collapse; }
 .badge-running, .badge-ready, .badge-succeeded, .badge-completed, .badge-deployed { color: var(--ok); }
 .badge-superseded, .badge-uninstalled { color: var(--muted); }
 .badge-pending-install, .badge-pending-upgrade, .badge-pending-rollback, .badge-uninstalling { background: var(--warn-bg); color: var(--warn-text); }
-.badge-pending, .badge-containercreating, .badge-terminating, .badge-completed-oom { background: var(--warn-bg); color: var(--warn-text); }
+.badge-pending, .badge-containercreating, .badge-terminating, .badge-completed-oom, .badge-cordoned { background: var(--warn-bg); color: var(--warn-text); }
 .badge-available { color: var(--ok); }
 .badge-rolling-out { background: var(--warn-bg); color: var(--warn-text); }
 .badge-degraded { background: var(--danger-soft); color: var(--danger); }

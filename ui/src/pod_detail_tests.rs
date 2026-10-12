@@ -109,3 +109,15 @@ fn usage_header_without_numbers() {
     let u = usage(None, None, Some(5.0), Some(0.0));
     assert_eq!(usage_header(u, fmt_cpu), "now 5.0m · req not set · limit unlimited (node 0m)");
 }
+
+#[test]
+fn node_header_shares_of_allocatable() {
+    let cpu = |c: f64| format!("{c:.0}m");
+    let t = ResourceTotals { capacity: 2000.0, allocatable: 1930.0, requests: 1750.0, limits: 0.0, used: Some(123.0) };
+    assert_eq!(node_header(Some(123.0), t, cpu), "⚠ now 123m (6%) · req 1750m (91%) · limits none · allocatable 1930m");
+    let t = ResourceTotals { requests: 500.0, limits: 900.0, ..t };
+    assert_eq!(node_header(Some(5.0), t, cpu), "now 5m (<1%) · req 500m (26%) · limits 900m · allocatable 1930m");
+    assert_eq!(node_header(None, t, cpu), "now — · req 500m (26%) · limits 900m · allocatable 1930m");
+    let t = ResourceTotals { allocatable: 0.0, ..t };
+    assert_eq!(node_header(Some(5.0), t, cpu), "now 5m · req 500m · limits 900m · allocatable 0m");
+}

@@ -48,6 +48,7 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
             crate::storage::related(client, key, ns, name, &v, &mut d).await?;
             crate::rbac::related(client, key, ns, name, &v, &mut d).await?;
             crate::namespace::related(client, key, name, &mut d).await?;
+            crate::node::related(client, key, name, &v, &mut d).await?;
         }
     }
     if let Some(ns) = namespace {
@@ -83,6 +84,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
         data: None,
         sections: Vec::new(),
         events: Vec::new(),
+        node: None,
     };
     match key {
         "core/ConfigMap" => config_map(&mut d, v),
@@ -103,6 +105,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
             crate::storage::describe(key, &mut d, v);
             crate::rbac::describe(key, &mut d, v);
             crate::namespace::describe(key, &mut d, v);
+            crate::node::describe(key, &mut d, v);
         }
     }
     // Owner rows last, like workloads.

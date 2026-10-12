@@ -54,6 +54,31 @@ pub(crate) fn node_total(summary: &Value) -> (f64, f64) {
         .fold((0.0, 0.0), |(cpu, mem), (c, m)| (cpu + c, mem + m))
 }
 
+/// A metrics-server (`metrics.k8s.io/v1beta1`) path, e.g. `nodes/n1` or
+/// `namespaces/shop/pods`, read raw. Without metrics-server the API server
+/// answers the unknown group with a plain-text 404, which kube's own error
+/// handling logs as a warning on every refresh; this just says `None` for
+/// anything but success.
+pub(crate) async fn metrics_get(client: &Client, path: &str, label_selector: Option<&str>) -> Option<Value> {
+    let mut uri = format!("/apis/metrics.k8s.io/v1beta1/{path}");
+    if let Some(selector) = label_selector {
+        uri.push_str("?labelSelector=");
+        uri.extend(form_urlencoded::byte_serialize(selector.as_bytes()));
+    }
+    let request = http::Request::get(uri).body(kube::client::Body::empty()).ok()?;
+    let response = client.send(request).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.into_body().collect_bytes().await.ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// The items of a metrics-server list.
+pub(crate) fn metrics_items(list: &Value) -> &[Value] {
+    list["items"].as_array().map_or(&[], Vec::as_slice)
+}
+
 /// Node → (cpu, memory) totals for the given nodes, a few requests at a time.
 /// Nodes whose stats can't be read are left out.
 pub(crate) async fn kubelet_node_usage(client: &Client, nodes: Vec<String>) -> HashMap<String, (f64, f64)> {

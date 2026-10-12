@@ -216,6 +216,7 @@ fn object(kind: &str, name: &str, info: Vec<InfoRow>, sections: Vec<InfoSection>
         data: None,
         sections,
         events: vec![],
+        node: None,
     }
 }
 

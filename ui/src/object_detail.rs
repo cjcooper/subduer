@@ -11,7 +11,8 @@ use subduer_types::{
 };
 
 use crate::app::{Store, format_age};
-use crate::pod_detail::{EventList, SecretValue, Section};
+use crate::overview::Meter;
+use crate::pod_detail::{EventList, HistoryNote, NodeUsageChart, Resource, SecretValue, Section};
 use crate::tauri::invoke;
 use crate::workload::SaveData;
 use crate::workload_detail::{ConditionList, badge_class, healthy, relative};
@@ -30,6 +31,9 @@ pub fn load(store: Store, quiet: bool) {
     }
     let Some(kind) = store.kind.get_untracked() else { return };
     let Some(row) = store.selected.get_untracked() else { return };
+    if kind.key() == "core/Node" {
+        crate::pod_detail::load_history(store, quiet, "node_history", None);
+    }
     if store.pod_loading.get_untracked() {
         return;
     }
@@ -81,7 +85,8 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
         .collect_view();
     // A namespace's own list is the recent warnings from anything in it.
     let in_namespace = d.kind == "Namespace";
-    let events = (d.namespace.is_some() || in_namespace).then(|| {
+    // Nodes are cluster-scoped, but their events are found in any namespace.
+    let events = (d.namespace.is_some() || in_namespace || d.kind == "Node").then(|| {
         let events = d.events.clone();
         let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
         let summary = match (events.len(), warnings) {
@@ -112,7 +117,33 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
             </Section>
         }
     });
+    // A node's CPU, memory and pods come first, charted like a pod's.
+    let resources = d.node.clone().map(|n| {
+        // Hosting with one pod per node (Fargate) is always full by design: say why the count is missing.
+        let hosting = n.one_pod_hosting.clone();
+        let (pods, capacity) = (n.pods as f64, n.pod_capacity as f64);
+        let summary = match &n.one_pod_hosting {
+            None => format!("{} of {} pods", n.pods, n.pod_capacity),
+            Some(h) => h.clone(),
+        };
+        view! {
+            <Section store=store id="resources" title="Resources".to_owned() summary=summary>
+                <NodeUsageChart store=store resource=Resource::Cpu totals=n.cpu />
+                <NodeUsageChart store=store resource=Resource::Memory totals=n.memory />
+                {hosting.is_none().then(|| view! {
+                    <div class="node-pods-meter">
+                        <Meter label="Pods" value=pods total=capacity fmt=|v| format!("{v:.0}") />
+                    </div>
+                })}
+                {hosting.clone().map(|h| view! {
+                    <p class="legend small">{format!("Pod count not shown: {h} runs one pod per node, so the node is always full by design.")}</p>
+                })}
+                <HistoryNote store=store subject="this node" />
+            </Section>
+        }
+    });
     view! {
+        {resources}
         <Section store=store id=kind_id title=d.kind.clone() summary=status>
             <KindInfo store=store d=d.clone() />
         </Section>

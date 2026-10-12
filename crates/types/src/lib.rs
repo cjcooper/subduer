@@ -538,8 +538,24 @@ pub struct ObjectDetails {
     pub data: Option<DataSet>,
     /// Further sections after the kind's own one.
     pub sections: Vec<InfoSection>,
-    /// Newest first; only for namespaced objects.
+    /// Newest first; only for namespaced objects (and Namespaces and Nodes).
     pub events: Vec<EventSummary>,
+    /// A Node's CPU, memory and pods, charted at the top like a pod's.
+    #[serde(default)]
+    pub node: Option<NodeResources>,
+}
+
+/// What a node's pods request and use against what it can hold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeResources {
+    pub cpu: ResourceTotals,
+    pub memory: ResourceTotals,
+    pub pods: usize,
+    pub pod_capacity: u64,
+    /// Hosting that runs one pod per node by design, e.g. `AWS Fargate`: the
+    /// node is always "full", so its pod count isn't shown.
+    #[serde(default)]
+    pub one_pod_hosting: Option<String>,
 }
 
 /// Another object, opened in its own list when clicked.
@@ -670,7 +686,8 @@ pub struct DataChange {
 /// A Secret's values for editing; `None` for binary values.
 pub type SecretValues = Vec<(String, Option<String>)>;
 
-/// Config, Network, Storage and Access Control kinds with an [`ObjectDetails`] Details tab.
+/// Config, Network, Storage and Access Control kinds, Namespaces and Nodes
+/// with an [`ObjectDetails`] Details tab.
 pub fn has_object_details(kind: &KindRef) -> bool {
     matches!(
         kind.key().as_str(),
@@ -707,6 +724,7 @@ pub fn has_object_details(kind: &KindRef) -> bool {
             | "rbac.authorization.k8s.io/ClusterRoleBinding"
             | "helm.sh/Release"
             | "core/Namespace"
+            | "core/Node"
     )
 }
 

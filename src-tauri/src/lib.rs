@@ -119,6 +119,7 @@ pub fn run() {
             commands::get_replicas,
             commands::workload_details,
             commands::workload_history,
+            commands::node_history,
             commands::restart_workload,
             commands::scale_workload,
             commands::suspend_workload,

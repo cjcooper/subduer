@@ -182,6 +182,22 @@ SCENARIOS = [
     S("ns/create-after-unlock", "nsstub.js", "new=1&locked=1&name=team-sandbox&go=1", has=["create_namespace"]),
     S("ns/contents-link", "nsstub.js", "link=1", has=["list=Deployment ns=shop"]),
     S("ns/filter", "nsstub.js", "filter=1", has=["ns-menu=shop"]),
+    # ---- Nodes (nodestub.js): Details tab, the pods on it, click-through to a pod ----
+    S("node/details", "nodestub.js", "",
+      has=["object_details Node node-a", "node_history node-a", "Details", "Resources", "3 of 29 pods", "req 1.8 cores (91%)",
+           "allocatable 1.9 cores", "Last hour from Prometheus", "3 pods · 1 not ready", "proxy-1", "api-2",
+           "CrashLoopBackOff", "Internal IP", "dedicated=batch:NoSchedule", "Events", "NodeNotReady"],
+      lacks=["with namespace", "Capacity"]),
+    # Resources comes first, before the node's own section.
+    S("node/resources-first", "nodestub.js", "", has=["re:Resources.*Node\\s+Ready.*Status"]),
+    # Fargate: one pod per node by design, so no pod count, and a note saying why.
+    S("node/fargate", "nodestub.js", "fargate=1",
+      has=["Pod count not shown: AWS Fargate runs one pod per node", "re:Resources\\s+AWS Fargate"], lacks=["1 of 1 pods", "re:Pods\\s+1 · 100%"]),
+    S("node/local-history", "nodestub.js", "local=1", has=["the app records usage itself"]),
+    S("node/cordoned", "nodestub.js", "cordoned=1", has=["Cordoned", "no new pods are placed here"]),
+    S("node/not-ready", "nodestub.js", "notready=1", has=["NotReady", "unhealthy"]),
+    S("node/pod-link", "nodestub.js", "link=1", has=["list=Pod", "pod_details shop/api-2"]),
+    S("node/details-dark", "nodestub.js", "", scheme=DARK, has=["Resources", "api-2"]),
     # ---- Traces ----
     S("trace/button-idle", "tracestub.js", "", has=["Trace…", "indicator=none"]),
     S("trace/start-dialog", "tracestub.js", "open=1", has=["dialogs=Start a trace", "Whole cluster", "Every pod in acme-uat"]),

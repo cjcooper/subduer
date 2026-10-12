@@ -4,8 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use k8s_openapi::api::core::v1::{Event, Node, Pod, PodSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::{Api, DynamicObject, ListParams};
-use kube::discovery::ApiResource;
+use kube::api::{Api, ListParams};
 use kube::{Client, ResourceExt};
 
 use crate::Result;
@@ -129,7 +128,7 @@ pub async fn cluster_overview(client: &Client, history: &HistoryStore) -> Result
     })
 }
 
-fn node_summary(node: &Node, pods: usize, res: PodResources, used: Option<(f64, f64)>) -> NodeSummary {
+pub(crate) fn node_summary(node: &Node, pods: usize, res: PodResources, used: Option<(f64, f64)>) -> NodeSummary {
     let status = node.status.as_ref();
     let capacity = status.and_then(|s| s.capacity.as_ref());
     let allocatable = status.and_then(|s| s.allocatable.as_ref());
@@ -236,23 +235,15 @@ fn add(a: PodResources, b: PodResources) -> PodResources {
 /// Node name → (cpu millicores, memory bytes) from metrics-server, or `None`
 /// if it isn't installed or readable.
 async fn node_usage(client: &Client) -> Option<HashMap<String, (f64, f64)>> {
-    let ar = ApiResource {
-        group: "metrics.k8s.io".into(),
-        version: "v1beta1".into(),
-        api_version: "metrics.k8s.io/v1beta1".into(),
-        kind: "NodeMetrics".into(),
-        plural: "nodes".into(),
-    };
-    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-    let list = api.list(&ListParams::default()).await.ok()?;
+    let list = crate::usage::metrics_get(client, "nodes", None).await?;
     Some(
-        list.items
+        crate::usage::metrics_items(&list)
             .iter()
             .map(|m| {
-                let usage = &m.data["usage"];
+                let usage = &m["usage"];
                 let cpu = usage["cpu"].as_str().map_or(0.0, millicores);
                 let mem = usage["memory"].as_str().map_or(0.0, bytes);
-                (m.name_any(), (cpu, mem))
+                (crate::table::text(&m["metadata"]["name"]), (cpu, mem))
             })
             .collect(),
     )

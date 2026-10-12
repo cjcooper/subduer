@@ -82,3 +82,19 @@ fn node_total_edge_cases() {
     let s = summary(json!([{"podRef": {"name": "a", "namespace": "shop"}, "containers": [container("app", 1.5e6, 7.0)]}]));
     assert_eq!(node_total(&s), (1.5, 7.0));
 }
+
+#[tokio::test]
+async fn metrics_get_reads_raw_and_says_none_without_metrics_server() {
+    use crate::testing::{list, object};
+    let api = crate::testing::MockApi::new();
+    // What the API server says for a group it doesn't serve: plain text, not a Status.
+    api.on_text("GET", "/apis/metrics.k8s.io/v1beta1/nodes", 404, "404 page not found\n");
+    assert!(metrics_get(&api.client(), "nodes", None).await.is_none());
+
+    let path = "/apis/metrics.k8s.io/v1beta1/namespaces/shop/pods";
+    api.on_query("GET", path, "labelSelector=app%3Dapi%2Ctier+in+%28web%29",
+        list("PodMetricsList", vec![object("metrics.k8s.io/v1beta1", "PodMetrics", Some("shop"), "api-1", serde_json::json!({}))]));
+    let l = metrics_get(&api.client(), "namespaces/shop/pods", Some("app=api,tier in (web)")).await.unwrap();
+    assert_eq!(metrics_items(&l).len(), 1);
+    assert!(metrics_items(&serde_json::json!({})).is_empty());
+}

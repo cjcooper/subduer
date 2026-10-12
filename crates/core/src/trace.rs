@@ -1051,10 +1051,10 @@ async fn local_usage(client: &Client, pods: &[LocalPod]) -> HashMap<(String, Str
     let mut out = HashMap::new();
     let mut metrics_server = true;
     for ns in &namespaces {
-        match crate::pod_details::pod_metrics_api(client, ns).list(&ListParams::default()).await {
-            Ok(list) => {
-                for m in &list.items {
-                    let key = (ns.to_string(), m.name_any());
+        match crate::usage::metrics_get(client, &format!("namespaces/{ns}/pods"), None).await {
+            Some(list) => {
+                for m in crate::usage::metrics_items(&list) {
+                    let key = (ns.to_string(), crate::table::text(&m["metadata"]["name"]));
                     if wanted.contains(&key)
                         && let Some(c) = crate::pod_details::metrics_containers(m)
                     {
@@ -1062,7 +1062,7 @@ async fn local_usage(client: &Client, pods: &[LocalPod]) -> HashMap<(String, Str
                     }
                 }
             }
-            Err(_) => {
+            None => {
                 metrics_server = false;
                 break;
             }

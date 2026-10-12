@@ -137,6 +137,44 @@ impl HistoryStore {
         Ok(assemble(HistorySource::Local, start, end, containers))
     }
 
+    /// A node's usage over the last hour: every container on it, summed.
+    /// From Prometheus' cAdvisor series, else recorded by the app from the
+    /// kubelet's stats or metrics-server.
+    pub async fn node_history(&self, client: &Client, name: &str) -> Result<PodHistory> {
+        let now = unix_now();
+        let end = (now / STEP_SECS).floor() * STEP_SECS;
+        let start = end - WINDOW_SECS;
+        if let Some(prom) = self.prometheus(client).await {
+            let selector = format!(r#"node="{name}",container!="",container!="POD""#);
+            let cpu = format!(
+                "sum(max by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{{{selector}}}[2m]))) * 1000"
+            );
+            let memory = format!("sum(max by (namespace, pod, container) (container_memory_working_set_bytes{{{selector}}}))");
+            let (s, e, step) = (start.to_string(), end.to_string(), STEP_SECS.to_string());
+            let range = |query: String| {
+                let (s, e, step) = (s.clone(), e.clone(), step.clone());
+                async move {
+                    let params = [("query", query.as_str()), ("start", &s), ("end", &e), ("step", &step)];
+                    prom.get(client, "query_range", &params).await
+                }
+            };
+            let (cpu, memory) = tokio::join!(range(cpu), range(memory));
+            let series = |data: Option<Value>| data.and_then(|d| single_series(&d)).unwrap_or_default();
+            let usage = UsageHistory { cpu: series(cpu), memory: series(memory) };
+            if !usage.cpu.is_empty() || !usage.memory.is_empty() {
+                let containers = vec![ContainerHistory { name: name.to_owned(), usage }];
+                return Ok(assemble(HistorySource::Prometheus, start, end, containers));
+            }
+        }
+        let usage = match crate::usage::kubelet_summary(client, name).await {
+            Some(summary) => Some(crate::usage::node_total(&summary)),
+            None => crate::node::node_metrics(client, name).await,
+        };
+        let usage = usage.map(|u| HashMap::from([(name.to_owned(), u)]));
+        let containers = self.record(&format!("Node:{name}"), now, usage);
+        Ok(assemble(HistorySource::Local, start, end, containers))
+    }
+
     /// Current usage per node from Prometheus: node → (cpu millicores, memory
     /// bytes), summed over its containers. Nodes Prometheus doesn't report are
     /// missing from the map. `None` without a usable Prometheus.

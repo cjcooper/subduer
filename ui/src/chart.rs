@@ -106,12 +106,19 @@ pub fn LineChart(
                 }
             })
             .collect_view();
+        let ref_values: Vec<f64> = d.refs.iter().map(|r| r.value).collect();
         let ref_labels = d
             .refs
             .iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
+                let style = if label_below(&ref_values, i, top) {
+                    format!("top: calc({:.2}% + 1px)", yp(r.value))
+                } else {
+                    format!("top: calc({:.2}% - 15px)", yp(r.value))
+                };
                 view! {
-                    <span class="lchart-ref-label" style=format!("top: calc({:.2}% - 15px)", yp(r.value))>
+                    <span class="lchart-ref-label" style=style>
                         {format!("{} {}", r.name, tidy(fmt(r.value)))}
                     </span>
                 }
@@ -216,6 +223,16 @@ fn tidy(s: String) -> String {
 pub fn clock(t: f64) -> String {
     let d = js_sys::Date::new(&(t * 1000.0).into());
     format!("{:02}:{:02}", d.get_hours(), d.get_minutes())
+}
+
+/// Whether reference line `i`'s label goes under its line rather than over
+/// it: when a higher line (or an equal one listed first) is so close that
+/// both labels above would overlap. Labels are about a sixth of the chart's height.
+pub(crate) fn label_below(values: &[f64], i: usize, top: f64) -> bool {
+    let close = |a: f64, b: f64| top > 0.0 && (a - b).abs() / top * (H - HEADROOM) < 17.0;
+    values.iter().enumerate().any(|(j, &v)| {
+        j != i && (v > values[i] || (v == values[i] && j < i)) && close(v, values[i])
+    })
 }
 
 #[cfg(test)]

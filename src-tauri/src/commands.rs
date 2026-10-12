@@ -169,6 +169,17 @@ pub async fn workload_history(
         .map_err(|e| e.user_message())
 }
 
+/// Last hour of a node's CPU/memory, every container on it summed; polled every 15 s.
+#[tauri::command]
+pub async fn node_history(state: State<'_, AppState>, name: String) -> CmdResult<PodHistory> {
+    let (client, history) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        (session.client.clone(), session.history.clone())
+    };
+    history.node_history(&client, &name).await.map_err(|e| e.user_message())
+}
+
 /// Deletes one object. Refused unless the current context is unlocked, and
 /// unless `context` (what the confirmation showed) is still the connected one.
 #[tauri::command]

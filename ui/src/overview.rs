@@ -332,7 +332,7 @@ fn severity(fraction: f64) -> (&'static str, &'static str) {
 }
 
 #[component]
-fn Meter(label: &'static str, value: f64, total: f64, fmt: fn(f64) -> String) -> impl IntoView {
+pub(crate) fn Meter(label: &'static str, value: f64, total: f64, fmt: fn(f64) -> String) -> impl IntoView {
     let fraction = if total > 0.0 { value / total } else { 0.0 };
     let (sev, icon) = severity(fraction);
     let over = if fraction > 1.0 { " · overcommitted" } else { "" };

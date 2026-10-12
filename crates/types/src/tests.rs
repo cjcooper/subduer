@@ -137,6 +137,7 @@ fn kind_predicates() {
         ("rbac.authorization.k8s.io", "ClusterRoleBinding"),
         ("helm.sh", "Release"),
         ("", "Namespace"),
+        ("", "Node"),
     ] {
         assert!(has_object_details(&kind(key.0, key.1)), "{key:?}");
     }

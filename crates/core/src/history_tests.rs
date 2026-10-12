@@ -324,6 +324,57 @@ async fn workload_history_missing_workload_is_an_error() {
 // --- node_usage -----------------------------------------------------------
 
 #[tokio::test]
+async fn node_history_from_prometheus() {
+    let api = MockApi::new();
+    with_prometheus(&api);
+    let range = format!("{PROM}/query_range");
+    api.on_query("GET", &range, "container_cpu_usage", matrix(vec![json!({"metric": {}, "values": [[100, "250"], [115, "NaN"]]})]));
+    api.on_query("GET", &range, "container_memory", matrix(vec![json!({"metric": {}, "values": [[100, "1048576"]]})]));
+    let h = HistoryStore::default().node_history(&api.client(), "n1").await.unwrap();
+    assert_eq!(h.source, HistorySource::Prometheus);
+    aligned(h.start, h.end, STEP_SECS);
+    assert_eq!(h.pod.cpu, vec![(100.0, 250.0)]);
+    assert_eq!(h.pod.memory, vec![(100.0, 1048576.0)]);
+    for q in queries(&api, &range) {
+        assert!(q.starts_with("sum(") && q.contains(r#"node="n1",container!="""#), "{q}");
+    }
+    assert!(api.calls_to("GET", "/api/v1/nodes/n1/proxy/stats/summary").is_empty());
+}
+
+#[tokio::test]
+async fn node_history_records_kubelet_or_metrics_server_samples() {
+    // Prometheus has no series for the node: the kubelet's stats are sampled.
+    let api = MockApi::new();
+    with_prometheus(&api);
+    api.on("GET", &format!("{PROM}/query_range"), matrix(vec![]));
+    api.on("GET", "/api/v1/nodes/n1/proxy/stats/summary", json!({"pods": [
+        {"podRef": {"name": "a", "namespace": "x"}, "containers": [
+            {"name": "app", "cpu": {"usageNanoCores": 5_000_000.0}, "memory": {"workingSetBytes": 100.0}},
+            {"name": "side", "cpu": {"usageNanoCores": 1_000_000.0}, "memory": {"workingSetBytes": 50.0}}]}]}));
+    let store = HistoryStore::default();
+    let h = store.node_history(&api.client(), "n1").await.unwrap();
+    assert_eq!(h.source, HistorySource::Local);
+    assert_eq!(h.pod.cpu.iter().map(|p| p.1).collect::<Vec<_>>(), [6.0]);
+    assert_eq!(h.pod.memory.iter().map(|p| p.1).collect::<Vec<_>>(), [150.0]);
+    let h = store.node_history(&api.client(), "n1").await.unwrap();
+    // The recorded samples (summed points can share a millisecond here).
+    assert_eq!(h.containers[0].usage.cpu.len(), 2, "samples accumulate");
+
+    // No kubelet stats: metrics-server's figure for the node.
+    let api = MockApi::new();
+    api.on("GET", "/apis/metrics.k8s.io/v1beta1/nodes/n1", object("metrics.k8s.io/v1beta1", "NodeMetrics", None, "n1", json!({
+        "usage": {"cpu": "250m", "memory": "1Ki"}})));
+    let h = HistoryStore::default().node_history(&api.client(), "n1").await.unwrap();
+    assert_eq!(h.pod.cpu.iter().map(|p| p.1).collect::<Vec<_>>(), [250.0]);
+    assert_eq!(h.pod.memory.iter().map(|p| p.1).collect::<Vec<_>>(), [1024.0]);
+
+    // Neither: an empty history, not an error.
+    let api = MockApi::new();
+    let h = HistoryStore::default().node_history(&api.client(), "n1").await.unwrap();
+    assert!(h.pod.cpu.is_empty() && h.containers.is_empty());
+}
+
+#[tokio::test]
 async fn node_usage_merges_cpu_and_memory() {
     let api = MockApi::new();
     with_prometheus(&api);

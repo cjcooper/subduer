@@ -229,9 +229,12 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
 
 /// Most conditions are good when true; these report a problem when true.
 pub(crate) fn healthy(c: &Condition) -> bool {
-    // A Namespace's conditions all describe a deletion that's stuck.
-    let bad_when_true =
-        matches!(c.type_.as_str(), "Failed" | "FailureTarget" | "ReplicaFailure") || c.type_.starts_with("Namespace");
+    // A Namespace's conditions all describe a deletion that's stuck; a Node's
+    // pressure conditions are problems too.
+    let bad_when_true = matches!(
+        c.type_.as_str(),
+        "Failed" | "FailureTarget" | "ReplicaFailure" | "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable"
+    ) || c.type_.starts_with("Namespace");
     (c.status == "True") != bad_when_true
 }
 

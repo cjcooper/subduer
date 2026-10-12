@@ -83,3 +83,16 @@ fn paths_of_nothing_is_empty() {
     assert_eq!(line, "M5.0,7.00");
     assert_eq!(area, "M5.0,100L5.0,7.00L5.0,100Z");
 }
+
+#[test]
+fn close_reference_labels_split_around_their_lines() {
+    // Requested 1.75 and allocatable 1.93 cores on a 2.5-core chart: the lower label goes under.
+    assert!(label_below(&[1750.0, 1930.0], 0, 2500.0));
+    assert!(!label_below(&[1750.0, 1930.0], 1, 2500.0));
+    // Far apart: both above.
+    assert!(!label_below(&[1.2, 7.0], 0, 8.0) && !label_below(&[1.2, 7.0], 1, 8.0));
+    // Request equal to limit: the first stays above, the second goes under.
+    assert!(!label_below(&[512.0, 512.0], 0, 600.0));
+    assert!(label_below(&[512.0, 512.0], 1, 600.0));
+    assert!(!label_below(&[100.0], 0, 0.0));
+}

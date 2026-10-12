@@ -6,8 +6,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{
-    ContainerDetails, EnvValue, EnvVar, EventSummary, ExecTarget, HistorySource, LogSource, LogTarget, PodDetails, PodHistory, Usage,
-    UsageHistory,
+    ContainerDetails, EnvValue, EnvVar, EventSummary, ExecTarget, HistorySource, LogSource, LogTarget, PodDetails, PodHistory,
+    ResourceTotals, Usage, UsageHistory,
 };
 
 use crate::app::{ContainerIcon, Store, format_age};
@@ -64,11 +64,13 @@ pub(crate) fn load_history(store: Store, quiet: bool, command: &'static str, kin
     struct Args {
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<subduer_types::KindRef>,
-        namespace: String,
+        // Not for cluster-scoped objects (nodes).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         name: String,
     }
     let Some(row) = store.selected.get_untracked() else { return };
-    let Some(namespace) = row.namespace.clone() else { return };
+    let namespace = row.namespace.clone();
     if quiet && store.history_loading.get_untracked() {
         return;
     }
@@ -267,6 +269,13 @@ impl Resource {
         }
     }
 
+    fn scale(self) -> Scale {
+        match self {
+            Self::Cpu => Scale::Decimal,
+            Self::Memory => Scale::Binary,
+        }
+    }
+
     fn series(self, h: &UsageHistory) -> &[(f64, f64)] {
         match self {
             Self::Cpu => &h.cpu,
@@ -306,6 +315,77 @@ fn usage_header(u: Usage, fmt: fn(f64) -> String) -> String {
 pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, container: Option<String>) -> impl IntoView {
     let Usage { requests, limits, used, node } = usage;
     let fmt = resource.fmt();
+    let refs = [("request", requests, true), ("limit", limits, false)];
+    let (points, data) = history_chart(store, resource, container, refs);
+    let header = move || {
+        let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(used);
+        usage_header(Usage { requests, limits, used: now, node }, fmt)
+    };
+    view! {
+        <div class=format!("usage-chart {}", resource.css())>
+            <div class="meter-row">
+                <span class="meter-label"><span class="res-dot"></span>{resource.label()}</span>
+                <span class="meter-value">{header}</span>
+            </div>
+            <LineChart label=resource.label() data=data fmt=fmt scale=resource.scale() />
+        </div>
+    }
+}
+
+/// A node's chart header: usage now and its share of allocatable, what its
+/// pods request (and that share), their limits, and allocatable.
+pub(crate) fn node_header(now: Option<f64>, t: ResourceTotals, fmt: fn(f64) -> String) -> String {
+    let share = |v: f64| if t.allocatable > 0.0 { Some(v / t.allocatable) } else { None };
+    let pct = |s: Option<f64>| match s {
+        Some(s) if s > 0.0 && s < 0.01 => " (<1%)".to_owned(),
+        Some(s) => format!(" ({:.0}%)", s * 100.0),
+        None => String::new(),
+    };
+    let (used_share, req_share) = (now.and_then(share), share(t.requests));
+    let warn = used_share.is_some_and(|s| s >= 0.75) || req_share.is_some_and(|s| s >= 0.9);
+    format!(
+        "{}now {}{} · req {}{} · limits {} · allocatable {}",
+        if warn { "⚠ " } else { "" },
+        now.map_or_else(|| "—".to_owned(), fmt),
+        pct(used_share),
+        fmt(t.requests),
+        pct(req_share),
+        if t.limits > 0.0 { fmt(t.limits) } else { "none".to_owned() },
+        fmt(t.allocatable),
+    )
+}
+
+/// Last-hour line chart for a node, with requested and allocatable lines.
+#[component]
+pub(crate) fn NodeUsageChart(store: Store, resource: Resource, totals: ResourceTotals) -> impl IntoView {
+    let fmt = resource.fmt();
+    let refs = [("requested", Some(totals.requests), true), ("allocatable", Some(totals.allocatable), false)];
+    let (points, data) = history_chart(store, resource, None, refs);
+    let header = move || {
+        let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(totals.used);
+        node_header(now, totals, fmt)
+    };
+    view! {
+        <div class=format!("usage-chart {}", resource.css())>
+            <div class="meter-row">
+                <span class="meter-label"><span class="res-dot"></span>{resource.label()}</span>
+                <span class="meter-value">{header}</span>
+            </div>
+            <LineChart label=resource.label() data=data fmt=fmt scale=resource.scale() />
+        </div>
+    }
+}
+
+type Points = Memo<Option<Vec<(f64, f64)>>>;
+
+/// The selected object's last-hour series for `resource` (the whole object
+/// with `container: None`), and the chart data with `refs` as reference lines.
+fn history_chart(
+    store: Store,
+    resource: Resource,
+    container: Option<String>,
+    refs: [(&'static str, Option<f64>, bool); 2],
+) -> (Points, Signal<Option<ChartData>>) {
     let points = Memo::new(move |_| {
         store.pod_history.with(|h| match h {
             None => None,
@@ -327,29 +407,13 @@ pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, contain
             Some(Ok(h)) => (h.start, h.end, h.step),
             _ => (0.0, 1.0, 1.0),
         });
-        let refs = [("request", requests, true), ("limit", limits, false)]
+        let refs = refs
             .into_iter()
             .filter_map(|(name, value, dashed)| Some(RefLine { name, value: value?, dashed }))
             .collect();
         Some(ChartData { start, end, step, points, refs })
     });
-    let header = move || {
-        let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(used);
-        usage_header(Usage { requests, limits, used: now, node }, fmt)
-    };
-    let scale = match resource {
-        Resource::Cpu => Scale::Decimal,
-        Resource::Memory => Scale::Binary,
-    };
-    view! {
-        <div class=format!("usage-chart {}", resource.css())>
-            <div class="meter-row">
-                <span class="meter-label"><span class="res-dot"></span>{resource.label()}</span>
-                <span class="meter-value">{header}</span>
-            </div>
-            <LineChart label=resource.label() data=data fmt=fmt scale=scale />
-        </div>
-    }
+    (points, data)
 }
 
 /// Where the charts' data comes from, and how far back it goes.

@@ -515,6 +515,7 @@ fn describe_release(
         data: None,
         sections,
         events: Vec::new(),
+        node: None,
     }
 }
 

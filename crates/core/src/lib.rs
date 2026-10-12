@@ -16,6 +16,7 @@ pub mod history;
 pub mod logs;
 pub mod namespace;
 pub mod network;
+pub mod node;
 pub mod overview;
 pub mod pod_details;
 pub mod quantity;

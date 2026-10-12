@@ -47,6 +47,7 @@ async fn reads_need_a_connection() {
     assert_eq!(commands::get_yaml(s(), deployment(), Some("shop".into()), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::workload_details(s(), deployment(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::workload_history(s(), deployment(), "shop".into(), "api".into()).await.unwrap_err(), not);
+    assert_eq!(commands::node_history(s(), "node-a".into()).await.unwrap_err(), not);
     assert_eq!(commands::get_replicas(s(), deployment(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::object_details(s(), deployment(), Some("shop".into()), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::secret_values(s(), "shop".into(), "db".into()).await.unwrap_err(), not);
@@ -408,6 +409,10 @@ async fn overview_and_workloads_come_back_from_the_api() {
     assert_eq!((details.kind.as_str(), details.status.as_str()), ("Deployment", "Available"));
     let history = commands::workload_history(app.state(), deployment(), "shop".into(), "api".into()).await.unwrap();
     assert_eq!(history.source, subduer_core::types::HistorySource::Local);
+    // No Prometheus, kubelet stats or metrics-server here: an empty local series.
+    let history = commands::node_history(app.state(), "node-a".into()).await.unwrap();
+    assert_eq!(history.source, subduer_core::types::HistorySource::Local);
+    assert!(history.pod.cpu.is_empty());
     let err = commands::workload_details(app.state(), deployment(), "shop".into(), "gone".into()).await.unwrap_err();
     assert!(!err.is_empty());
 }

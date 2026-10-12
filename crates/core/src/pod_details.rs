@@ -5,8 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use futures::future::join_all;
 use k8s_openapi::api::core::v1::{ConfigMap, Container, EnvFromSource, Event, Node, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::{Api, DynamicObject, ListParams};
-use kube::discovery::ApiResource;
+use kube::api::{Api, ListParams};
 use kube::{Client, ResourceExt};
 use serde_json::Value;
 
@@ -393,9 +392,9 @@ pub(crate) async fn pod_usage(
 /// CPU (millicores) and memory (bytes) in use by every pod in a namespace,
 /// from metrics-server. `None` without metrics-server.
 pub(crate) async fn namespace_usage(client: &Client, namespace: &str) -> Option<(f64, f64)> {
-    let list = pod_metrics_api(client, namespace).list(&ListParams::default()).await.ok()?;
+    let list = crate::usage::metrics_get(client, &format!("namespaces/{namespace}/pods"), None).await?;
     Some(
-        list.items
+        crate::usage::metrics_items(&list)
             .iter()
             .filter_map(metrics_containers)
             .flat_map(|c| c.into_values())
@@ -403,20 +402,10 @@ pub(crate) async fn namespace_usage(client: &Client, namespace: &str) -> Option<
     )
 }
 
-pub(crate) fn pod_metrics_api(client: &Client, namespace: &str) -> Api<DynamicObject> {
-    let ar = ApiResource {
-        group: "metrics.k8s.io".into(),
-        version: "v1beta1".into(),
-        api_version: "metrics.k8s.io/v1beta1".into(),
-        kind: "PodMetrics".into(),
-        plural: "pods".into(),
-    };
-    Api::namespaced_with(client.clone(), namespace, &ar)
-}
-
-pub(crate) fn metrics_containers(metrics: &DynamicObject) -> Option<HashMap<String, (f64, f64)>> {
+/// One PodMetrics' containers: name → (cpu millicores, memory bytes).
+pub(crate) fn metrics_containers(metrics: &serde_json::Value) -> Option<HashMap<String, (f64, f64)>> {
     Some(
-        metrics.data["containers"]
+        metrics["containers"]
             .as_array()?
             .iter()
             .map(|c| {
@@ -434,7 +423,7 @@ pub(crate) fn metrics_containers(metrics: &DynamicObject) -> Option<HashMap<Stri
 }
 
 async fn metrics_usage(client: &Client, namespace: &str, name: &str) -> Option<HashMap<String, (f64, f64)>> {
-    let metrics = pod_metrics_api(client, namespace).get(name).await.ok()?;
+    let metrics = crate::usage::metrics_get(client, &format!("namespaces/{namespace}/pods/{name}"), None).await?;
     metrics_containers(&metrics)
 }
 
@@ -447,12 +436,12 @@ pub(crate) async fn pods_usage(
     selector: &str,
     pods: &[(String, Option<String>)],
 ) -> Option<HashMap<String, HashMap<String, (f64, f64)>>> {
-    let lp = ListParams::default().labels(selector);
-    if let Ok(list) = pod_metrics_api(client, namespace).list(&lp).await {
+    let path = format!("namespaces/{namespace}/pods");
+    if let Some(list) = crate::usage::metrics_get(client, &path, Some(selector)).await {
         return Some(
-            list.items
+            crate::usage::metrics_items(&list)
                 .iter()
-                .filter_map(|m| Some((m.name_any(), metrics_containers(m)?)))
+                .filter_map(|m| Some((text(&m["metadata"]["name"]), metrics_containers(m)?)))
                 .collect(),
         );
     }
@@ -497,14 +486,16 @@ async fn pod_events(client: &Client, namespace: &str, name: &str, uid: Option<&s
 
 /// A namespace's events (optionally narrowed by a field selector), newest
 /// first. `keep` drops an event with `None`, or keeps it with the object
-/// label to show beside it.
+/// label to show beside it. An empty `namespace` searches all of them (a
+/// cluster-scoped object's events can be recorded in any).
 pub(crate) async fn list_events(
     client: &Client,
     namespace: &str,
     fields: Option<&str>,
     keep: impl Fn(&Event) -> Option<Option<String>>,
 ) -> Vec<EventSummary> {
-    let api: Api<Event> = Api::namespaced(client.clone(), namespace);
+    let api: Api<Event> =
+        if namespace.is_empty() { Api::all(client.clone()) } else { Api::namespaced(client.clone(), namespace) };
     let mut lp = ListParams::default();
     if let Some(fields) = fields {
         lp = lp.fields(fields);
