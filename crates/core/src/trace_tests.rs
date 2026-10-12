@@ -335,8 +335,9 @@ async fn pulls_write_rows_and_overlap() {
     ]));
     let mut cpu_req = pod.clone();
     cpu_req["resource"] = json!("cpu");
+    // State comes as the last value of each five-minute window, at the window's end.
     api.on_query("GET", &format!("{PROM}/query_range"), "kube_pod_container_resource_requests", matrix(vec![
-        json!({"metric": cpu_req, "values": points(&[(at(0), 0.1)])}),
+        json!({"metric": cpu_req, "values": points(&[(at(300), 0.1)])}),
     ]));
     api.on_query("GET", &format!("{PROM}/query"), "kube_pod_owner", vector(vec![
         json!({"metric": {"namespace": "shop", "pod": "web-7d9f-abcde", "owner_kind": "ReplicaSet", "owner_name": "web-7d9f"}, "value": [NOW, "1"]}),
@@ -355,6 +356,14 @@ async fn pulls_write_rows_and_overlap() {
     assert_eq!((param(range, "start"), param(range, "step")), ((NOW - 900).to_string(), "30".into()));
     let owners = calls.iter().find(|c| param(c, "query").contains("kube_replicaset_owner")).unwrap();
     assert!(param(owners, "query").contains(r#"{namespace="shop"}[960s]"#), "{}", param(owners, "query"));
+    // Three windows cover the 15 minutes, each evaluated at its end.
+    let state = calls.iter().find(|c| param(c, "query").contains("kube_pod_container_resource_limits")).unwrap();
+    assert!(param(state, "query").contains("(last_over_time(kube_pod_container_resource_limits{"), "{}", param(state, "query"));
+    assert!(param(state, "query").ends_with("[300s]))"), "{}", param(state, "query"));
+    assert_eq!(
+        (param(state, "start"), param(state, "end"), param(state, "step")),
+        ((NOW - 600).to_string(), NOW.to_string(), "300".into())
+    );
 
     assert_eq!(
         rows(&trace, "SELECT t, cpu_min, cpu_avg, cpu_max, mem_max, source FROM usage ORDER BY t"),

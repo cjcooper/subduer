@@ -28,8 +28,10 @@ use crate::{Error, Result};
 /// Spacing of the raw points folded into each minute: the usual scrape
 /// interval, so most points aren't repeats.
 pub const RAW_STEP_SECS: i64 = 30;
-/// Requests, limits, restarts and owners change rarely: one point a minute.
-const STATE_STEP_SECS: i64 = 60;
+/// Requests, limits, restarts and last reasons change rarely: one point per
+/// this, the last value in each window, stamped at the window's start (so a
+/// change is timed to within this, and a pod's first minutes have a value).
+const STATE_STEP_SECS: i64 = 300;
 /// How often Prometheus may be pulled (the Start dialog's choices); half its
 /// retention if that's shorter.
 pub const PULL_EVERY_CHOICES: [i64; 3] = crate::types::TRACE_PULL_EVERY_CHOICES;
@@ -561,17 +563,17 @@ async fn fetch_selector(client: &Client, prom: &Prometheus, sel: &Selector, star
         "max by ({by}) (rate(container_cpu_cfs_throttled_periods_total{{{c}}}[2m])) \
          / max by ({by}) (rate(container_cpu_cfs_periods_total{{{c}}}[2m]))"
     );
-    let resources = |metric: &str| {
-        let m = matchers(&[&c, r#"resource=~"cpu|memory""#]);
-        format!("max by ({by}, resource) ({metric}{{{m}}})")
-    };
-    let requests = resources("kube_pod_container_resource_requests");
-    let limits = resources("kube_pod_container_resource_limits");
-    let restarts = format!("max by ({by}) (kube_pod_container_status_restarts_total{{{c}}})");
-    let reasons = format!("max by ({by}, reason) (kube_pod_container_status_last_terminated_reason{{{c}}})");
-    let oom = format!("max by ({by}) (container_oom_events_total{{{c}}})");
-    // Owners of every pod seen in the span, not just the ones alive at its end.
-    let span = end - start + STATE_STEP_SECS;
+    // The last value in each state window, so pods that lived only part of one still show.
+    let last = |metric: &str, m: &str, extra: &str| format!("max by ({by}{extra}) (last_over_time({metric}{{{m}}}[{STATE_STEP_SECS}s]))");
+    let resource_m = matchers(&[&c, r#"resource=~"cpu|memory""#]);
+    let requests = last("kube_pod_container_resource_requests", &resource_m, ", resource");
+    let limits = last("kube_pod_container_resource_limits", &resource_m, ", resource");
+    let restarts = last("kube_pod_container_status_restarts_total", &c, "");
+    let reasons = last("kube_pod_container_status_last_terminated_reason", &c, ", reason");
+    let oom = last("container_oom_events_total", &c, "");
+    // Owners of every pod seen in the span, not just the ones alive at its end;
+    // asked a minute back, as the last scrape may not be in yet.
+    let span = end - start + 60;
     let owners = |metric: &str, sel: &str, name: &str| {
         format!("max by (namespace, {name}, owner_kind, owner_name) (max_over_time({metric}{{{sel}}}[{span}s]))")
     };
@@ -580,18 +582,21 @@ async fn fetch_selector(client: &Client, prom: &Prometheus, sel: &Selector, star
     let job_owners = owners("kube_job_owner", &sel.namespaces, "job_name");
 
     let raw_end = end - RAW_STEP_SECS;
-    let state_end = end - STATE_STEP_SECS;
-    let range = |q: &String, step: i64, end: i64| query_range(client, prom, q.clone(), start, end, step);
-    let instant = |q: &String| query_instant(client, prom, q.clone(), end - STATE_STEP_SECS);
+    // State windows start at `start` and cover the span: each is evaluated at its end.
+    let windows = (end - start + STATE_STEP_SECS - 1) / STATE_STEP_SECS;
+    let (state_start, state_end) = (start + STATE_STEP_SECS, start + windows * STATE_STEP_SECS);
+    let range = |q: &String, start: i64, end: i64, step: i64| query_range(client, prom, q.clone(), start, end, step);
+    let state = |q: &String| range(q, state_start, state_end, STATE_STEP_SECS);
+    let instant = |q: &String| query_instant(client, prom, q.clone(), end - 60);
     let (cpu, memory, throttled, requests, limits, restarts, reasons, oom) = tokio::join!(
-        range(&cpu, RAW_STEP_SECS, raw_end),
-        range(&memory, RAW_STEP_SECS, raw_end),
-        range(&throttled, RAW_STEP_SECS, raw_end),
-        range(&requests, STATE_STEP_SECS, state_end),
-        range(&limits, STATE_STEP_SECS, state_end),
-        range(&restarts, STATE_STEP_SECS, state_end),
-        range(&reasons, STATE_STEP_SECS, state_end),
-        range(&oom, STATE_STEP_SECS, state_end),
+        range(&cpu, start, raw_end, RAW_STEP_SECS),
+        range(&memory, start, raw_end, RAW_STEP_SECS),
+        range(&throttled, start, raw_end, RAW_STEP_SECS),
+        state(&requests),
+        state(&limits),
+        state(&restarts),
+        state(&reasons),
+        state(&oom),
     );
     let (pod_owners, rs_owners, job_owners) = tokio::join!(instant(&pod_owners), instant(&rs_owners), instant(&job_owners));
     let (cpu, memory, throttled, requests, limits, restarts) = (cpu?, memory?, throttled?, requests?, limits?, restarts?);
@@ -620,15 +625,20 @@ async fn fetch_selector(client: &Client, prom: &Prometheus, sel: &Selector, star
         cpu: keyed(&cpu.0),
         memory: keyed(&memory.0),
         throttled: keyed(&throttled.0),
-        requests: keyed_by(&requests.0, "resource"),
-        limits: keyed_by(&limits.0, "resource"),
-        restarts: keyed(&restarts.0),
-        reasons: keyed_by(&reasons.0, "reason"),
-        oom: keyed(&oom.0),
+        requests: window_starts(keyed_by(&requests.0, "resource")),
+        limits: window_starts(keyed_by(&limits.0, "resource")),
+        restarts: window_starts(keyed(&restarts.0)),
+        reasons: window_starts(keyed_by(&reasons.0, "reason")),
+        oom: window_starts(keyed(&oom.0)),
         pod_owners: owner_map(&pod_owners.0, "pod"),
         rs_owners: owner_map(&rs_owners.0, "replicaset"),
         job_owners: owner_map(&job_owners.0, "job_name"),
     })
+}
+
+/// State points come at the end of their window; they're stored at its start.
+fn window_starts<K>(series: Vec<(K, Points)>) -> Vec<(K, Points)> {
+    series.into_iter().map(|(k, points)| (k, points.into_iter().map(|(t, v)| (t - STATE_STEP_SECS, v)).collect())).collect()
 }
 
 /// A range query's data and its response size.
