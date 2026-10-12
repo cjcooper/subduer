@@ -67,6 +67,22 @@ impl TraceRunner {
     }
 }
 
+/// Ends a trace the app is exiting under without having asked (on macOS,
+/// the Dock's Quit or logging out), so its file still gets an end. Gives up
+/// a little after the last pull's own limit; the file keeps what it has.
+pub fn stop_on_exit(runner: &TraceRunner) {
+    if !runner.is_active() {
+        return;
+    }
+    let limit = subduer_core::trace::FINAL_PULL_TIMEOUT + std::time::Duration::from_secs(5);
+    let stopped = tauri::async_runtime::block_on(tokio::time::timeout(limit, runner.stop(TraceEnd::Quit)));
+    match stopped {
+        Ok(Some(Err(e))) => tracing::warn!(error = %e, "closing the trace on exit failed"),
+        Err(_) => tracing::warn!("closing the trace on exit timed out"),
+        _ => {}
+    }
+}
+
 /// Workloads and running pods in a namespace, for the start dialog.
 #[tauri::command]
 pub async fn trace_targets(state: State<'_, AppState>, namespace: String) -> CmdResult<TraceTargets> {

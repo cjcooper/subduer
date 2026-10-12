@@ -531,6 +531,21 @@ async fn traces_start_report_and_stop() {
     let read = subduer_core::trace::read_summary(std::path::Path::new(&second)).await.unwrap();
     assert_eq!(read.end_reason, Some(TraceEnd::Quit));
 
+    // So does exiting without having asked (the Dock's Quit); with none running it returns at once.
+    let third = dir.join("third.trace").display().to_string();
+    let scope = TraceScope::Pod { namespace: "shop".into(), name: "api-1".into() };
+    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, third.clone()).await.unwrap();
+    let handle = app.handle().clone();
+    tokio::task::spawn_blocking(move || {
+        trace::stop_on_exit(&handle.state::<AppState>().traces);
+        trace::stop_on_exit(&handle.state::<AppState>().traces);
+    })
+    .await
+    .unwrap();
+    assert!(!s().must_ask());
+    let read = subduer_core::trace::read_summary(std::path::Path::new(&third)).await.unwrap();
+    assert_eq!((read.end_reason, read.unfinished), (Some(TraceEnd::Quit), false));
+
     // Review works on the file alone; this one has no usage (nothing was faked).
     let review = trace::trace_review(s(), second.clone()).await.unwrap();
     assert_eq!((review.summary.end_reason, review.rows.len()), (Some(TraceEnd::Quit), 0));

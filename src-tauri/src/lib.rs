@@ -178,13 +178,19 @@ pub fn run() {
             // Cmd+Q with unsaved edits or a running trace: ask the UI first.
             // `close_discarding` stops the trace and clears the flag before
             // exiting.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if editor::ask_dirty(app) {
-                    api.prevent_exit();
-                } else if app.state::<AppState>().must_ask() {
-                    api.prevent_exit();
-                    let _ = app.emit_to("main", UNSAVED_CLOSE, true);
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if editor::ask_dirty(app) {
+                        api.prevent_exit();
+                    } else if app.state::<AppState>().must_ask() {
+                        api.prevent_exit();
+                        let _ = app.emit_to("main", UNSAVED_CLOSE, true);
+                    }
                 }
+                // Quitting that can't be held (macOS: the Dock's Quit, logging
+                // out): still close the trace's file, with its last pull.
+                tauri::RunEvent::Exit => trace::stop_on_exit(&app.state::<AppState>().traces),
+                _ => {}
             }
         });
 }

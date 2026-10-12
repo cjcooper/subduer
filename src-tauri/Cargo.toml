@@ -18,7 +18,7 @@ subduer-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.12", features = ["image-png"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
 percent-encoding = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,7 +1,7 @@
 //! The app menu: Tauri's default, with an About item that carries the app
 //! icon and says who makes the app, a Settings… item (⌘, / Ctrl+,), a
-//! Trace… item under Window, and a Quit item on every system (⌘Q, Ctrl+Q on
-//! Linux, Exit / Alt+F4 on Windows).
+//! Trace… item under Window, and our own Quit item on every system (⌘Q,
+//! Ctrl+Q on Linux, Exit / Alt+F4 on Windows), so quitting can be held.
 //! Without an explicit icon, macOS shows a generic one whenever the binary
 //! isn't running from a bundle (`cargo tauri dev`).
 
@@ -112,6 +112,18 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 /// has no File menu, so add one with Quit (Ctrl+Q).
 #[cfg_attr(target_os = "macos", allow(unused_variables))]
 fn add_quit<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
+    // The predefined Quit sends `terminate:`, which tao ends the app on
+    // without `ExitRequested`, so nothing could hold it. Ours goes through
+    // `app.exit`, as on the other systems.
+    #[cfg(target_os = "macos")]
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let items = app_menu.items()?;
+        if let Some(MenuItemKind::Predefined(quit)) = items.last() {
+            app_menu.remove(quit)?;
+        }
+        let label = format!("Quit {}", app.package_info().name);
+        app_menu.append(&MenuItem::with_id(app, QUIT_ID, label, true, Some("Cmd+Q"))?)?;
+    }
     #[cfg(windows)]
     if let Some(MenuItemKind::Submenu(file)) = menu.items()?.into_iter().next() {
         let items = file.items()?;
