@@ -56,6 +56,6 @@ fn table_style_sums_widths_once_customised() {
     w.set("core/Pod", "Name", 200.0);
     w.set("core/Pod", "Age", 60.4);
     // Status has no width yet and gets the fallback.
-    assert_eq!(w.table_style("core/Pod", &headers), "table-layout: fixed; width: 380px");
+    assert_eq!(w.table_style("core/Pod", &headers), "table-layout: fixed; width: max(100%, 380px)");
     assert_eq!(w.table_style("nodes", &headers), "");
 }

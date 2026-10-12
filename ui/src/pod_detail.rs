@@ -513,12 +513,17 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     let forward_source = subduer_types::ForwardSource::Pod { pod: pod.clone() };
     let actions = view! {
         <div class="dsection-actions">
-            {(running && has_ports).then(|| view! {
+            <button
+                class="btn small"
+                title=format!("Open {} logs in a new window", c.name)
+                on:click=move |_| crate::logs::open(logs_target.clone(), move |e| store.error.set(Some(e)))
+            >"Logs"</button>
+            {running.then(|| view! {
                 <button
                     class="btn small"
-                    title="Forward a local port to this pod"
-                    on:click=move |_| crate::forward::request(store, forward_ns.clone(), forward_source.clone())
-                >"Forward"</button>
+                    title=format!("Open a shell in {} in a new window (needs changes allowed)", c.name)
+                    on:click=move |_| crate::exec::request(store, exec_target.clone())
+                >"Shell"</button>
             })}
             {running.then(|| view! {
                 <button
@@ -538,18 +543,13 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                     )
                 >"Download"</button>
             })}
-            {running.then(|| view! {
+            {(running && has_ports).then(|| view! {
                 <button
                     class="btn small"
-                    title=format!("Open a shell in {} in a new window (needs changes allowed)", c.name)
-                    on:click=move |_| crate::exec::request(store, exec_target.clone())
-                >"Shell"</button>
+                    title="Forward a local port to this pod"
+                    on:click=move |_| crate::forward::request(store, forward_ns.clone(), forward_source.clone())
+                >"Forward"</button>
             })}
-            <button
-                class="btn small"
-                title=format!("Open {} logs in a new window", c.name)
-                on:click=move |_| crate::logs::open(logs_target.clone(), move |e| store.error.set(Some(e)))
-            >"Logs"</button>
         </div>
     }
     .into_any();

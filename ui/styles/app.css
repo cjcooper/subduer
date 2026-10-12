@@ -275,6 +275,8 @@ table.resources { width: 100%; border-collapse: collapse; }
 .detail-header { display: flex; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .detail-title { font-weight: 600; font-size: 15px; word-break: break-all; }
 .detail-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+/* Keep Delete clear of the close box, so a slip doesn't land on it. */
+.detail-actions .btn.danger-outline + * { margin-left: 14px; }
 .close { border: none; background: none; font-size: 20px; cursor: pointer; color: var(--muted); }
 .yaml {
   flex: 1; margin: 0; padding: 12px 14px; overflow: auto;
@@ -387,6 +389,9 @@ table.resources { width: 100%; border-collapse: collapse; }
 .col-resize:active::after { background: var(--accent); }
 .resources.fixed td, .resources.fixed th { overflow: hidden; text-overflow: ellipsis; }
 .resources.fixed td.long { max-width: none; }
+/* Resized columns keep their widths; the last one takes whatever is left so the
+   table still fills the pane. */
+.resources.fixed th:last-child { width: auto !important; }
 
 /* Init:N/M is progress; Init:<error> is a failure. */
 .badge[class*="badge-init-"] { background: var(--warn-bg); color: var(--warn-text); }

@@ -87,7 +87,7 @@ impl ColumnWidths {
             .iter()
             .map(|h| self.get(table, h).unwrap_or(FALLBACK_WIDTH))
             .sum();
-        format!("table-layout: fixed; width: {total:.0}px")
+        format!("table-layout: fixed; width: max(100%, {total:.0}px)")
     }
 }
 
