@@ -123,18 +123,23 @@ fn with_extension(path: &Path) -> PathBuf {
 }
 
 /// Starts recording `scope` of `context` (which must be the connected one)
-/// into `path`, replacing any file there.
-#[tauri::command]
+/// into `path`, replacing any file there, pulling Prometheus every
+/// `pull_every` seconds (one of the Start dialog's choices).
+#[tauri::command(rename_all = "snake_case")]
 pub async fn start_trace<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
     context: String,
     scope: TraceScope,
     path: String,
+    pull_every: i64,
 ) -> CmdResult<TraceStatus> {
     let session_context = state.session.read().await.as_ref().map(|s| s.context.clone());
     if session_context.as_deref() != Some(context.as_str()) {
         return Err(format!("not connected to {context}"));
+    }
+    if !subduer_core::trace::PULL_EVERY_CHOICES.contains(&pull_every) {
+        return Err(format!("can't pull every {pull_every} s"));
     }
     let client = connected_client(&state).await?;
     let runner = &state.traces;
@@ -143,8 +148,8 @@ pub async fn start_trace<R: Runtime>(
         return Err("a trace is already running; stop it first".into());
     }
     let path = with_extension(Path::new(&path));
-    tracing::info!(%context, path = %path.display(), ?scope, "starting trace");
-    let trace = Arc::new(Trace::start(client, &context, scope, &path, true).await.map_err(err)?);
+    tracing::info!(%context, path = %path.display(), ?scope, pull_every, "starting trace");
+    let trace = Arc::new(Trace::start(client, &context, scope, &path, true, pull_every).await.map_err(err)?);
     let (stop, stopped) = oneshot::channel();
     let recording = trace.clone();
     let done = tauri::async_runtime::spawn(async move {

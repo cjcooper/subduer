@@ -1126,6 +1126,10 @@ pub enum TraceEnd {
     ConnectionLost,
 }
 
+/// How often a trace may pull from Prometheus, in seconds: the Start
+/// dialog's choices. The first is the default.
+pub const TRACE_PULL_EVERY_CHOICES: [i64; 3] = [600, 1200, 1800];
+
 /// A running trace, for the indicator. Times are unix seconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceStatus {
@@ -1146,6 +1150,10 @@ pub struct TraceStatus {
     pub sampled_pods: u32,
     /// Stop was asked for; the last pull and the file's close are under way.
     pub stopping: bool,
+    /// Seconds between pulls from Prometheus: the chosen interval, or less
+    /// when Prometheus keeps too little for it.
+    #[serde(default)]
+    pub pull_every: f64,
 }
 
 /// One row of a trace review: a container of a workload (or a bare pod).
@@ -1432,6 +1440,13 @@ pub struct TraceSummary {
     pub local_samples: u64,
     pub gaps: Vec<TraceGap>,
     pub file_bytes: u64,
+    /// Seconds between pulls; `None` in files from before it was a choice.
+    #[serde(default)]
+    pub pull_every: Option<f64>,
+    /// Response bytes of every pull from Prometheus, as received; 0 in files
+    /// from before they were counted.
+    #[serde(default)]
+    pub pulled_bytes: u64,
 }
 
 #[cfg(test)]

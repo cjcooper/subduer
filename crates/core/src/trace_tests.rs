@@ -62,7 +62,7 @@ fn queries(api: &MockApi, endpoint: &str) -> Vec<(String, String, String)> {
 
 async fn start(api: &MockApi, tag: &str, scope: TraceScope) -> (Trace, PathBuf) {
     let dir = scratch(tag);
-    let trace = Trace::start(api.client(), "acme-uat", scope, &dir.join("t.trace"), false).await.unwrap();
+    let trace = Trace::start(api.client(), "acme-uat", scope, &dir.join("t.trace"), false, DEFAULT_PULL_EVERY_SECS).await.unwrap();
     (trace, dir)
 }
 
@@ -101,6 +101,24 @@ fn durations_and_alignment() {
     }
     assert_eq!((align_down(119), align_down(120), align_down(-1)), (60, 120, -60));
     assert_eq!((align_up(61), align_up(120)), (120, 120));
+}
+
+#[test]
+fn pulls_come_as_chosen_within_half_the_retention() {
+    assert_eq!(PULL_EVERY_CHOICES.map(|c| effective_pull_every(c, 7200.0)), [600, 1200, 1800]);
+    // 40 minutes kept: 30 would risk losing data between pulls.
+    assert_eq!(effective_pull_every(1800, 2400.0), 1200);
+    assert_eq!(effective_pull_every(600, 60.0), 60);
+}
+
+#[tokio::test]
+async fn pulling_more_than_once_a_minute_is_refused() {
+    let api = MockApi::new();
+    let dir = scratch("every");
+    let err = Trace::start(api.client(), "c", TraceScope::Cluster, &dir.join("t.trace"), false, 30).await.err().unwrap();
+    assert_eq!(err.to_string(), "pull at most once a minute");
+    assert!(!dir.join("t.trace").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -294,6 +312,11 @@ async fn start_backfills_in_chunks_within_retention() {
     let s = trace.summary(true).await.unwrap();
     assert_eq!((s.prometheus.as_deref(), s.retention_secs), (Some("monitoring/prometheus-server"), Some(7200.0)));
     assert_eq!(rows(&trace, "SELECT COUNT(*) FROM pulls WHERE ok = 1"), vec![vec![json!(2)]]);
+    // Each chunk's eleven responses are counted.
+    let pulled = rows(&trace, "SELECT SUM(bytes), MIN(bytes) FROM pulls");
+    assert_eq!(pulled[0][0], json!(s.pulled_bytes));
+    assert!(pulled[0][1].as_i64().unwrap() > 11 * 20, "{pulled:?}");
+    assert_eq!(s.pull_every, Some(600.0));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -324,11 +347,12 @@ async fn pulls_write_rows_and_overlap() {
     trace.state.lock().await.covered_until = NOW - 600;
     let before = api.calls().len();
     let report = trace.pull_at(NOW).await.unwrap();
-    assert_eq!(report, PullReport { start: NOW - 900, end: NOW, series: 1 });
+    assert_eq!((report.start, report.end, report.series), (NOW - 900, NOW, 1));
+    assert_eq!(rows(&trace, "SELECT bytes FROM pulls ORDER BY rowid DESC LIMIT 1"), vec![vec![json!(report.bytes)]]);
     let calls = &api.calls()[before..];
     let range = calls.iter().find(|c| param(c, "query").contains("container_cpu_usage_seconds_total")).unwrap();
     assert!(param(range, "query").contains(r#"namespace="shop",pod=~"(web-[a-z0-9]{1,10}-[a-z0-9]{5})""#));
-    assert_eq!((param(range, "start"), param(range, "step")), ((NOW - 900).to_string(), "15".into()));
+    assert_eq!((param(range, "start"), param(range, "step")), ((NOW - 900).to_string(), "30".into()));
     let owners = calls.iter().find(|c| param(c, "query").contains("kube_replicaset_owner")).unwrap();
     assert!(param(owners, "query").contains(r#"{namespace="shop"}[960s]"#), "{}", param(owners, "query"));
 
@@ -398,7 +422,7 @@ async fn pods_prometheus_misses_are_sampled_by_the_app() {
     assert_eq!(trace.sample_local_at(NOW + 35).await.unwrap(), 1);
     // Nothing written until the minute is over.
     assert!(rows(&trace, "SELECT * FROM usage").is_empty());
-    assert_eq!(api.calls_to("GET", "/api/v1/namespaces/shop/pods").len(), 1, "the pod list is reused for two minutes");
+    assert_eq!(api.calls_to("GET", "/api/v1/namespaces/shop/pods").len(), 1, "the pod list is reused for a pull interval");
     assert_eq!(trace.sample_local_at(NOW + 65).await.unwrap(), 1);
     assert_eq!(rows(&trace, "SELECT p.name, u.t, u.cpu_avg, u.mem_max, u.source FROM usage u JOIN containers c ON c.id = u.container_id JOIN pods p ON p.id = c.pod_id"), vec![vec![
         json!("fargate-1"),
@@ -409,10 +433,13 @@ async fn pods_prometheus_misses_are_sampled_by_the_app() {
     ]]);
     assert_eq!(rows(&trace, "SELECT t, cpu_request FROM resources"), vec![vec![json!(NOW), json!(100.0)]]);
     assert_eq!(rows(&trace, "SELECT workload_kind FROM pods"), vec![vec![json!("Pod")]]);
+    // Ten minutes on (the pull interval), it's looked up again.
+    assert_eq!(trace.sample_local_at(NOW + 605).await.unwrap(), 1);
+    assert_eq!(api.calls_to("GET", "/api/v1/namespaces/shop/pods").len(), 2);
 
     // Stopping writes the unfinished minute and closes the file.
     let s = trace.finish(TraceEnd::Stopped).await.unwrap();
-    assert_eq!(s.local_samples, 2);
+    assert_eq!(s.local_samples, 3);
     assert_eq!(s.end_reason, Some(TraceEnd::Stopped));
     assert!(s.gaps.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -424,9 +451,8 @@ async fn metrics_server_is_preferred_for_the_apps_samples() {
     let dir = scratch("metrics");
     // No Prometheus at all.
     api.on("GET", "/api/v1/services", list("ServiceList", vec![]));
-    let trace = Trace::start(api.client(), "c", TraceScope::Pod { namespace: "shop".into(), name: "web-1".into() }, &dir.join("t.trace"), false)
-        .await
-        .unwrap();
+    let scope = TraceScope::Pod { namespace: "shop".into(), name: "web-1".into() };
+    let trace = Trace::start(api.client(), "c", scope, &dir.join("t.trace"), false, DEFAULT_PULL_EVERY_SECS).await.unwrap();
     assert!(!trace.has_prometheus());
     assert_eq!(trace.pull_at(NOW).await.unwrap(), PullReport::default());
     api.on("GET", "/api/v1/namespaces/shop/pods/web-1", pod("shop", "web-1", "n1", json!({})));
@@ -462,18 +488,29 @@ async fn listing_failures_keep_the_previous_pods() {
     let api = MockApi::new();
     with_prometheus(&api);
     let (trace, dir) = start(&api, "listfail", TraceScope::Workloads(vec![deploy("web")])).await;
-    // The pods list isn't faked (404): nothing to sample, no error.
+    let pods_listed = || api.calls_to("GET", "/api/v1/namespaces/shop/pods").len();
+    let local_pods = async || trace.state.lock().await.local.pods.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    // The pods list isn't faked (404): nothing to sample, no error, and not
+    // asked again until the next interval.
     assert_eq!(trace.sample_local_at(NOW).await.unwrap(), 0);
-    assert_eq!(trace.state.lock().await.local.listed_at, None);
-    // Prometheus not answering means every pod in scope is sampled.
-    api.on_error("GET", &format!("{PROM}/query"), 503, "ServiceUnavailable", "down");
+    assert_eq!(trace.state.lock().await.local.listed_at, Some(NOW));
+    trace.sample_local_at(NOW + 30).await.unwrap();
+    assert_eq!(pods_listed(), 1);
+
+    // Prometheus has none of the deployment's pods: the app samples the one in scope.
     let owned = pod("shop", "web-7d9f-abcde", "n1", json!({"metadata": {"labels": {"pod-template-hash": "7d9f"},
         "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "web-7d9f", "uid": "u", "controller": true}]}}));
     api.on("GET", "/api/v1/namespaces/shop/pods", list("PodList", vec![owned, pod("shop", "other", "n1", json!({}))]));
-    trace.sample_local_at(NOW).await.unwrap();
-    let state = trace.state.lock().await;
-    assert_eq!(state.local.pods.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["web-7d9f-abcde"]);
-    drop(state);
+    trace.sample_local_at(NOW + 600).await.unwrap();
+    assert_eq!(local_pods().await, vec!["web-7d9f-abcde"]);
+
+    // Prometheus not answering keeps that list, rather than sampling every
+    // pod, and skips listing pods it couldn't filter.
+    api.on_error("GET", &format!("{PROM}/query"), 503, "ServiceUnavailable", "down");
+    let before = pods_listed();
+    trace.sample_local_at(NOW + 1200).await.unwrap();
+    assert_eq!(local_pods().await, vec!["web-7d9f-abcde"]);
+    assert_eq!(pods_listed(), before);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -483,7 +520,7 @@ async fn status_follows_pulls_samples_and_gaps() {
     with_prometheus(&api);
     let (trace, dir) = start(&api, "status", TraceScope::Cluster).await;
     let s = trace.status();
-    assert_eq!((s.context.as_str(), s.prometheus, s.gaps, s.stopping), ("acme-uat", true, 0, false));
+    assert_eq!((s.context.as_str(), s.prometheus, s.gaps, s.stopping, s.pull_every), ("acme-uat", true, 0, false, 600.0));
     assert!(s.path.ends_with("t.trace"));
     assert!(s.last_pull.is_some() && s.last_error.is_none());
     // Backfill reaches about two hours before the start; the data runs up to now.

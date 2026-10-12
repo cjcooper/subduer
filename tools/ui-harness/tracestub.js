@@ -6,7 +6,8 @@
 //   stop=1 (Stop trace), quit=1|close=1 (the backend held quitting / closing),
 //   switch=1 (picks the other context), confirm=1 (the prompt's stop button), keep=1 (Keep tracing),
 //   this=1 (selects a pod and clicks Trace… in its panel), menu=1 (the Trace… menu item),
-//   x=1 (the dialog's × button), esc=1 (presses Escape), hang=1 (stopping never finishes).
+//   x=1 (the dialog's × button), esc=1 (presses Escape), hang=1 (stopping never finishes),
+//   every=<secs> (picks the pull interval), saved=<secs> (the interval remembered from before).
 // The title reports the trace commands sent (with args), which dialogs are open and whether the detail panel shows.
 (function () {
   const params = new URLSearchParams(location.search);
@@ -14,12 +15,16 @@
   const sent = [];
   let watches = 0;
   const now = Date.now() / 1000;
+  try {
+    if (params.get('saved')) localStorage.setItem('traces.pullEvery', params.get('saved'));
+    else localStorage.removeItem('traces.pullEvery');
+  } catch (e) { /* no storage: the default */ }
   const status = (extra) => ({
     context: 'acme-uat', path: '/Users/me/Documents/acme-uat-shop-2026-10-11-1405.trace',
     scope: { Namespaces: ['shop'] }, started: now - 2 * 3600 - 14 * 60, data_start: now - 4 * 3600, data_end: now - 120,
     prometheus: !params.get('noprom'), last_pull: params.get('noprom') ? null : now - 180,
     last_error: params.get('err') ? "Prometheus didn't answer" : null, gaps: Number(params.get('gaps') || 0),
-    sampled_pods: 1, stopping: false, ...extra,
+    sampled_pods: 1, stopping: false, pull_every: 600, ...extra,
   });
   let running = params.get('running') ? status({}) : null;
   const kinds = [{ kind: { group: '', version: 'v1', kind: 'Pod', plural: 'pods', namespaced: true }, verbs: ['list', 'watch', 'get'], category: 'Workloads' }];
@@ -54,7 +59,7 @@
       }
       if (cmd === 'choose_trace_file') return params.get('cancel') ? null : '/Users/me/Documents/' + args.suggested;
       if (cmd === 'start_trace') {
-        running = status({ scope: args.scope, path: args.path, started: now, data_start: now - 6900, data_end: now });
+        running = status({ scope: args.scope, path: args.path, started: now, data_start: now - 6900, data_end: now, pull_every: args.pull_every });
         return running;
       }
       if (cmd === 'stop_trace' || cmd === 'close_discarding') {
@@ -65,6 +70,7 @@
           path: s.path, context: s.context, scope: s.scope, started: s.started, ended: now, end_reason: args.reason,
           unfinished: false, data_start: s.data_start, data_end: now, prometheus: 'monitoring/prometheus', retention_secs: 7200,
           pods: 21, containers: 29, prometheus_samples: 6000, local_samples: 40, gaps: [], file_bytes: 150000,
+          pull_every: s.pull_every, pulled_bytes: 1572864,
         };
       }
       if (['set_unsaved', 'stop_watch', 'set_app_theme', 'reveal_trace'].includes(cmd)) return null;
@@ -100,6 +106,12 @@
   }
   const pick = params.get('pick');
   if (pick) step(() => [...document.querySelectorAll('.trace-option')].find((o) => o.textContent.includes(pick))?.querySelector('input')?.click());
+  if (params.get('every')) {
+    step(() => {
+      const select = document.querySelector('.trace-every select');
+      if (select) { select.value = params.get('every'); select.dispatchEvent(new Event('change', { bubbles: true })); }
+    });
+  }
   if (params.get('go')) step(() => modalButton('Save as and start…')?.click());
   if (params.get('panel') || params.get('stop')) step(() => document.querySelector('.trace-indicator')?.click());
   if (params.get('stop')) step(() => modalButton('Stop trace')?.click());

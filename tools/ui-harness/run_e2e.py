@@ -174,6 +174,12 @@ SCENARIOS = [
     S("trace/start-escape-closes", "tracestub.js", "open=1&esc=1", has=["dialogs=none"]),
     S("trace/panel-x-closes", "tracestub.js", "running=1&panel=1&x=1", has=["dialogs=none", "indicator=Trace"], lacks=["stop_trace"]),
     S("trace/saved-escape-closes", "tracestub.js", "running=1&stop=1&esc=1", has=["dialogs=none", "stop_trace"]),
+    # How often to pull: 10 min unless chosen; the last choice is remembered.
+    S("trace/pull-every-default", "tracestub.js", "open=1&go=1", has=['"pull_every":600']),
+    S("trace/pull-every-chosen", "tracestub.js", "open=1&every=1800&go=1&panel=1", has=['"pull_every":1800', "Every 30 min"]),
+    S("trace/pull-every-remembered", "tracestub.js", "open=1&saved=1200&go=1", has=['"pull_every":1200']),
+    S("trace/pull-every-unknown-saved", "tracestub.js", "open=1&saved=300&go=1", has=['"pull_every":600']),
+    S("trace/saved-shows-pulled", "tracestub.js", "running=1&stop=1", has=["Pulled", "1.5 MiB from Prometheus"]),
     # ---- Trace review (reviewstub.js) ----
     S("review/empty-page", "reviewstub.js", "page=1", has=["page=Traces", "No traces yet", "Open trace…"]),
     S("review/recent-and-running", "reviewstub.js", "page=1&recent=1&running=1",

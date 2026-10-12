@@ -494,22 +494,27 @@ async fn traces_start_report_and_stop() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("shop").display().to_string();
     let scope = TraceScope::Namespaces(vec!["shop".into()]);
+    const EVERY: i64 = subduer_core::trace::DEFAULT_PULL_EVERY_SECS;
 
     let targets = trace::trace_targets(s(), "shop".into()).await.unwrap();
     assert_eq!(targets.workloads.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), vec!["once"]);
     assert_eq!(targets.pods, vec!["api-1"]);
 
     // Only the connected context.
-    let other = trace::start_trace(app.handle().clone(), s(), "acme-prd".into(), scope.clone(), file.clone());
+    let other = trace::start_trace(app.handle().clone(), s(), "acme-prd".into(), scope.clone(), file.clone(), EVERY);
     assert_eq!(other.await.unwrap_err(), "not connected to acme-prd");
+    // Only the Start dialog's intervals.
+    let often = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope.clone(), file.clone(), 300);
+    assert_eq!(often.await.unwrap_err(), "can't pull every 300 s");
     assert_eq!(trace::trace_status(s()).await.unwrap(), None);
     assert!(!s().must_ask());
 
-    let status = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope.clone(), file.clone()).await.unwrap();
+    let status = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope.clone(), file.clone(), 1800).await.unwrap();
     assert_eq!(status.path, format!("{file}.trace"));
-    assert_eq!((status.context.as_str(), status.prometheus, status.stopping), (CTX, false, false));
+    // No Prometheus here; the hour of retention assumed still allows 30 minutes.
+    assert_eq!((status.context.as_str(), status.prometheus, status.stopping, status.pull_every), (CTX, false, false, 1800.0));
     assert!(s().must_ask(), "closing and quitting ask while a trace runs");
-    let again = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, file.clone());
+    let again = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, file.clone(), EVERY);
     assert!(again.await.unwrap_err().contains("already running"));
     assert_eq!(trace::trace_status(s()).await.unwrap().unwrap().path, status.path);
     // Only files this app recorded can be revealed.
@@ -525,7 +530,7 @@ async fn traces_start_report_and_stop() {
     // Quitting stops a running trace, with Quit as the reason.
     let scope = TraceScope::Pod { namespace: "shop".into(), name: "api-1".into() };
     let second = dir.join("second.trace").display().to_string();
-    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, second.clone()).await.unwrap();
+    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, second.clone(), EVERY).await.unwrap();
     commands::close_discarding(app.handle().clone(), s(), false).await.unwrap();
     assert!(!s().must_ask());
     let read = subduer_core::trace::read_summary(std::path::Path::new(&second)).await.unwrap();
@@ -534,7 +539,7 @@ async fn traces_start_report_and_stop() {
     // So does exiting without having asked (the Dock's Quit); with none running it returns at once.
     let third = dir.join("third.trace").display().to_string();
     let scope = TraceScope::Pod { namespace: "shop".into(), name: "api-1".into() };
-    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, third.clone()).await.unwrap();
+    trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, third.clone(), EVERY).await.unwrap();
     let handle = app.handle().clone();
     tokio::task::spawn_blocking(move || {
         trace::stop_on_exit(&handle.state::<AppState>().traces);

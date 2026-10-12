@@ -61,6 +61,15 @@ fn theme_from_saved_value() {
 }
 
 #[test]
+fn pull_every_from_saved_value() {
+    assert_eq!(pull_every_from(Some("1800")), 1800);
+    assert_eq!(pull_every_from(None), 600);
+    // No longer a choice, or not a number.
+    assert_eq!(pull_every_from(Some("300")), 600);
+    assert_eq!(pull_every_from(Some("soon")), 600);
+}
+
+#[test]
 fn desktop_from_user_agent() {
     assert_eq!(desktop_from("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"), Desktop::Mac);
     assert_eq!(desktop_from("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/120.0"), Desktop::Windows);

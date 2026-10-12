@@ -46,12 +46,19 @@ impl Prometheus {
     }
 
     pub(crate) async fn get(&self, client: &Client, endpoint: &str, params: &[(&str, &str)]) -> Option<Value> {
+        self.get_sized(client, endpoint, params).await.map(|(data, _)| data)
+    }
+
+    /// [`Prometheus::get`], with the response's size in bytes (as received,
+    /// after any decompression).
+    pub(crate) async fn get_sized(&self, client: &Client, endpoint: &str, params: &[(&str, &str)]) -> Option<(Value, usize)> {
         let query = form_urlencoded::Serializer::new(String::new()).extend_pairs(params).finish();
         let request = http::Request::get(format!("{}?{query}", self.api_path(endpoint)))
             .body(Vec::new())
             .ok()?;
-        let mut body: Value = client.request(request).await.ok()?;
-        (body["status"] == "success").then(|| body["data"].take())
+        let text = client.request_text(request).await.ok()?;
+        let mut body: Value = serde_json::from_str(&text).ok()?;
+        (body["status"] == "success").then(|| (body["data"].take(), text.len()))
     }
 }
 

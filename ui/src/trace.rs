@@ -347,6 +347,9 @@ fn RunningPanel(store: Store, close: Callback<()>) -> impl IntoView {
                 <dt>"Tracing"</dt><dd>{scope_text(&s.scope)}</dd>
                 <dt>"Running for"</dt><dd>{duration_text(now - s.started)}</dd>
                 <dt>"Data covers"</dt><dd>{duration_text(s.data_end - s.data_start)}</dd>
+                {(s.prometheus && s.pull_every > 0.0).then(|| view! {
+                    <dt>"Pulls"</dt><dd>{format!("Every {} min", (s.pull_every / 60.0).round())}</dd>
+                })}
                 <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
             </dl>
             <p class:warn-text=s.last_error.is_some()>{pull}</p>
@@ -382,6 +385,8 @@ fn RunningPanel(store: Store, close: Callback<()>) -> impl IntoView {
 fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
     let busy = store.trace_busy;
     let error = RwSignal::new(None::<String>);
+    // Seconds between pulls, as last chosen.
+    let every = RwSignal::new(crate::prefs::load_pull_every());
     // Workloads and pods of the listed namespace.
     let targets = RwSignal::new(None::<(String, Result<TraceTargets, String>)>);
     let draft = move || store.trace_draft.get();
@@ -430,7 +435,9 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                 context: String,
                 scope: TraceScope,
                 path: String,
+                pull_every: i64,
             }
+            let pull_every = every.get_untracked();
             let suggested = file_name(&context, &scope, &stamp_now());
             let path = match invoke::<_, Option<String>>("choose_trace_file", &Choose { suggested }).await {
                 Ok(Some(path)) => path,
@@ -444,7 +451,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                     return;
                 }
             };
-            match invoke::<_, TraceStatus>("start_trace", &Start { context, scope, path }).await {
+            match invoke::<_, TraceStatus>("start_trace", &Start { context, scope, path, pull_every }).await {
                 Ok(status) => {
                     store.trace.set(Some(status));
                     busy.set(false);
@@ -626,6 +633,22 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                 {level_choice(Level::Pod, "Pod", "A single pod")}
             </div>
             <div class="trace-targets">{targets_view}</div>
+            <div class="trace-every">
+                <label class="field">
+                    "Pull from Prometheus every"
+                    <select prop:disabled=move || busy.get() on:change=move |ev| {
+                        if let Ok(secs) = event_target_value(&ev).parse() {
+                            every.set(secs);
+                            crate::prefs::save_pull_every(secs);
+                        }
+                    }>
+                        {subduer_types::TRACE_PULL_EVERY_CHOICES.map(|secs| view! {
+                            <option value=secs.to_string() selected=move || every.get() == secs>{format!("{} min", secs / 60)}</option>
+                        }).collect_view()}
+                    </select>
+                </label>
+                <span class="muted small">"Less often asks the cluster less; stopping always pulls the rest."</span>
+            </div>
             {move || error.get().map(|e| view! { <p class="warn-text">{e}</p> })}
             <div class="modal-actions">
                 <button prop:disabled=move || busy.get() on:click=move |_| close.run(())>"Cancel"</button>
@@ -680,6 +703,9 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                             <dt>"Traced"</dt><dd>{scope_text(&s.scope)}</dd>
                             <dt>"Data covers"</dt><dd>{span}</dd>
                             <dt>"Holds"</dt><dd>{format!("{} pods, {} containers", s.pods, s.containers)}</dd>
+                            {(s.pulled_bytes > 0).then(|| view! {
+                                <dt>"Pulled"</dt><dd>{format!("{} from Prometheus", crate::overview::fmt_bytes(s.pulled_bytes as f64))}</dd>
+                            })}
                             <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
                         </dl>
                         {(gaps > 0).then(|| view! {

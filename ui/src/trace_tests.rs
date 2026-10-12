@@ -22,6 +22,7 @@ fn status() -> TraceStatus {
         gaps: 0,
         sampled_pods: 0,
         stopping: false,
+        pull_every: 600.0,
     }
 }
 

@@ -170,6 +170,25 @@ fn reveal_label_for(desktop: Desktop) -> &'static str {
     }
 }
 
+const PULL_EVERY_KEY: &str = "traces.pullEvery";
+
+/// The last pull interval chosen for a trace, in seconds.
+pub fn load_pull_every() -> i64 {
+    pull_every_from(storage().and_then(|s| s.get_item(PULL_EVERY_KEY).ok().flatten()).as_deref())
+}
+
+/// A saved interval, if it's still one of the choices; else the default.
+fn pull_every_from(saved: Option<&str>) -> i64 {
+    let choices = subduer_types::TRACE_PULL_EVERY_CHOICES;
+    saved.and_then(|s| s.parse().ok()).filter(|s| choices.contains(s)).unwrap_or(choices[0])
+}
+
+pub fn save_pull_every(secs: i64) {
+    if let Some(s) = storage() {
+        let _ = s.set_item(PULL_EVERY_KEY, &secs.to_string());
+    }
+}
+
 const RECENT_TRACES_KEY: &str = "traces.recent";
 /// Recent traces kept.
 const RECENT_TRACES: usize = 12;

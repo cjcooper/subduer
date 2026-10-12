@@ -748,6 +748,7 @@ button.link:hover { text-decoration: underline; }
 .trace-level:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 .trace-level-name { font-weight: 600; }
 .trace-targets { min-height: 120px; }
+.trace-every { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; }
 .trace-pickers { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .trace-pickers .field select { min-width: 200px; }
 .trace-filter {

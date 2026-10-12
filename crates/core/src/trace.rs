@@ -25,12 +25,15 @@ use crate::trace_file::{
 use crate::types::{KindRef, TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets, TraceWorkload};
 use crate::{Error, Result};
 
-/// Spacing of the raw points folded into each minute.
-pub const RAW_STEP_SECS: i64 = 15;
+/// Spacing of the raw points folded into each minute: the usual scrape
+/// interval, so most points aren't repeats.
+pub const RAW_STEP_SECS: i64 = 30;
 /// Requests, limits, restarts and owners change rarely: one point a minute.
 const STATE_STEP_SECS: i64 = 60;
-/// How often Prometheus is pulled, at most; half its retention if shorter.
-pub const PULL_EVERY_SECS: i64 = 600;
+/// How often Prometheus may be pulled (the Start dialog's choices); half its
+/// retention if that's shorter.
+pub const PULL_EVERY_CHOICES: [i64; 3] = crate::types::TRACE_PULL_EVERY_CHOICES;
+pub const DEFAULT_PULL_EVERY_SECS: i64 = PULL_EVERY_CHOICES[0];
 /// Each pull re-reads this much already pulled, for late scrapes.
 const OVERLAP_SECS: i64 = 300;
 /// Longest span asked for in one query, to keep responses small.
@@ -41,10 +44,9 @@ const BACKFILL_MAX_SECS: i64 = 2 * 3600;
 const RETENTION_MARGIN_SECS: i64 = 300;
 /// Without a readable retention flag.
 const DEFAULT_RETENTION_SECS: f64 = 3600.0;
-/// Pods Prometheus misses are sampled this often…
+/// Pods Prometheus misses are sampled this often; which pods those are is
+/// looked up once per pull interval.
 pub const LOCAL_EVERY_SECS: u64 = 30;
-/// …and the list of which pods those are is refreshed this often.
-const LOCAL_LIST_EVERY_SECS: i64 = 120;
 /// The last pull on stop or quit gives up after this.
 pub const FINAL_PULL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Kubelet stats requests in flight at once.
@@ -70,6 +72,8 @@ pub struct Trace {
     selectors: Vec<Selector>,
     prometheus: Option<Prometheus>,
     retention_secs: f64,
+    /// Seconds between pulls, as chosen; see [`Trace::pull_every`].
+    pull_every_secs: i64,
     file: Arc<Mutex<TraceFile>>,
     state: tokio::sync::Mutex<State>,
     /// What the indicator shows; never held across a request, so reading it
@@ -127,14 +131,27 @@ pub struct PullReport {
     pub end: i64,
     /// Containers with usage in the pull.
     pub series: usize,
+    /// Response bytes, as received.
+    pub bytes: usize,
 }
 
 impl Trace {
     /// Creates the trace file and pulls whatever Prometheus still holds
-    /// (up to two hours). A failed first pull isn't fatal; the next one
-    /// covers the same span.
-    pub async fn start(client: Client, context: &str, scope: TraceScope, path: &Path, overwrite: bool) -> Result<Trace> {
+    /// (up to two hours), then pulls every `pull_every_secs` (at least a
+    /// minute). A failed first pull isn't fatal; the next one covers the
+    /// same span.
+    pub async fn start(
+        client: Client,
+        context: &str,
+        scope: TraceScope,
+        path: &Path,
+        overwrite: bool,
+        pull_every_secs: i64,
+    ) -> Result<Trace> {
         validate(&scope)?;
+        if pull_every_secs < 60 {
+            return Err(Error::Message("pull at most once a minute".into()));
+        }
         let now = unix_now();
         let prometheus = crate::history::discover_prometheus(&client).await;
         let retention_secs = match &prometheus {
@@ -144,12 +161,14 @@ impl Trace {
         let (path, context, scope_copy) = (path.to_owned(), context.to_owned(), scope.clone());
         let (path_kept, context_kept) = (path.clone(), context.clone());
         let prom_name = prometheus.as_ref().map(|p| format!("{}/{}", p.namespace, p.service));
+        let pulls_every = effective_pull_every(pull_every_secs, retention_secs);
         let file = tokio::task::spawn_blocking(move || -> Result<TraceFile> {
             let file = TraceFile::create(&path, overwrite, &context, &scope_copy, now)?;
             if let Some(name) = prom_name {
                 file.set_meta("prometheus", &name)?;
             }
             file.set_meta("retention_secs", &retention_secs.to_string())?;
+            file.set_meta("pull_every_secs", &pulls_every.to_string())?;
             Ok(file)
         })
         .await
@@ -166,6 +185,7 @@ impl Trace {
             scope,
             prometheus,
             retention_secs,
+            pull_every_secs,
             file: Arc::new(Mutex::new(file)),
             state: tokio::sync::Mutex::new(State { covered_until, ..State::default() }),
             live: Mutex::new(Live { data_start, data_end: data_start, ..Live::default() }),
@@ -200,6 +220,7 @@ impl Trace {
             gaps: live.gaps,
             sampled_pods: live.sampled_pods,
             stopping: false,
+            pull_every: self.pull_every().as_secs_f64(),
         }
     }
 
@@ -207,10 +228,9 @@ impl Trace {
         f(&mut self.live.lock().unwrap());
     }
 
-    /// How often to pull: every ten minutes, or half the retention if that's shorter.
+    /// How often to pull: as chosen, or half the retention if that's shorter.
     pub fn pull_every(&self) -> Duration {
-        let secs = ((self.retention_secs / 2.0) as i64).clamp(60, PULL_EVERY_SECS);
-        Duration::from_secs(secs as u64)
+        Duration::from_secs(effective_pull_every(self.pull_every_secs, self.retention_secs) as u64)
     }
 
     pub async fn summary(&self, recording: bool) -> Result<TraceSummary> {
@@ -287,25 +307,27 @@ impl Trace {
             state.covered_until = floor;
         }
         let first = (state.covered_until - OVERLAP_SECS).max(floor);
-        let mut report = PullReport { start: first, end: first, series: 0 };
+        let mut report = PullReport { start: first, end: first, ..PullReport::default() };
         let mut from = first;
         while from < to {
             let end = (from + CHUNK_SECS).min(to);
             let Some(raw) = self.fetch(prom, from, end).await else {
-                self.with_file(move |f| f.log_pull(now, from, end, 0, Some("Prometheus didn't answer"))).await?;
+                self.with_file(move |f| f.log_pull(now, from, end, 0, 0, Some("Prometheus didn't answer"))).await?;
                 self.note(|l| l.last_error = Some("Prometheus didn't answer".into()));
                 return Err(Error::Message("Prometheus didn't answer".into()));
             };
             let batch = build_batch(&raw, &mut state.memory);
             let series = batch.usage.iter().map(|(k, _)| k).collect::<HashSet<_>>().len();
+            let bytes = raw.bytes;
             self.with_file(move |f| {
                 f.write(&batch)?;
-                f.log_pull(now, from, end, series, None)
+                f.log_pull(now, from, end, series, bytes, None)
             })
             .await?;
             state.covered_until = state.covered_until.max(end);
             report.end = end;
             report.series = report.series.max(series);
+            report.bytes += bytes;
             from = end;
         }
         let covered = state.covered_until;
@@ -336,12 +358,16 @@ impl Trace {
 
     async fn sample_local_at(&self, now: i64) -> Result<usize> {
         let mut state = self.state.lock().await;
-        if state.local.listed_at.is_none_or(|t| now - t >= LOCAL_LIST_EVERY_SECS) {
+        let list_every = self.pull_every().as_secs() as i64;
+        if state.local.listed_at.is_none_or(|t| now - t >= list_every) {
+            // Once per interval even when it fails, so a struggling cluster
+            // isn't asked again every sample.
+            state.local.listed_at = Some(now);
             match self.uncovered_pods(now).await {
-                Ok(pods) => {
-                    state.local.pods = pods;
-                    state.local.listed_at = Some(now);
-                }
+                Ok(Some(pods)) => state.local.pods = pods,
+                // Prometheus didn't say which pods it has: keep the last list
+                // rather than sample every pod through the kubelets.
+                Ok(None) => tracing::warn!("Prometheus didn't answer which pods it has; keeping the last list"),
                 Err(e) => tracing::warn!(error = %e, "listing pods for the trace failed"),
             }
         }
@@ -384,17 +410,18 @@ impl Trace {
     }
 
     /// Running pods in scope, less those Prometheus has reported in the last
-    /// few minutes.
-    async fn uncovered_pods(&self, now: i64) -> Result<Vec<LocalPod>> {
-        let pods = scope_pods(&self.client, &self.scope).await?;
+    /// few minutes. `None` if Prometheus didn't answer (asked first, so the
+    /// pods aren't listed for nothing).
+    async fn uncovered_pods(&self, now: i64) -> Result<Option<Vec<LocalPod>>> {
         let covered = match &self.prometheus {
-            Some(prom) => covered_pods(&self.client, prom, &self.selectors, now).await,
-            None => Some(HashSet::new()),
+            Some(prom) => match covered_pods(&self.client, prom, &self.selectors, now).await {
+                Some(covered) => covered,
+                None => return Ok(None),
+            },
+            None => HashSet::new(),
         };
-        // If Prometheus didn't answer, sample everything; its data replaces
-        // the app's when a later pull gets it.
-        let covered = covered.unwrap_or_default();
-        Ok(pods.into_iter().filter(|p| !covered.contains(&(p.namespace.clone(), p.name.clone()))).collect())
+        let pods = scope_pods(&self.client, &self.scope).await?;
+        Ok(Some(pods.into_iter().filter(|p| !covered.contains(&(p.namespace.clone(), p.name.clone()))).collect()))
     }
 
     async fn with_file<T: Send + 'static>(
@@ -478,9 +505,17 @@ fn matchers(parts: &[&str]) -> String {
     parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(",")
 }
 
+/// Seconds between pulls: as chosen (at least a minute), but no more than
+/// half the retention, so a pull always finds what the last one left.
+fn effective_pull_every(chosen: i64, retention_secs: f64) -> i64 {
+    chosen.min((retention_secs / 2.0) as i64).max(60)
+}
+
 /// Raw query results for one span.
 #[derive(Default, Debug)]
 struct Raw {
+    /// Response bytes of every query.
+    bytes: usize,
     /// Millicores, every [`RAW_STEP_SECS`].
     cpu: Vec<(ContainerKey, Points)>,
     memory: Vec<(ContainerKey, Points)>,
@@ -502,6 +537,7 @@ struct Raw {
 
 impl Raw {
     fn extend(&mut self, other: Raw) {
+        self.bytes += other.bytes;
         self.cpu.extend(other.cpu);
         self.memory.extend(other.memory);
         self.throttled.extend(other.throttled);
@@ -558,6 +594,12 @@ async fn fetch_selector(client: &Client, prom: &Prometheus, sel: &Selector, star
         range(&oom, STATE_STEP_SECS, state_end),
     );
     let (pod_owners, rs_owners, job_owners) = tokio::join!(instant(&pod_owners), instant(&rs_owners), instant(&job_owners));
+    let (cpu, memory, throttled, requests, limits, restarts) = (cpu?, memory?, throttled?, requests?, limits?, restarts?);
+    let (reasons, oom, pod_owners, rs_owners, job_owners) = (reasons?, oom?, pod_owners?, rs_owners?, job_owners?);
+    let bytes = [&cpu, &memory, &throttled, &requests, &limits, &restarts, &reasons, &oom, &pod_owners, &rs_owners, &job_owners]
+        .iter()
+        .map(|(_, n)| n)
+        .sum();
     let keyed = |data: &Value| -> Vec<(ContainerKey, Points)> {
         series(data, &POD_KEY).into_iter().map(|(l, p)| (ContainerKey::new(&l[0], &l[1], &l[2]), p)).collect()
     };
@@ -574,32 +616,34 @@ async fn fetch_selector(client: &Client, prom: &Prometheus, sel: &Selector, star
             .collect()
     };
     Some(Raw {
-        cpu: keyed(&cpu?),
-        memory: keyed(&memory?),
-        throttled: keyed(&throttled?),
-        requests: keyed_by(&requests?, "resource"),
-        limits: keyed_by(&limits?, "resource"),
-        restarts: keyed(&restarts?),
-        reasons: keyed_by(&reasons?, "reason"),
-        oom: keyed(&oom?),
-        pod_owners: owner_map(&pod_owners?, "pod"),
-        rs_owners: owner_map(&rs_owners?, "replicaset"),
-        job_owners: owner_map(&job_owners?, "job_name"),
+        bytes,
+        cpu: keyed(&cpu.0),
+        memory: keyed(&memory.0),
+        throttled: keyed(&throttled.0),
+        requests: keyed_by(&requests.0, "resource"),
+        limits: keyed_by(&limits.0, "resource"),
+        restarts: keyed(&restarts.0),
+        reasons: keyed_by(&reasons.0, "reason"),
+        oom: keyed(&oom.0),
+        pod_owners: owner_map(&pod_owners.0, "pod"),
+        rs_owners: owner_map(&rs_owners.0, "replicaset"),
+        job_owners: owner_map(&job_owners.0, "job_name"),
     })
 }
 
-async fn query_range(client: &Client, prom: &Prometheus, query: String, start: i64, end: i64, step: i64) -> Option<Value> {
+/// A range query's data and its response size.
+async fn query_range(client: &Client, prom: &Prometheus, query: String, start: i64, end: i64, step: i64) -> Option<(Value, usize)> {
     if end < start {
-        return Some(serde_json::json!({"result": []}));
+        return Some((serde_json::json!({"result": []}), 0));
     }
     let (start, end, step) = (start.to_string(), end.to_string(), step.to_string());
     let params = [("query", query.as_str()), ("start", &start), ("end", &end), ("step", &step)];
-    prom.get(client, "query_range", &params).await
+    prom.get_sized(client, "query_range", &params).await
 }
 
-async fn query_instant(client: &Client, prom: &Prometheus, query: String, time: i64) -> Option<Value> {
+async fn query_instant(client: &Client, prom: &Prometheus, query: String, time: i64) -> Option<(Value, usize)> {
     let time = time.to_string();
-    prom.get(client, "query", &[("query", query.as_str()), ("time", &time)]).await
+    prom.get_sized(client, "query", &[("query", query.as_str()), ("time", &time)]).await
 }
 
 /// Each result's `labels` values and its points; instant vectors give one
@@ -665,7 +709,7 @@ async fn covered_pods(client: &Client, prom: &Prometheus, selectors: &[Selector]
     for sel in selectors {
         let c = matchers(&[&sel.pods, r#"container!="",container!="POD""#]);
         let q = format!("count by (namespace, pod) (container_memory_working_set_bytes{{{c}}})");
-        let data = query_instant(client, prom, q, now).await?;
+        let (data, _) = query_instant(client, prom, q, now).await?;
         covered.extend(series(&data, &["namespace", "pod"]).into_iter().map(|(l, _)| (l[0].clone(), l[1].clone())));
     }
     Some(covered)

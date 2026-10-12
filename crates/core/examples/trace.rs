@@ -1,14 +1,14 @@
 //! Read-only: records a trace into a file, then prints its summary.
 //!
-//! `cargo run -p subduer-core --example trace -- <context> <scope> <file> <minutes>`
+//! `cargo run -p subduer-core --example trace -- <context> <scope> <file> <minutes> [<pull every, minutes>]`
 //! `cargo run -p subduer-core --example trace -- --summary <file>`
 //! `cargo run -p subduer-core --example trace -- --review <file> [<namespace/kind/name/container>]`
 //! `cargo run -p subduer-core --example trace -- --report <file> <out.html>` (the out file must not exist)
 //!
 //! `<scope>` is `cluster`, `ns:<a>[,<b>…]`, `<kind>:<ns>/<name>` (kind is
 //! deploy, sts, ds, job or cronjob) or `pod:<ns>/<name>`. The first pull
-//! backfills up to two hours; `<minutes>` of 0 stops right after it. The
-//! file must not exist yet.
+//! backfills up to two hours; `<minutes>` of 0 stops right after it. Pulls
+//! come every 10 minutes unless given. The file must not exist yet.
 
 use std::path::Path;
 use std::time::Duration;
@@ -45,15 +45,20 @@ async fn main() -> subduer_core::Result<()> {
         review(Path::new(file), rest.first().map(String::as_str))?;
         return Ok(());
     }
-    let [context, scope, file, minutes] = &args[..] else {
+    let [context, scope, file, minutes, rest @ ..] = &args[..] else {
         usage();
     };
     let Some(scope) = parse_scope(scope) else { usage() };
     let minutes: u64 = minutes.parse().unwrap_or_else(|_| usage());
+    let pull_every = match rest {
+        [] => trace::DEFAULT_PULL_EVERY_SECS,
+        [every] => every.parse::<i64>().unwrap_or_else(|_| usage()) * 60,
+        _ => usage(),
+    };
     let kubeconfig = contexts::load_kubeconfig()?;
     let client = contexts::client_for(&kubeconfig, context).await?;
     let started = std::time::Instant::now();
-    let trace = Trace::start(client, context, scope, Path::new(file), false).await?;
+    let trace = Trace::start(client, context, scope, Path::new(file), false, pull_every).await?;
     println!("started in {:.1}s; pulling every {:?}", started.elapsed().as_secs_f64(), trace.pull_every());
     print(&trace.summary(true).await?);
     let stop = async {
@@ -69,7 +74,7 @@ async fn main() -> subduer_core::Result<()> {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: trace <context> <cluster|ns:a,b|deploy:ns/name|sts:…|ds:…|job:…|cronjob:…|pod:ns/name> <file> <minutes>");
+    eprintln!("usage: trace <context> <cluster|ns:a,b|deploy:ns/name|sts:…|ds:…|job:…|cronjob:…|pod:ns/name> <file> <minutes> [<pull every, minutes>]");
     eprintln!("       trace --summary <file>");
     eprintln!("       trace --review <file> [<namespace/kind/name/container>]");
     eprintln!("       trace --report <file> <out.html>");
@@ -107,6 +112,8 @@ fn print(s: &TraceSummary) {
     println!("file {} ({:.1} KiB)", s.path, s.file_bytes as f64 / 1024.0);
     println!("context {} scope {:?}", s.context, s.scope);
     println!("prometheus {:?} retention {:?}s", s.prometheus, s.retention_secs);
+    let every = s.pull_every.map_or("not recorded".into(), |e| format!("{:.0} min", e / 60.0));
+    println!("pulls every {every}, {:.1} KiB pulled", s.pulled_bytes as f64 / 1024.0);
     println!("ended {:?} reason {:?} unfinished {}", s.ended, s.end_reason, s.unfinished);
     println!("data span {}", span(s.data_start, s.data_end));
     println!(

@@ -195,8 +195,8 @@ fn finish_leaves_one_file_with_the_end() {
     assert!(dir.join("a.trace-wal").exists());
     file.add_gap(100, 100, "empty, ignored").unwrap();
     file.add_gap(300, 600, "Prometheus didn't answer").unwrap();
-    file.log_pull(5, 0, 60, 1, None).unwrap();
-    file.log_pull(6, 60, 120, 0, Some("nope")).unwrap();
+    file.log_pull(5, 0, 60, 1, 4096, None).unwrap();
+    file.log_pull(6, 60, 120, 0, 0, Some("nope")).unwrap();
     file.finish(700.0, TraceEnd::Quit).unwrap();
     drop(file);
     assert!(!dir.join("a.trace-wal").exists());
@@ -206,6 +206,11 @@ fn finish_leaves_one_file_with_the_end() {
     assert_eq!(s.gaps, vec![TraceGap { start: 300.0, end: 600.0, reason: "Prometheus didn't answer".into() }]);
     let pulls: i64 = TraceFile::open(&path).unwrap().conn().query_row("SELECT COUNT(*) FROM pulls WHERE ok = 0", [], |r| r.get(0)).unwrap();
     assert_eq!(pulls, 1);
+    assert_eq!((s.pulled_bytes, s.pull_every), (4096, None));
+
+    // Files from before bytes were counted have no such column.
+    rusqlite::Connection::open(&path).unwrap().execute("ALTER TABLE pulls DROP COLUMN bytes", []).unwrap();
+    assert_eq!(TraceFile::open(&path).unwrap().summary(false).unwrap().pulled_bytes, 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

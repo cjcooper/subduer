@@ -72,7 +72,10 @@ CREATE TABLE events (
 CREATE TABLE gaps (start INTEGER NOT NULL, end INTEGER NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE pulls (
     at INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
-    ok INTEGER NOT NULL, series INTEGER NOT NULL, message TEXT
+    ok INTEGER NOT NULL, series INTEGER NOT NULL, message TEXT,
+    -- Response bytes, as received. Files from before it was counted lack
+    -- the column.
+    bytes INTEGER
 );
 ";
 
@@ -254,10 +257,10 @@ impl TraceFile {
         Ok(())
     }
 
-    pub fn log_pull(&self, at: i64, start: i64, end: i64, series: usize, error: Option<&str>) -> Result<()> {
+    pub fn log_pull(&self, at: i64, start: i64, end: i64, series: usize, bytes: usize, error: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO pulls (at, start, end, ok, series, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![at, start, end, error.is_none(), series as i64, error],
+            "INSERT INTO pulls (at, start, end, ok, series, message, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![at, start, end, error.is_none(), series as i64, error, bytes as i64],
         )?;
         Ok(())
     }
@@ -363,6 +366,8 @@ impl TraceFile {
             .filter_map(|s| std::fs::metadata(sidecar(&self.path, s)).ok())
             .map(|m| m.len())
             .sum();
+        let counts_bytes = count("SELECT COUNT(*) FROM pragma_table_info('pulls') WHERE name = 'bytes'")? > 0;
+        let pulled_bytes = if counts_bytes { count("SELECT COALESCE(SUM(bytes), 0) FROM pulls")? } else { 0 };
         Ok(TraceSummary {
             path: self.path.display().to_string(),
             context: self.meta("context")?.ok_or_else(|| missing("context"))?,
@@ -381,6 +386,8 @@ impl TraceFile {
             local_samples: count("SELECT COUNT(*) FROM usage WHERE source = 1")?,
             gaps,
             file_bytes,
+            pull_every: number("pull_every_secs")?,
+            pulled_bytes,
         })
     }
 
