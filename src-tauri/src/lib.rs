@@ -164,6 +164,7 @@ pub fn run() {
             trace::choose_trace_to_open,
             trace::trace_review,
             trace::trace_series,
+            trace::trace_overview,
             trace::trace_daily,
             trace::trace_set_note,
             trace::trace_compare,

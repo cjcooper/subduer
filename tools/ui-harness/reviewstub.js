@@ -12,6 +12,7 @@
 // Phase 5: note=<text> (adds a note on the trace), wnote=<text> (on the selected row's workload), noted=1 (the
 // file already has notes), compare=1 (ticks two recent files, then Compare 2…), cmpwith=1 (Compare with… from a
 // review), changed=1 (Requests changed only), export=1 (Export report…), exportfail=1, leave=1 (leaves while editing).
+// Overview: ovzoom=1 (drags across its CPU chart), ovtip=1 (points at it), ovhide=1 (Hide).
 // The title reports the commands sent, the table's rows in order, the selected row and what's shown.
 (function () {
   const params = new URLSearchParams(location.search);
@@ -119,7 +120,9 @@
   const kinds = [{ kind: { group: '', version: 'v1', kind: 'Pod', plural: 'pods', namespaced: true }, verbs: ['list', 'watch', 'get'], category: 'Workloads' }];
   window.__TAURI__ = {
     core: { invoke: async (cmd, args) => {
-      if (/trace|choose/.test(cmd)) sent.push(cmd + (cmd === 'trace_series' && args.start ? ':zoomed' : ''));
+      if (cmd === 'trace_overview') sent.push(`${cmd}:${args.namespace || 'all'}${args.start ? ':zoomed' : ''}`);
+      else if (cmd === 'trace_series' && /-(before|after)\.trace$/.test(args.path)) sent.push(`overlay:${args.key.name}@${args.path.match(/-(before|after)\.trace$/)[1]}`);
+      else if (/trace|choose/.test(cmd)) sent.push(cmd + (cmd === 'trace_series' && args.start ? ':zoomed' : ''));
       if (cmd.startsWith('rightsize')) sent.push(`${cmd}:${args.change.name}@${args.context}`);
       if (cmd === 'list_contexts') return { contexts: [{ name: ctxName, cluster: ctxName, namespace: null, prod_like: ctxName === 'acme-prd', unlocked }], current: ctxName };
       if (cmd === 'set_unlocked') { unlocked = args.unlocked; return null; }
@@ -168,7 +171,18 @@
           ],
         };
       }
+      // Compare's files: "before" ten days earlier with the old requests, "after" with the new.
+      if (cmd === 'trace_series' && /-(before|after)\.trace$/.test(args.path)) {
+        const o = series(args.key, args.start, args.end, args.points);
+        if (args.path.endsWith('-after.trace')) return { ...o, cpu_request: o.cpu_request.length ? [[start, 15]] : [] };
+        const by = 10 * 86400, back = (pts) => pts.map(([t, v]) => [t - by, v]);
+        return { ...o, start: o.start - by, end: o.end - by, full_start: o.full_start - by, full_end: o.full_end - by,
+          cpu_avg: back(o.cpu_avg), cpu_max: back(o.cpu_max), mem_avg: back(o.mem_avg), mem_max: back(o.mem_max), pods: back(o.pods),
+          cpu_request: o.cpu_request.length ? [[start - by, 1500]] : [], mem_request: back(o.mem_request), mem_limit: back(o.mem_limit), cpu_limit: back(o.cpu_limit), events: [], gaps: [] };
+      }
       if (cmd === 'trace_series') return series(args.key, args.start, args.end, args.points);
+      // The whole trace added up: web's shape, with no limits.
+      if (cmd === 'trace_overview') return { ...series({ name: 'web' }, args.start, args.end, args.points), cpu_limit: [], mem_limit: [] };
       if (cmd === 'trace_daily') return daily(args.key);
       if (['set_unsaved', 'stop_watch', 'set_app_theme', 'reveal_trace', 'check_connection'].includes(cmd)) return null;
       if (cmd === 'list_forwards') return [];
@@ -191,15 +205,17 @@
   if (params.get('sel')) step(() => [...document.querySelectorAll('.review-table tbody tr')].find((r) => r.querySelector('.review-name')?.textContent === params.get('sel'))?.click());
   const quick = params.get('quick');
   if (quick) step(() => button({ '1h': 'Last 1h', '6h': 'Last 6h', '24h': 'Last 24h', all: 'All' }[quick])?.click(), 700);
-  if (params.get('zoom')) {
-    step(() => {
-      const c = document.querySelector('.tchart');
-      if (!c) return;
-      const r = c.getBoundingClientRect();
-      const ev = (type, f) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: r.left + r.width * f, clientY: r.top + 40, pointerId: 1 }));
-      ev('pointerdown', 0.5); ev('pointermove', 0.7); ev('pointerup', 0.7);
-    }, 700);
-  }
+  const pointer = (sel, moves) => {
+    const c = document.querySelector(sel);
+    if (!c) return;
+    const r = c.getBoundingClientRect();
+    for (const [type, f] of moves) c.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: r.left + r.width * f, clientY: r.top + 40, pointerId: 1 }));
+  };
+  const drag = [['pointerdown', 0.5], ['pointermove', 0.7], ['pointerup', 0.7]];
+  if (params.get('zoom')) step(() => pointer('.review-detail .tchart', drag), 700);
+  if (params.get('ovzoom')) step(() => pointer('.review-overview .tchart', drag), 700);
+  if (params.get('ovtip')) step(() => pointer('.review-overview .tchart', [['pointermove', 0.25]]), 700);
+  if (params.get('ovhide')) step(() => button('Hide', document.querySelector('.review-overview'))?.click(), 700);
   if (params.get('check')) for (const name of params.get('check').split(',')) {
     step(() => [...document.querySelectorAll('.review-table tbody tr')].find((r) => r.querySelector('.review-name')?.textContent === name)?.querySelector('.pick input')?.click());
   }
@@ -235,6 +251,12 @@
     step(() => [...document.querySelectorAll('button')].find((b) => /^Compare \d/.test(b.textContent.trim()))?.click());
   }
   if (params.get('cmpwith')) step(() => button('Compare with…')?.click(), 700);
+  // Compare's overlay: cmpsel=<name> (clicks that row), cmpalign=week (Time of week), cmptip=1 (points at its CPU chart),
+  // cmpclose=1 (×).
+  if (params.get('cmpsel')) step(() => [...document.querySelectorAll('.compare-table tbody tr')].find((r) => r.querySelector('.review-name')?.textContent === params.get('cmpsel'))?.click(), 900);
+  if (params.get('cmpalign') === 'week') step(() => button('Time of week')?.click());
+  if (params.get('cmptip')) step(() => pointer('.cmp-overlay .tchart', [['pointermove', 0.8]]), 700);
+  if (params.get('cmpclose')) step(() => document.querySelector('.cmp-overlay .close')?.click());
   if (params.get('changed')) step(() => [...document.querySelectorAll('.review-filters .check input')].pop()?.click(), 900);
   if (params.get('export')) step(() => button('Export report…')?.click(), 700);
   if (params.get('heat') === 'mem') step(() => button('Memory peak', document.querySelector('.review-detail') || document)?.click());

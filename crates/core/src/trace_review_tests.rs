@@ -148,6 +148,37 @@ fn series_buckets_requests_events_and_gaps() {
 }
 
 #[test]
+fn overview_adds_up_every_container() {
+    let dir = scratch("overview");
+    let path = sample(&dir, 8 * 60);
+    let at = |m: i64| (T0 + m * 60) as f64;
+    // One-minute buckets. Before the rollout: two web pods (10m.. each) and db (500m);
+    // after: one web pod and db. The finished Job pod has no usage, so it isn't counted.
+    let all = overview(&path, None, None, None, 480).unwrap();
+    assert_eq!((all.step, all.cpu_avg.len()), (60.0, 480));
+    assert_eq!(all.cpu_avg[0], (at(0), 2.0 * 10.0 + 500.0));
+    assert_eq!(all.cpu_avg[240], (at(240), 50.0 + 500.0));
+    assert_eq!((all.mem_avg[0].1, all.mem_avg[479].1), (1150.0 * MIB, 1050.0 * MIB));
+    assert_eq!((all.pods[0].1, all.pods[479].1), (3.0, 2.0));
+    // db has no requests; web's are summed while its pods run.
+    assert_eq!(all.cpu_request, vec![(at(0), 1000.0), (at(240), 250.0)]);
+    assert_eq!(all.mem_request, vec![(at(0), 512.0 * MIB), (at(240), 256.0 * MIB)]);
+    assert!(all.cpu_limit.is_empty() && all.mem_limit.is_empty());
+    assert_eq!((all.events.len(), all.gaps.len()), (3, 1));
+
+    // Eight-minute buckets: the average of the totals, and the busiest minute.
+    let coarse = overview(&path, Some("shop"), None, None, 60).unwrap();
+    assert_eq!(coarse.step, 480.0);
+    assert_eq!(coarse.cpu_avg[0].1, 527.0);
+    assert_eq!(coarse.cpu_max[0].1, 534.0);
+    assert_eq!(coarse.pods[0].1, 3.0);
+
+    let other = overview(&path, Some("ops"), None, None, 60).unwrap_err();
+    assert_eq!(other.to_string(), "no usage in ops in this trace");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn daily_grid_by_local_hour() {
     let dir = scratch("daily");
     let path = sample(&dir, 26 * 60);

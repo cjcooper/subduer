@@ -15,8 +15,11 @@ fn report_is_one_page_with_table_charts_and_notes() {
     assert!(html.contains("namespace shop"));
     assert!(html.contains("OOMKilled ×2") && html.contains("Throttled 20%"));
     assert!(html.contains("rows using more than they request"));
-    // Both rows have suggestions, so both are charted: two charts each.
-    assert_eq!(html.matches("<figure class=\"chart").count(), 4);
+    // The overview (CPU and memory), then both rows, which have suggestions: two charts each.
+    assert_eq!(html.matches("<figure class=\"chart").count(), 6);
+    assert_eq!(html.matches("data-totals=\"1\"").count(), 2);
+    assert!(html.find("<h2>Overview</h2>").unwrap() < html.find("<h2>Right-sizing</h2>").unwrap());
+    assert!(html.contains("CPU: used up to") && html.contains("CPU: average pod up to"));
     assert!(html.contains("data-kind=\"cpu\""));
     assert!(html.contains("Times are UTC."));
     assert!(!html.contains("<script src"), "self-contained");

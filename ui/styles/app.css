@@ -26,6 +26,12 @@
   --cpu-track: #dbe6fd;
   --memory: #9333ea;
   --memory-track: #efe2fc;
+  /* Traces overlaid in Compare: categorical slots 1–3 in fixed order, which
+     pass every pair for colour-vision deficiency (aqua is under 3:1 on white,
+     so the lines are labelled and the table is the fallback). */
+  --trace-1: #2a78d6;
+  --trace-2: #eb6834;
+  --trace-3: #1baf7a;
   /* Sidebar section tints. */
   --cat-workloads: #2563eb;
   --cat-config: #b45309;
@@ -69,6 +75,9 @@
   --cpu-track: #1e3352;
   --memory: #c084fc;
   --memory-track: #352450;
+  --trace-1: #3987e5;
+  --trace-2: #d95926;
+  --trace-3: #199e70;
   --cat-workloads: #60a5fa;
   --cat-config: #fbbf24;
   --cat-network: #2dd4bf;
@@ -105,6 +114,9 @@
   --cpu-track: #1e3352;
   --memory: #c084fc;
   --memory-track: #352450;
+  --trace-1: #3987e5;
+  --trace-2: #d95926;
+  --trace-3: #199e70;
   --cat-workloads: #60a5fa;
   --cat-config: #fbbf24;
   --cat-network: #2dd4bf;
@@ -802,6 +814,13 @@ button.link:hover { text-decoration: underline; }
 .review-search { width: 220px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .review-split { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--border); }
+/* The overview sits between the filters and the table; Hide gives the table the room. */
+.review-overview { flex-shrink: 0; padding: 0 16px 12px; }
+.overview-head { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; }
+.overview-head .chart-title { margin: 0 !important; }
+.overview-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+.overview-charts .tchart { height: 120px; }
+@media (max-width: 800px) { .overview-charts { grid-template-columns: minmax(0, 1fr); } }
 .review-table-wrap { flex: 1; min-width: 0; overflow: auto; padding: 0 0 16px; }
 .review-table td { vertical-align: top; }
 .review-table td.flags { white-space: normal; min-width: 190px; }
@@ -876,6 +895,20 @@ table.figures .num { text-align: right; }
 }
 .key-mark { width: 0; border-top: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 8px solid var(--status-warning); }
 .key-mark.oom { border-bottom-color: var(--status-critical); }
+/* Compare's overlay: each trace in its own --trace colour; text stays in text colours. */
+.ochart-line { fill: none; stroke: var(--trace); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.ochart-request { fill: none; stroke: var(--trace); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.85; }
+.ochart-key { border-top: 2px solid var(--trace); }
+.ochart-end {
+  position: absolute; transform: translate(calc(-100% - 4px), -120%); pointer-events: none;
+  display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600; color: var(--text);
+}
+.ochart-end::before, .ochart-swatch {
+  content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--trace);
+}
+.ochart-swatch { margin-right: 5px; vertical-align: middle; }
+.cmp-row { cursor: pointer; }
+.cmp-overlay { padding-top: 10px; }
 
 /* By day and hour: one sequential hue per measure, five steps. */
 .heat { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }

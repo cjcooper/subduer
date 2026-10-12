@@ -49,7 +49,7 @@ impl Measure {
         }
     }
 
-    fn scale(self) -> Scale {
+    pub(crate) fn scale(self) -> Scale {
         match self {
             Self::Cpu => Scale::Decimal,
             Self::Memory => Scale::Binary,
@@ -57,7 +57,7 @@ impl Measure {
     }
 
     /// Average pod, busiest pod, request and limit.
-    fn pick(self, s: &TraceSeries) -> (&Series, &Series, &Series, &Series) {
+    pub(crate) fn pick(self, s: &TraceSeries) -> (&Series, &Series, &Series, &Series) {
         match self {
             Self::Cpu => (&s.cpu_avg, &s.cpu_max, &s.cpu_request, &s.cpu_limit),
             Self::Memory => (&s.mem_avg, &s.mem_max, &s.mem_request, &s.mem_limit),
@@ -96,7 +96,7 @@ pub(crate) fn when(t: f64, long: bool) -> String {
 }
 
 /// Line and area paths for a series, broken where buckets are missing.
-fn paths(points: &Series, step: f64, x: impl Fn(f64) -> f64, y: impl Fn(f64) -> f64, base: f64) -> (String, String) {
+pub(crate) fn paths(points: &Series, step: f64, x: impl Fn(f64) -> f64, y: impl Fn(f64) -> f64, base: f64) -> (String, String) {
     let mut line = String::new();
     let mut area = String::new();
     let mut seg: Vec<(f64, f64)> = vec![];
@@ -122,12 +122,54 @@ fn paths(points: &Series, step: f64, x: impl Fn(f64) -> f64, y: impl Fn(f64) -> 
     (line, area)
 }
 
+/// What a chart's lines stand for: one row's pods, or every container added
+/// up (a review's overview).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Names {
+    avg: &'static str,
+    peak: &'static str,
+    request: &'static str,
+    count: &'static str,
+}
+
+impl Names {
+    fn of(totals: bool) -> Self {
+        if totals {
+            Self { avg: "used", peak: "busiest minute", request: "requested", count: "containers" }
+        } else {
+            Self { avg: "average pod", peak: "busiest pod", request: "request", count: "pods" }
+        }
+    }
+}
+
+/// Requested but not used, and its share of the request; `None` when usage
+/// is at or above the request.
+pub(crate) fn idle(used: f64, requested: f64) -> Option<(f64, f64)> {
+    (requested > 0.0 && used < requested).then(|| (requested - used, (requested - used) / requested))
+}
+
+/// A share as a whole percentage, never rounded up to 100% while some is used.
+pub(crate) fn share_text(share: f64) -> String {
+    if (0.995..1.0).contains(&share) { "over 99%".into() } else { format!("{:.0}%", share * 100.0) }
+}
+
+/// Sentence case, for legends: "busiest pod" → "Busiest pod".
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
 #[component]
 pub(crate) fn TraceChart(
     #[prop(into)] series: Signal<Option<TraceSeries>>,
     measure: Measure,
     on_zoom: Callback<(f64, f64)>,
+    /// Every container added up rather than one row's pods: the lines are
+    /// named for that, and the tooltip shows what's requested but idle.
+    #[prop(optional)]
+    totals: bool,
 ) -> impl IntoView {
+    let names = Names::of(totals);
     let hover = RwSignal::new(None::<f64>);
     // Drag to zoom: where it started and where it is, as fractions of the width.
     let drag = RwSignal::new(None::<(f64, f64)>);
@@ -219,7 +261,7 @@ pub(crate) fn TraceChart(
         let ref_labels = ref_labels(request_runs.last().map(|r| r.2), limit_runs.last().map(|r| r.2), top)
             .into_iter()
             .map(|(text, v, nudge)| {
-                let text = text.replace("{}", &measure.fmt(v));
+                let text = text.replace("request", names.request).replace("{}", &measure.fmt(v));
                 view! { <span class="lchart-ref-label" style=format!("top: calc({:.2}% - {}px)", yp(v), 15 - nudge)>{text}</span> }
             })
             .collect_view();
@@ -253,16 +295,21 @@ pub(crate) fn TraceChart(
             let hx = xp(bucket + step / 2.0);
             let side = if hx > 60.0 { format!("right: {:.2}%", 100.0 - hx) } else { format!("left: {hx:.2}%") };
             let line = |name: &'static str, v: Option<f64>| v.map(|v| view! { <span class="tchart-tip-row"><span class="muted">{name}</span>" "{measure.fmt(v)}</span> });
+            let requested = step_at(&request2, bucket);
+            let idle = totals.then(|| a.zip(requested).and_then(|(a, r)| idle(a, r))).flatten().map(|(v, share)| view! {
+                <span class="tchart-tip-row"><span class="muted">"idle"</span>" "{format!("{} ({} of requested)", measure.fmt(v), share_text(share))}</span>
+            });
             Some(view! {
                 <span class="lchart-cross" style=format!("left: {hx:.2}%")></span>
                 {a.map(|a| view! { <span class="lchart-dot" style=format!("left: {hx:.2}%; top: {:.2}%", yp(a))></span> })}
                 <span class="lchart-tip tchart-tip" style=side>
                     <span class="muted">{when(bucket, true)}</span>
-                    {line("average pod", a)}
-                    {line("busiest pod", p)}
-                    {line("request", step_at(&request2, bucket))}
+                    {line(names.avg, a)}
+                    {line(names.peak, p)}
+                    {line(names.request, requested)}
+                    {idle}
                     {line("limit", step_at(&limit2, bucket))}
-                    {value(&pods).map(|n| view! { <span class="tchart-tip-row"><span class="muted">"pods"</span>" "{format!("{n:.1}").trim_end_matches(".0").to_owned()}</span> })}
+                    {value(&pods).map(|n| view! { <span class="tchart-tip-row"><span class="muted">{names.count}</span>" "{format!("{n:.1}").trim_end_matches(".0").to_owned()}</span> })}
                 </span>
             })
         };
@@ -273,11 +320,13 @@ pub(crate) fn TraceChart(
             })
         };
         let summary = format!(
-            "{} from {} to {}: average pod up to {}, busiest pod up to {}",
+            "{} from {} to {}: {} up to {}, {} up to {}",
             measure.label(),
             when(start, true),
             when(end, true),
+            names.avg,
             measure.fmt(avg.iter().map(|p| p.1).fold(0.0, f64::max)),
+            names.peak,
             measure.fmt(peak.iter().map(|p| p.1).fold(0.0, f64::max)),
         );
         let has_events = !s.events.is_empty();
@@ -319,9 +368,9 @@ pub(crate) fn TraceChart(
                     <span>{when(end, long)}</span>
                 </div>
                 <div class="tchart-legend">
-                    <span><span class="key key-avg"></span>"Average pod"</span>
-                    <span><span class="key key-peak"></span>"Busiest pod"</span>
-                    {(!request_runs.is_empty()).then(|| view! { <span><span class="key key-request"></span>"Request"</span> })}
+                    <span><span class="key key-avg"></span>{capitalised(names.avg)}</span>
+                    <span><span class="key key-peak"></span>{capitalised(names.peak)}</span>
+                    {(!request_runs.is_empty()).then(|| view! { <span><span class="key key-request"></span>{capitalised(names.request)}</span> })}
                     {(!limit_runs.is_empty()).then(|| view! { <span><span class="key key-limit"></span>"Limit"</span> })}
                     {(!s.gaps.is_empty()).then(|| view! { <span><span class="key key-gap"></span>"No data"</span> })}
                     {has_events.then(|| view! { <span><span class="key key-mark"></span>"Restart"</span><span><span class="key key-mark oom"></span>"OOM kill"</span> })}

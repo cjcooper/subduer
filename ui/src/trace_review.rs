@@ -817,6 +817,7 @@ fn ReviewView(store: Store) -> impl IntoView {
                             format!("{}{hint}", plural(n as u64, "row", "rows"))
                         }}</span>
                     </div>
+                    <ReviewOverview store=store namespace=Signal::derive(move || filter.get().namespace) />
                     <div class="review-split">
                         <div class="review-table-wrap">{table}</div>
                         <ReviewDetail store=store />
@@ -824,6 +825,78 @@ fn ReviewView(store: Store) -> impl IntoView {
                 }.into_any(),
             }}
         </div>
+    }
+}
+
+/// Every container of the trace (or of the namespace chosen) added up: how
+/// much is used against how much is requested, over time.
+#[component]
+fn ReviewOverview(store: Store, #[prop(into)] namespace: Signal<Option<String>>) -> impl IntoView {
+    let shown = RwSignal::new(true);
+    let zoom = RwSignal::new(None::<(f64, f64)>);
+    let series = RwSignal::new(None::<Result<TraceSeries, String>>);
+    // Another namespace starts zoomed out.
+    Effect::new(move |_| {
+        namespace.track();
+        zoom.set(None);
+    });
+    Effect::new(move |_| {
+        let Some(path) = store.review_path.get() else { return };
+        if !shown.get() {
+            return;
+        }
+        store.review.track();
+        let (ns, range) = (namespace.get(), zoom.get());
+        series.set(None);
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args {
+                path: String,
+                namespace: Option<String>,
+                start: Option<f64>,
+                end: Option<f64>,
+                points: u32,
+            }
+            let args = Args { path: path.clone(), namespace: ns.clone(), start: range.map(|r| r.0), end: range.map(|r| r.1), points: CHART_POINTS };
+            let result = invoke::<_, TraceSeries>("trace_overview", &args).await;
+            if store.review_path.get_untracked().as_ref() == Some(&path) && namespace.get_untracked() == ns && zoom.get_untracked() == range {
+                series.set(Some(result));
+            }
+        });
+    });
+    let data = Signal::derive(move || series.get().and_then(Result::ok));
+    let on_zoom = Callback::new(move |range: (f64, f64)| zoom.set(Some(range)));
+    let title = move || match namespace.get() {
+        Some(ns) => format!("Overview of {ns}"),
+        None => "Overview of the whole trace".into(),
+    };
+    view! {
+        <section class="review-overview">
+            <div class="overview-head">
+                <h3 class="chart-title">{title}</h3>
+                <span class="muted small">"Every container added up: what's used against what's requested. Drag across to zoom."</span>
+                <span class="spacer"></span>
+                {move || (shown.get() && zoom.get().is_some()).then(|| view! {
+                    <button class="btn small" on:click=move |_| zoom.set(None)>"Zoom out"</button>
+                })}
+                <button class="btn small" aria-expanded=move || shown.get().to_string() on:click=move |_| shown.update(|s| *s = !*s)>
+                    {move || if shown.get() { "Hide" } else { "Show" }}
+                </button>
+            </div>
+            {move || shown.get().then(|| view! {
+                {move || series.get().and_then(Result::err).map(|e| view! { <p class="warn-text">{e}</p> })}
+                <div class="overview-charts">
+                    <div>
+                        <h4 class="chart-title">"CPU"</h4>
+                        <TraceChart series=data measure=Measure::Cpu on_zoom=on_zoom totals=true />
+                    </div>
+                    <div>
+                        <h4 class="chart-title">"Memory"</h4>
+                        <TraceChart series=data measure=Measure::Memory on_zoom=on_zoom totals=true />
+                    </div>
+                </div>
+            })}
+        </section>
     }
 }
 

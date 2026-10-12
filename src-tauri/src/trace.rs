@@ -234,6 +234,22 @@ pub async fn trace_series(path: String, key: TraceKey, start: Option<f64>, end: 
     blocking(move || subduer_core::trace_review::series(Path::new(&path), &key, start, end, points.clamp(10, 2000))).await
 }
 
+/// Every container of the trace, or of `namespace`, added up between
+/// `start` and `end` (the whole span when absent), in about `points` buckets.
+#[tauri::command]
+pub async fn trace_overview(
+    path: String,
+    namespace: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+    points: u32,
+) -> CmdResult<TraceSeries> {
+    blocking(move || {
+        subduer_core::trace_review::overview(Path::new(&path), namespace.as_deref(), start, end, points.clamp(10, 2000))
+    })
+    .await
+}
+
 /// One review row's usage by local day and hour.
 #[tauri::command]
 pub async fn trace_daily(path: String, key: TraceKey) -> CmdResult<TraceDaily> {

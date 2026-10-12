@@ -26,8 +26,10 @@ pub fn report_html(path: &Path, recording: bool, tz: &jiff::tz::TimeZone, genera
     for row in &charted {
         charts.push(series(path, &row.key, None, None, CHART_POINTS)?);
     }
+    // A trace with no usage at all has no overview; the rest still reports.
+    let overview = crate::trace_review::overview(path, None, None, None, CHART_POINTS).ok();
     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(render(&r, &file, &charted, &charts, tz, generated))
+    Ok(render(&r, &file, overview.as_ref(), &charted, &charts, tz, generated))
 }
 
 fn attention(row: &ReviewRow) -> bool {
@@ -133,7 +135,10 @@ fn nice(v: f64) -> f64 {
 }
 
 /// One measure's chart as inline SVG, with its data for the hover script.
-fn chart(s: &TraceSeries, cpu: bool, label: &str, tz: &jiff::tz::TimeZone) -> String {
+/// One measure of a series as an SVG chart with hover data. `totals`: the
+/// series is every container added up (the overview), so its lines are used,
+/// busiest minute and requested, and hover shows what's idle.
+fn chart(s: &TraceSeries, cpu: bool, label: &str, totals: bool, tz: &jiff::tz::TimeZone) -> String {
     let (avg, peak, req, lim): (&Series, &Series, &Series, &Series) =
         if cpu { (&s.cpu_avg, &s.cpu_max, &s.cpu_request, &s.cpu_limit) } else { (&s.mem_avg, &s.mem_max, &s.mem_request, &s.mem_limit) };
     let span = (s.end - s.start).max(1.0);
@@ -201,8 +206,9 @@ fn chart(s: &TraceSeries, cpu: bool, label: &str, tz: &jiff::tz::TimeZone) -> St
         .collect();
     let fmt: fn(f64) -> String = if cpu { fmt_cpu } else { fmt_bytes };
     let cls = if cpu { "cpu" } else { "mem" };
+    let (avg_name, peak_name, totals_attr) = if totals { ("used", "busiest minute", " data-totals=\"1\"") } else { ("average pod", "busiest pod", "") };
     format!(
-        r#"<figure class="chart {cls}"><figcaption>{label} <span class="muted">· top {top_text}</span></figcaption><div class="plot" data-start="{start}" data-end="{end}" data-step="{step}" data-kind="{cls}" data-points='[{data}]'><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="{label}: average pod up to {avg_max}, busiest pod up to {peak_max}"><line class="grid" x1="0" x2="{W}" y1="{ytop:.1}" y2="{ytop:.1}"/><line class="grid" x1="0" x2="{W}" y1="{ymid:.1}" y2="{ymid:.1}"/>{gaps}<path class="area" d="{area}"/><path class="peak" d="{peak_d}"/><path class="avg" d="{avg_d}"/><path class="req" d="{req_d}"/><path class="lim" d="{lim_d}"/></svg><div class="tip" hidden></div></div><div class="xaxis"><span>{x0}</span><span>{x1}</span><span>{x2}</span></div></figure>"#,
+        r#"<figure class="chart {cls}"><figcaption>{label} <span class="muted">· top {top_text}</span></figcaption><div class="plot" data-start="{start}" data-end="{end}" data-step="{step}" data-kind="{cls}"{totals_attr} data-points='[{data}]'><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="{label}: {avg_name} up to {avg_max}, {peak_name} up to {peak_max}"><line class="grid" x1="0" x2="{W}" y1="{ytop:.1}" y2="{ytop:.1}"/><line class="grid" x1="0" x2="{W}" y1="{ymid:.1}" y2="{ymid:.1}"/>{gaps}<path class="area" d="{area}"/><path class="peak" d="{peak_d}"/><path class="avg" d="{avg_d}"/><path class="req" d="{req_d}"/><path class="lim" d="{lim_d}"/></svg><div class="tip" hidden></div></div><div class="xaxis"><span>{x0}</span><span>{x1}</span><span>{x2}</span></div></figure>"#,
         x0 = esc(&short_when(s.start, tz)),
         x1 = esc(&short_when((s.start + s.end) / 2.0, tz)),
         x2 = esc(&short_when(s.end, tz)),
@@ -223,7 +229,15 @@ fn chart(s: &TraceSeries, cpu: bool, label: &str, tz: &jiff::tz::TimeZone) -> St
     )
 }
 
-fn render(r: &TraceReview, file: &str, charted: &[&ReviewRow], charts: &[TraceSeries], tz: &jiff::tz::TimeZone, generated: &str) -> String {
+fn render(
+    r: &TraceReview,
+    file: &str,
+    overview: Option<&TraceSeries>,
+    charted: &[&ReviewRow],
+    charts: &[TraceSeries],
+    tz: &jiff::tz::TimeZone,
+    generated: &str,
+) -> String {
     let s = &r.summary;
     let span = match (s.data_start, s.data_end) {
         (Some(a), Some(b)) => format!("{} ({} → {})", span_text(b - a), when(a, tz), when(b, tz)),
@@ -268,6 +282,14 @@ fn render(r: &TraceReview, file: &str, charted: &[&ReviewRow], charts: &[TraceSe
         esc(&fmt_bytes(mem_spare)),
         r.rows.len(),
     );
+    if let Some(o) = overview {
+        let _ = write!(
+            html,
+            "<section><h2>Overview</h2><p class=\"muted\">Every container added up: what's used against what's requested. <span class=\"key avg\"></span>used <span class=\"key peak\"></span>busiest minute <span class=\"key req\"></span>requested <span class=\"key gap\"></span>no data. Hover for values and what's idle.</p><div class=\"charts\">{}{}</div></section>",
+            chart(o, true, "CPU", true, tz),
+            chart(o, false, "Memory", true, tz),
+        );
+    }
     html.push_str(
         r#"<section><h2>Right-sizing</h2><p class="muted">Per workload container. Percentiles are over every pod-minute; peaks are the highest any pod reached. Spare = (request − p95 CPU or peak memory) × average pods. Suggested: CPU = p95, memory = peak × 1.15, rounded up; none under 6 hours of data.</p><div class="scroll"><table><thead><tr><th>Workload</th><th class="num">Pods</th><th class="num">CPU request</th><th class="num">CPU p95</th><th class="num">CPU spare</th><th class="num">Memory request</th><th class="num">Memory peak</th><th class="num">Memory spare</th><th class="num">Suggested</th><th>Flags</th></tr></thead><tbody>"#,
     );
@@ -328,8 +350,8 @@ fn render(r: &TraceReview, file: &str, charted: &[&ReviewRow], charts: &[TraceSe
                 esc(&row.key.container),
                 esc(&row.key.namespace),
                 row.note.as_ref().map(|n| format!("<p class=\"rownote\">{}</p>", esc(n))).unwrap_or_default(),
-                chart(s, true, "CPU", tz),
-                chart(s, false, "Memory", tz),
+                chart(s, true, "CPU", false, tz),
+                chart(s, false, "Memory", false, tz),
             );
         }
         html.push_str("</section>");
@@ -395,8 +417,12 @@ for (const plot of document.querySelectorAll('.plot')) {
     let best = null; for (const p of pts) if (!best || Math.abs(p[0] + step / 2 - t) < Math.abs(best[0] + step / 2 - t)) best = p;
     if (!best) return;
     const x = (best[0] + step / 2 - start) / (end - start) * 100;
-    const row = (name, v) => v == null ? '' : `<div><span style="color:var(--muted)">${name}</span> ${fmt(v)}</div>`;
-    tip.innerHTML = `<div style="color:var(--muted)">${new Date(best[0] * 1000).toLocaleString()}</div>` + row('average pod', best[1]) + row('busiest pod', best[2]) + row('request', best[3]) + row('limit', best[4]);
+    const row = (name, v, extra = '') => v == null ? '' : `<div><span style="color:var(--muted)">${name}</span> ${fmt(v)}${extra}</div>`;
+    const [avg, peak, req] = plot.dataset.totals ? ['used', 'busiest minute', 'requested'] : ['average pod', 'busiest pod', 'request'];
+    // Totals: what's requested but idle, never rounded up to 100% while some is used.
+    const share = (s) => s < 1 && s >= 0.995 ? 'over 99%' : Math.round(s * 100) + '%';
+    const idle = plot.dataset.totals && best[3] > 0 && best[1] < best[3] ? row('idle', best[3] - best[1], ` (${share((best[3] - best[1]) / best[3])} of requested)`) : '';
+    tip.innerHTML = `<div style="color:var(--muted)">${new Date(best[0] * 1000).toLocaleString()}</div>` + row(avg, best[1]) + row(peak, best[2]) + row(req, best[3]) + idle + row('limit', best[4]);
     tip.hidden = false; cross.hidden = false; cross.style.left = x + '%';
     tip.style.left = x > 60 ? '' : `calc(${x}% + 8px)`; tip.style.right = x > 60 ? `calc(${100 - x}% + 8px)` : '';
   });

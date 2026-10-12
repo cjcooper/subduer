@@ -557,6 +557,8 @@ async fn traces_start_report_and_stop() {
     let key = subduer_core::types::TraceKey { namespace: "shop".into(), kind: "Pod".into(), name: "api-1".into(), container: "app".into() };
     let err = trace::trace_series(second.clone(), key.clone(), None, None, 100).await.unwrap_err();
     assert!(err.contains("isn't in this trace"), "{err}");
+    let err = trace::trace_overview(second.clone(), Some("shop".into()), None, None, 100).await.unwrap_err();
+    assert_eq!(err, "no usage in shop in this trace");
     assert!(trace::trace_daily(second.clone(), key.clone()).await.is_err());
     assert!(trace::trace_review(s(), "/etc/hosts".into()).await.unwrap_err().contains("trace file"));
 

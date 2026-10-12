@@ -2,7 +2,7 @@
 //! container), a zoomable series for one row, and its usage by day and hour.
 //! Works on the file alone; no cluster needed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use rusqlite::{Connection, params_from_iter};
@@ -432,13 +432,18 @@ pub fn series(path: &Path, key: &TraceKey, start: Option<f64>, end: Option<f64>,
         push_change(&mut out.mem_request, t, mr.map(|v| v as f64));
         push_change(&mut out.mem_limit, t, ml.map(|v| v as f64));
     }
+    add_marks(conn, &ids, start, end, &mut out)?;
+    Ok(out)
+}
 
+/// Restarts and OOM kills of `ids`, and the trace's gaps, between `start` and `end`.
+fn add_marks(conn: &Connection, ids: &[i64], start: i64, end: i64, out: &mut TraceSeries) -> Result<()> {
     let mut stmt = conn.prepare(&format!(
         "SELECT t, kind, reason, SUM(count) FROM events WHERE t >= ?1 AND t < ?2 AND container_id IN ({}) GROUP BY t, kind, reason ORDER BY t",
         placeholders_from(ids.len(), 3)
     ))?;
     let mut args: Vec<i64> = vec![start, end];
-    args.extend(&ids);
+    args.extend(ids);
     let rows = stmt.query_map(params_from_iter(&args), |r| {
         Ok(TraceEventMark { t: r.get::<_, i64>(0)? as f64, kind: r.get(1)?, reason: r.get(2)?, count: r.get::<_, i64>(3)?.max(0) as u32 })
     })?;
@@ -449,7 +454,139 @@ pub fn series(path: &Path, key: &TraceKey, start: Option<f64>, end: Option<f64>,
         Ok(TraceGap { start: r.get::<_, i64>(0)? as f64, end: r.get::<_, i64>(1)? as f64, reason: r.get(2)? })
     })?;
     out.gaps = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(())
+}
+
+/// Every container of the trace (or of one namespace) added up, between
+/// `start` and `end` (the whole span when absent), in about `points`
+/// buckets: per bucket the average and the busiest minute of the total
+/// usage, the total request of the containers running then (as change
+/// points), and how many were running. Limits are left out: a total is
+/// only meaningful when every container has one.
+pub fn overview(path: &Path, namespace: Option<&str>, start: Option<f64>, end: Option<f64>, points: u32) -> Result<TraceSeries> {
+    let file = TraceFile::open(path)?;
+    let conn = file.conn();
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id FROM containers c JOIN pods p ON p.id = c.pod_id WHERE ?1 IS NULL OR p.namespace = ?1 ORDER BY c.id",
+        )?;
+        stmt.query_map([namespace], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+    };
+    let list = placeholders(ids.len());
+    let (full_start, full_end): (Option<i64>, Option<i64>) = if ids.is_empty() {
+        (None, None)
+    } else {
+        conn.query_row(
+            &format!("SELECT MIN(t), MAX(t) FROM usage WHERE container_id IN ({list})"),
+            params_from_iter(&ids),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+    };
+    let (Some(full_start), Some(full_end)) = (full_start, full_end.map(|t| t + BUCKET_SECS)) else {
+        return Err(Error::Message(match namespace {
+            Some(ns) => format!("no usage in {ns} in this trace"),
+            None => "no usage in this trace".into(),
+        }));
+    };
+    let start = start.map_or(full_start, |s| s as i64).clamp(full_start, full_end);
+    let end = end.map_or(full_end, |e| e as i64).clamp(start + BUCKET_SECS, full_end.max(start + BUCKET_SECS));
+    let step = bucket_for(end - start, points);
+
+    // Each container's requests as change points: (t, millicores, bytes).
+    let mut requests: HashMap<i64, Vec<(i64, f64, f64)>> = HashMap::new();
+    let mut stmt =
+        conn.prepare(&format!("SELECT container_id, t, cpu_request, mem_request FROM resources WHERE container_id IN ({list}) ORDER BY t"))?;
+    let rows = stmt.query_map(params_from_iter(&ids), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?, r.get::<_, Option<i64>>(3)?))
+    })?;
+    for row in rows {
+        let (id, t, cpu, mem) = row?;
+        requests.entry(id).or_default().push((t, cpu.unwrap_or(0.0), mem.unwrap_or(0) as f64));
+    }
+    let request_at = |id: i64, t: i64| -> (f64, f64) {
+        let Some(changes) = requests.get(&id) else { return (0.0, 0.0) };
+        match changes.partition_point(|c| c.0 <= t) {
+            0 => (0.0, 0.0),
+            i => (changes[i - 1].1, changes[i - 1].2),
+        }
+    };
+
+    // Totals per minute, then per bucket.
+    let mut minutes: BTreeMap<i64, Totals> = BTreeMap::new();
+    let mut args: Vec<i64> = vec![start, end];
+    args.extend(&ids);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT container_id, t, cpu_avg, mem_avg FROM usage WHERE t >= ?1 AND t < ?2 AND container_id IN ({})",
+        placeholders_from(ids.len(), 3)
+    ))?;
+    let rows = stmt.query_map(params_from_iter(&args), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?))
+    })?;
+    for row in rows {
+        let (id, t, cpu, mem) = row?;
+        let (cpu_req, mem_req) = request_at(id, t);
+        let m = minutes.entry(t).or_default();
+        m.cpu += cpu.unwrap_or(0) as f64 / 1000.0;
+        m.mem += mem.unwrap_or(0) as f64;
+        m.cpu_req += cpu_req;
+        m.mem_req += mem_req;
+        m.n += 1.0;
+    }
+    let mut out = TraceSeries {
+        start: start as f64,
+        end: end as f64,
+        step: step as f64,
+        cpu_avg: vec![],
+        cpu_max: vec![],
+        mem_avg: vec![],
+        mem_max: vec![],
+        pods: vec![],
+        cpu_request: vec![],
+        cpu_limit: vec![],
+        mem_request: vec![],
+        mem_limit: vec![],
+        events: vec![],
+        gaps: vec![],
+        full_start: full_start as f64,
+        full_end: full_end as f64,
+    };
+    let mut buckets: BTreeMap<i64, Vec<&Totals>> = BTreeMap::new();
+    for (t, m) in &minutes {
+        buckets.entry(t / step * step).or_default().push(m);
+    }
+    let any_cpu_request = minutes.values().any(|m| m.cpu_req > 0.0);
+    let any_mem_request = minutes.values().any(|m| m.mem_req > 0.0);
+    for (b, ms) in buckets {
+        let t = b as f64;
+        let n = ms.len() as f64;
+        let mean = |f: fn(&Totals) -> f64| ms.iter().map(|m| f(m)).sum::<f64>() / n;
+        let max = |f: fn(&Totals) -> f64| ms.iter().map(|m| f(m)).fold(0.0, f64::max);
+        out.cpu_avg.push((t, mean(|m| m.cpu)));
+        out.cpu_max.push((t, max(|m| m.cpu)));
+        out.mem_avg.push((t, mean(|m| m.mem)));
+        out.mem_max.push((t, max(|m| m.mem)));
+        // Running containers on average, counting minutes without data as none.
+        out.pods.push((t, ms.iter().map(|m| m.n).sum::<f64>() * BUCKET_SECS as f64 / step as f64));
+        if any_cpu_request {
+            push_change(&mut out.cpu_request, t, Some(mean(|m| m.cpu_req)));
+        }
+        if any_mem_request {
+            push_change(&mut out.mem_request, t, Some(mean(|m| m.mem_req)));
+        }
+    }
+    add_marks(conn, &ids, start, end, &mut out)?;
     Ok(out)
+}
+
+/// One minute of an overview: usage and requests summed over the containers
+/// with data then, and how many there were.
+#[derive(Default)]
+struct Totals {
+    cpu: f64,
+    mem: f64,
+    cpu_req: f64,
+    mem_req: f64,
+    n: f64,
 }
 
 /// Adds a change point when a set value differs from the last one. Spans

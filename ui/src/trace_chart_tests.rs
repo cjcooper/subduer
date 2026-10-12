@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn idle_is_what_is_requested_but_not_used() {
+    assert_eq!(idle(250.0, 1000.0), Some((750.0, 0.75)));
+    assert_eq!(idle(1000.0, 1000.0), None);
+    assert_eq!(idle(1200.0, 1000.0), None, "over the request isn't idle");
+    assert_eq!(idle(5.0, 0.0), None, "nothing requested");
+    assert_eq!(share_text(0.75), "75%");
+    // 7.2m used of 3 cores: not "100%".
+    assert_eq!(share_text(idle(7.2, 3000.0).unwrap().1), "over 99%");
+    assert_eq!(share_text(1.0), "100%");
+}
+
+#[test]
+fn totals_name_their_lines() {
+    assert_eq!(Names::of(true).avg, "used");
+    assert_eq!(Names::of(false).count, "pods");
+    assert_eq!((capitalised(Names::of(true).peak).as_str(), capitalised("").as_str()), ("Busiest minute", ""));
+}
+
+#[test]
 fn step_series() {
     let changes = vec![(100.0, 500.0), (200.0, 250.0)];
     assert_eq!(step_at(&changes, 50.0), None);

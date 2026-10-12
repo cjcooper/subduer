@@ -19,6 +19,7 @@ mod rightsize;
 mod tauri;
 mod trace;
 mod trace_chart;
+mod trace_overlay;
 mod trace_review;
 mod upload;
 mod workload;
