@@ -11,6 +11,13 @@ fn at_most_three_traces_first_and_last_two() {
 }
 
 #[test]
+fn a_trace_keeps_its_colour_on_every_row() {
+    assert_eq!((trace_slot(0, 3), trace_slot(2, 3)), (Some(0), Some(2)));
+    // Of five, the first and the last two are overlaid; the others have no colour.
+    assert_eq!((trace_slot(3, 5), trace_slot(4, 5), trace_slot(1, 5)), (Some(1), Some(2), None));
+}
+
+#[test]
 fn weeks_start_on_monday() {
     assert_eq!(week_of(MONDAY, 0.0), week_of(MONDAY + WEEK - 1.0, 0.0));
     assert_eq!(week_of(MONDAY - 1.0, 0.0), week_of(MONDAY, 0.0) - 1.0, "Sunday night is the week before");

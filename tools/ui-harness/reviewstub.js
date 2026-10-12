@@ -270,6 +270,7 @@
       + ` page=${document.querySelector('.traces-page h1')?.textContent || 'none'}`
       + ` dialogs=${[...document.querySelectorAll('.modal h2')].map((h) => h.textContent.trim()).join('|') || 'none'}`
       + ` cmprows=${[...document.querySelectorAll('.compare-table tbody .review-name')].map((n) => n.textContent).join(',') || 'none'}`
-      + ` applybtn=${document.querySelector('.apply-modal .danger')?.disabled === false ? 'on' : 'off'} copied=${copied ? 'yes' : 'no'}`;
+      + ` applybtn=${document.querySelector('.apply-modal .danger')?.disabled === false ? 'on' : 'off'} copied=${copied ? 'yes' : 'no'}`
+      + ` heads=${[...document.querySelectorAll('.cmp-head .ochart-swatch')].map((s) => s.style.getPropertyValue('--trace').trim()).join('|') || 'none'}`;
   }, t + 1500);
 })();

@@ -12,7 +12,7 @@ use crate::app::{Store, guard};
 use crate::tauri::invoke;
 use crate::trace::{duration_text, scope_text};
 use crate::trace_chart::Measure;
-use crate::trace_overlay::{Align, Line, MAX_TRACES, OverlayChart, local_offset, picked, shift};
+use crate::trace_overlay::{Align, Line, MAX_TRACES, OverlayChart, local_offset, picked, shift, trace_slot};
 use crate::trace_review::{change_text, file_name};
 
 /// Buckets per trace on an overlay.
@@ -109,7 +109,13 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                         .unwrap_or_default();
                     view! {
                         <th class="cmp-head">
-                            <span class="cmp-index">{format!("{}", i + 1)}</span>
+                            <span class="cmp-index">
+                                // The trace's colour on overlays, beside its number.
+                                {trace_slot(i, c.traces.len()).map(|slot| view! {
+                                    <span class="ochart-swatch" style=format!("--trace: var(--trace-{})", slot + 1) aria-hidden="true"></span>
+                                })}
+                                {format!("{}", i + 1)}
+                            </span>
                             <span class="cmp-file" title=t.path.clone()>{file_name(&t.path).to_owned()}</span>
                             <span class="muted small">{format!("{started} · {span} · {}", t.context)}</span>
                             <span class="muted small">{scope_text(&t.scope)}</span>
@@ -242,9 +248,10 @@ pub(crate) fn shown_text(shown: &[usize], of: usize) -> Option<String> {
 /// One row's CPU and memory from each trace that has it, overlaid.
 #[component]
 fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, align: RwSignal<Align>, on_close: Callback<()>) -> impl IntoView {
-    let have: Vec<usize> = (0..traces.len()).filter(|&i| present.get(i) == Some(&true)).collect();
-    let shown: Vec<usize> = picked(have.len()).into_iter().map(|i| have[i]).collect();
-    let note = shown_text(&shown, have.len());
+    // The comparison's overlaid traces that have this row; each keeps its colour.
+    let n = traces.len();
+    let shown: Vec<usize> = picked(n).into_iter().filter(|&i| present.get(i) == Some(&true)).collect();
+    let note = shown_text(&picked(n), n);
     // Each shown trace's series, by its index in the comparison.
     let loaded = RwSignal::new(Vec::<(usize, Result<TraceSeries, String>)>::new());
     for &i in &shown {
@@ -265,7 +272,6 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
     }
     let (first, first_offset) = shown.first().map(|&i| (data_start(&traces[i]), local_offset(data_start(&traces[i])))).unwrap_or_default();
     let starts: Vec<(f64, f64)> = traces.iter().map(|t| (data_start(t), local_offset(data_start(t)))).collect();
-    let order = shown.clone();
     let lines = Signal::derive(move || {
         let a = align.get();
         loaded.with(|l| {
@@ -274,7 +280,7 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
                 .filter_map(|(i, r)| {
                     let series = r.as_ref().ok()?.clone();
                     let (start, offset) = starts[*i];
-                    Some(Line { n: i + 1, slot: order.iter().position(|o| o == i)?, series, shift: shift(a, start, offset, first, first_offset) })
+                    Some(Line { n: i + 1, slot: trace_slot(*i, n)?, series, shift: shift(a, start, offset, first, first_offset) })
                 })
                 .collect();
             lines.sort_by_key(|l| l.n);
@@ -289,9 +295,8 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
     };
     let legend = shown
         .iter()
-        .enumerate()
-        .map(|(slot, &i)| {
-            let t = &traces[i];
+        .map(|&i| {
+            let (t, slot) = (&traces[i], trace_slot(i, n).unwrap_or_default());
             let started = js_sys::Date::new(&(data_start(t) * 1000.0).into())
                 .to_locale_date_string("default", &wasm_bindgen::JsValue::UNDEFINED)
                 .as_string()

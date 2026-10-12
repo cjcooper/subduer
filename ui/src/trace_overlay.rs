@@ -47,6 +47,13 @@ pub(crate) fn picked(n: usize) -> Vec<usize> {
     if n <= MAX_TRACES { (0..n).collect() } else { vec![0, n - 2, n - 1] }
 }
 
+/// The colour slot of trace `i` of `n` in a comparison, if overlays show it.
+/// Fixed by the comparison, not the row, so a trace keeps its colour on rows
+/// that other traces don't have.
+pub(crate) fn trace_slot(i: usize, n: usize) -> Option<usize> {
+    picked(n).iter().position(|&p| p == i)
+}
+
 /// Monday-based week number of a time with its local offset (seconds east
 /// of UTC); the epoch was a Thursday.
 fn week_of(t: f64, offset: f64) -> f64 {

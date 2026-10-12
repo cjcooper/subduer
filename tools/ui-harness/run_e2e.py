@@ -252,7 +252,8 @@ SCENARIOS = [
     S("compare/dark", "reviewstub.js", "recent=1&page=1&compare=1", scheme=DARK, has=["Comparing 2 traces"]),
     # A row's charts from each trace, overlaid; lined up since start unless asked.
     S("compare/overlay", "reviewstub.js", "recent=1&page=1&compare=1&cmpsel=web",
-      has=["overlay:web@before", "overlay:web@after", "Line up by", "Trace 1 · acme-uat-shop-before.trace", "Trace 2 · acme-uat-shop-after.trace", "+1d"],
+      has=["overlay:web@before", "overlay:web@after", "Line up by", "Trace 1 · acme-uat-shop-before.trace", "Trace 2 · acme-uat-shop-after.trace", "+1d",
+           "heads=var(--trace-1)|var(--trace-2)"],
       lacks=["Showing traces"]),
     S("compare/overlay-week", "reviewstub.js", "recent=1&page=1&compare=1&cmpsel=web&cmpalign=week", has=["Line up by"], lacks=["+1d"]),
     S("compare/overlay-tip", "reviewstub.js", "recent=1&page=1&compare=1&cmpsel=web&cmptip=1", has=["Trace 1:", "Trace 2:", "request 1.5 cores", "request 15m"]),
