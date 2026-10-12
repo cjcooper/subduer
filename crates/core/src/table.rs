@@ -247,6 +247,12 @@ fn init_container_state(status: &Value) -> (State, String) {
     container_state(status)
 }
 
+/// A container meant to run to its end (init and ephemeral ones), from its
+/// status; no status yet means pending.
+pub(crate) fn run_to_end_state(status: &Value) -> (State, String) {
+    if status.is_null() { (State::Starting, "Pending".to_owned()) } else { init_container_state(status) }
+}
+
 fn container_state(status: &Value) -> (State, String) {
     let state = &status["state"];
     if state["running"].is_object() {

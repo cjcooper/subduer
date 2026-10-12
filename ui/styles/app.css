@@ -965,3 +965,33 @@ table.figures .num { text-align: right; }
 .cmp-head > span { display: block; font-weight: 400; }
 .cmp-index { display: inline-block !important; padding: 0 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-weight: 600 !important; margin-bottom: 2px; }
 .cmp-file { color: var(--text); font-weight: 600 !important; }
+
+/* Packet capture: the dialog and the capture window. Status colours come
+   with a label (and a dot), never colour alone. */
+.flag.good .flag-dot { background: var(--status-good); }
+.capture-modal { width: 620px; }
+.capture-field { margin: 10px 0 4px; }
+.capture-field input[type=text] { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.capture-choices { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 8px; }
+.capture-choice { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.capture-choice > span { display: flex; flex-direction: column; gap: 1px; }
+.capture-app { display: flex; flex-direction: column; height: 100vh; background: var(--bg); color: var(--text); padding: 14px 18px 0; box-sizing: border-box; }
+.capture-head { display: flex; align-items: center; gap: 12px; }
+.capture-head h1 { margin: 0; font-size: 18px; }
+.capture-status { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin: 10px 0 6px; }
+.capture-phase { font-weight: 600; }
+.capture-phase.live::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--danger); }
+.capture-phase.done { color: var(--ok); }
+.capture-phase.failed { color: var(--danger); }
+.capture-progress { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.capture-progress > span { display: block; height: 100%; background: var(--accent); transition: width 0.4s linear; }
+.capture-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 10px 0; font-size: 12px; }
+.capture-facts dt { color: var(--muted); }
+.capture-facts dd { margin: 0; overflow-wrap: anywhere; }
+.capture-message { margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; background: var(--panel); font-size: 12px; white-space: pre-wrap; }
+.capture-counts { min-height: 22px; margin-bottom: 6px; }
+.capture-table-wrap { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); }
+.capture-table td { white-space: nowrap; }
+.capture-table tr.capture-flagged td { background: color-mix(in srgb, var(--status-serious) 8%, transparent); }
+.capture-choices-title { font-weight: 600; margin-bottom: 2px; }
+.capture-handshakes { margin: 10px 0 4px; padding-top: 10px; border-top: 1px solid var(--border); }

@@ -148,7 +148,7 @@ fn more<T>(items: &[T], name: impl Fn(&T) -> String) -> String {
 }
 
 /// `2026-10-11-1405` in local time.
-fn stamp_now() -> String {
+pub(crate) fn stamp_now() -> String {
     let d = js_sys::Date::new_0();
     format!(
         "{:04}-{:02}-{:02}-{:02}{:02}",

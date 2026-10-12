@@ -1,6 +1,7 @@
 //! Cluster access for k8s-subduer, independent of any UI.
 
 pub mod actions;
+pub mod capture;
 pub mod catalog;
 pub mod cluster;
 pub mod config;
@@ -25,6 +26,7 @@ pub mod storage;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod table;
+pub mod tls_scan;
 pub mod trace;
 pub mod trace_file;
 pub mod trace_report;

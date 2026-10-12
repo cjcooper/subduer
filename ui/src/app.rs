@@ -160,6 +160,8 @@ pub(crate) struct Store {
     pub(crate) review_checked: RwSignal<HashSet<subduer_types::TraceKey>>,
     /// The apply dialog is open with these changes (one per workload).
     pub(crate) apply_prompt: RwSignal<Option<Vec<subduer_types::RightsizeChange>>>,
+    /// The pod (namespace, name) the Capture traffic dialog is open for.
+    pub(crate) capture_prompt: RwSignal<Option<(String, String)>>,
     /// Comparing these trace files, and the comparison.
     pub(crate) compare_paths: RwSignal<Option<Vec<String>>>,
     pub(crate) comparison: RwSignal<Option<Result<subduer_types::TraceComparison, String>>>,
@@ -252,6 +254,7 @@ impl Store {
             recent_traces: RwSignal::new(vec![]),
             review_checked: RwSignal::new(HashSet::new()),
             apply_prompt: RwSignal::new(None),
+            capture_prompt: RwSignal::new(None),
             compare_paths: RwSignal::new(None),
             comparison: RwSignal::new(None),
             report_saved: RwSignal::new(None),
@@ -573,6 +576,7 @@ pub fn App() -> impl IntoView {
             <crate::trace::TraceQuitDialog store=store />
             <crate::trace::TraceSwitchDialog store=store />
             <crate::rightsize::ApplyDialog store=store />
+            <crate::capture::CaptureDialog store=store />
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
@@ -1563,6 +1567,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <WorkloadLogsButton store=store row=row.clone() />
                             <crate::workload::WorkloadButtons store=store row=row.clone() />
                             <crate::trace::TraceThisButton store=store row=row.clone() />
+                            <crate::capture::CaptureButton store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
                             <button class="close" title="Close (Esc)" on:click=close>"×"</button>
                         </div>

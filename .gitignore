@@ -3,3 +3,6 @@
 .DS_Store
 src-tauri/gen/schemas
 .claude/worktrees/
+# Packet captures hold real traffic: never commit them.
+*.pcap
+*.pcapng

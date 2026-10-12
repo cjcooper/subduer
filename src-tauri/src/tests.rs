@@ -604,3 +604,62 @@ async fn rightsizing_needs_the_context_and_the_gate() {
     commands::rightsize_apply(s(), CTX.into(), change).await.unwrap();
     assert!(!api.calls_to("PATCH", path).pop().unwrap().query.contains("dryRun"));
 }
+
+#[tokio::test]
+async fn captures_are_gated_checked_and_dry_run_first() {
+    use subduer_core::types::{CaptureFilter, CaptureRequest, CaptureTraffic};
+    let all = || CaptureFilter { traffic: CaptureTraffic::All, handshakes_only: true };
+    let api = MockApi::new();
+    let app = connected(&api).await;
+    let s = || app.state::<AppState>();
+    let dir = std::env::temp_dir().join(format!("subduer-tauri-capture-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("api-1.pcap");
+    let request = |secs: u32, filter: CaptureFilter| CaptureRequest {
+        namespace: "shop".into(),
+        pod: "api-1".into(),
+        image: "acme/netshoot:1".into(),
+        filter,
+        secs,
+        path: file.display().to_string(),
+    };
+    let start = |r: CaptureRequest| crate::capture::start_capture(app.handle().clone(), s(), r);
+
+    // It changes the pod, so it's refused while the context is locked.
+    let locked = start(request(60, all())).await.unwrap_err();
+    assert!(locked.contains("read-only"), "{locked}");
+    unlock(&app);
+    for (secs, filter, why) in [
+        (0, all(), "1 to 30 minutes"),
+        (subduer_core::capture::MAX_SECS + 1, all(), "1 to 30 minutes"),
+        (60, CaptureFilter { traffic: CaptureTraffic::Custom("  ".into()), handshakes_only: true }, "type a filter"),
+    ] {
+        let err = start(request(secs, filter)).await.unwrap_err();
+        assert!(err.contains(why), "{err}");
+    }
+    let nowhere = CaptureRequest { path: " ".into(), ..request(60, all()) };
+    assert_eq!(start(nowhere).await.unwrap_err(), "choose where to save the capture");
+    assert!(api.calls().iter().all(|c| c.method != "PATCH"), "nothing asked of the cluster yet");
+
+    // The server refuses the dry run (here: RBAC): nothing is attached and no window opens.
+    let path = "/api/v1/namespaces/shop/pods/api-1/ephemeralcontainers";
+    api.on_error("PATCH", path, 403, "Forbidden", "cannot patch resource \"pods/ephemeralcontainers\"");
+    let refused = start(request(60, all())).await.unwrap_err();
+    assert!(refused.contains("cannot patch"), "{refused}");
+    let patches = api.calls_to("PATCH", path);
+    assert_eq!(patches.len(), 1);
+    assert!(patches[0].query.contains("dryRun=All"));
+    assert!(app.webview_windows().keys().all(|l| !l.starts_with(crate::capture::LABEL_PREFIX)));
+    assert!(!file.exists(), "no file is made when the cluster refuses");
+
+    // The dry run passes but the real attach is refused: the file made for it goes again.
+    let api = MockApi::new();
+    api.on_query("PATCH", path, "dryRun", pod("shop", "api-1", "n1", json!({})));
+    api.on_error("PATCH", path, 409, "Conflict", "the object has been modified");
+    *app.state::<AppState>().session.write().await = Some(Session { context: CTX.into(), client: api.client(), history: Default::default() });
+    let refused = start(request(60, all())).await.unwrap_err();
+    assert!(refused.contains("modified"), "{refused}");
+    assert_eq!(api.calls_to("PATCH", path).len(), 2);
+    assert!(!file.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -98,16 +98,52 @@ pub fn PodDetailView(store: Store) -> impl IntoView {
     }
 }
 
+/// A group of a pod's containers in the Details tab.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Group {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+    /// Starts closed.
+    pub(crate) closed: bool,
+    pub(crate) containers: Vec<ContainerDetails>,
+}
+
+/// The pod's containers by group, top to bottom: running (app containers,
+/// and sidecars, which run alongside them), init, ephemeral. Only running
+/// starts open; empty groups are left out.
+pub(crate) fn container_groups(all: &[ContainerDetails]) -> Vec<Group> {
+    let pick = |f: fn(&ContainerDetails) -> bool| all.iter().filter(|c| f(c)).cloned().collect::<Vec<_>>();
+    [
+        Group { id: "containers:running", title: "Running containers", closed: false, containers: pick(|c| !c.ephemeral && (!c.init || c.sidecar)) },
+        Group { id: "containers:init", title: "Init containers", closed: true, containers: pick(|c| c.init && !c.sidecar) },
+        Group { id: "containers:ephemeral", title: "Ephemeral containers", closed: true, containers: pick(|c| c.ephemeral) },
+    ]
+    .into_iter()
+    .filter(|g| !g.containers.is_empty())
+    .collect()
+}
+
+/// "3", or "3 · 1 failed".
+pub(crate) fn group_summary(containers: &[ContainerDetails]) -> String {
+    match containers.iter().filter(|c| c.state == subduer_types::containers::State::Failed).count() {
+        0 => containers.len().to_string(),
+        failed => format!("{} · {failed} failed", containers.len()),
+    }
+}
+
 #[component]
 fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
     let namespace = d.namespace.clone();
-    let containers = d
-        .containers
-        .clone()
+    let containers = container_groups(&d.containers)
         .into_iter()
-        .map(|c| {
-            let (ns, pod) = (namespace.clone(), d.name.clone());
-            view! { <ContainerSection store=store c=c pod=pod namespace=ns /> }
+        .map(|g| {
+            let summary = group_summary(&g.containers);
+            let (ns, pod, list) = (namespace.clone(), d.name.clone(), g.containers);
+            view! {
+                <Section store=store id=g.id title=g.title.to_owned() summary=summary closed=g.closed>
+                    {list.iter().cloned().map(|c| view! { <ContainerSection store=store c=c pod=pod.clone() namespace=ns.clone() /> }).collect_view()}
+                </Section>
+            }
         })
         .collect_view();
     let events = d.events.clone();
@@ -138,8 +174,19 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
     }
 }
 
+/// Whether a section is open, given the remembered toggles: one that starts
+/// closed is open once toggled, the others until toggled.
+pub(crate) fn section_open(toggled: &std::collections::HashSet<String>, id: &str, closed: bool) -> bool {
+    toggled.contains(&toggle_key(id, closed)) == closed
+}
+
+/// The remembered key: sections that start closed remember being opened.
+fn toggle_key(id: &str, closed: bool) -> String {
+    if closed { format!("+{id}") } else { id.to_owned() }
+}
+
 /// A collapsible section. `id` is remembered so the same section stays
-/// collapsed when you select another pod.
+/// collapsed (or, if it starts `closed`, open) when you select another pod.
 #[component]
 pub(crate) fn Section(
     store: Store,
@@ -148,6 +195,9 @@ pub(crate) fn Section(
     summary: String,
     #[prop(optional)] icon: Option<AnyView>,
     #[prop(optional)] nested: bool,
+    /// Starts closed until opened.
+    #[prop(optional)]
+    closed: bool,
     /// Buttons beside the title (outside it, so they don't toggle the section).
     #[prop(optional)]
     actions: Option<AnyView>,
@@ -155,12 +205,13 @@ pub(crate) fn Section(
 ) -> impl IntoView {
     let open = {
         let id = id.clone();
-        move || !store.detail_collapsed.with(|c| c.contains(&id))
+        move || store.detail_collapsed.with(|c| section_open(c, &id, closed))
     };
+    let key = toggle_key(&id, closed);
     let toggle = move |_| {
         store.detail_collapsed.update(|c| {
-            if !c.remove(&id) {
-                c.insert(id.clone());
+            if !c.remove(&key) {
+                c.insert(key.clone());
             }
         })
     };
@@ -368,11 +419,8 @@ fn PodInfo(store: Store, d: PodDetails) -> impl IntoView {
 
 #[component]
 fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: String) -> impl IntoView {
-    let kind = match (c.init, c.sidecar) {
-        (true, true) => "Sidecar · ",
-        (true, false) => "Init · ",
-        _ => "",
-    };
+    // The group says init or ephemeral; sidecars sit with the running ones.
+    let kind = if c.sidecar { "Sidecar · " } else { "" };
     let summary = match c.restarts {
         0 => format!("{kind}{}", c.detail),
         1 => format!("{kind}{} · 1 restart", c.detail),
@@ -442,9 +490,12 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     }
     .into_any();
     view! {
-        <Section store=store id=id title=c.name.clone() summary=summary icon=icon actions=actions>
-            <UsageChart store=store resource=Resource::Cpu usage=info.cpu container=Some(info.name.clone()) />
-            <UsageChart store=store resource=Resource::Memory usage=info.memory container=Some(info.name.clone()) />
+        <Section store=store id=id title=c.name.clone() summary=summary icon=icon actions=actions nested=true>
+            // Ephemeral containers have no resources of their own.
+            {(!info.ephemeral).then(|| view! {
+                <UsageChart store=store resource=Resource::Cpu usage=info.cpu container=Some(info.name.clone()) />
+                <UsageChart store=store resource=Resource::Memory usage=info.memory container=Some(info.name.clone()) />
+            })}
             <dl class="kv">
                 <dt>"Image"</dt><dd class="mono">{info.image.clone()}</dd>
                 <dt>"State"</dt><dd>{info.detail.clone()}{(!info.init && !info.ready && info.state == subduer_types::containers::State::Running).then_some(" (not ready)")}</dd>
@@ -455,7 +506,8 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                 {info.last_termination.clone().map(|t| view! { <dt>"Last termination"</dt><dd>{t}</dd> })}
                 {(!info.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{info.ports.join(", ")}</dd> })}
             </dl>
-            {
+            // Ephemeral containers have no environment of their own to show.
+            {(!info.ephemeral).then(|| {
                 let (env, ns) = (info.env.clone(), namespace.clone());
                 view! {
                     <Section
@@ -468,7 +520,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                         <EnvTable store=store vars=env.clone() namespace=ns.clone() />
                     </Section>
                 }
-            }
+            })}
         </Section>
     }
 }

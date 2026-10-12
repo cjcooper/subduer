@@ -70,6 +70,10 @@ fn busy_pod() -> Value {
                  ]},
                 {"name": "worker", "image": "acme/worker:1",
                  "resources": {"requests": {"cpu": "100m"}}}
+            ],
+            "ephemeralContainers": [
+                {"name": "subduer-capture-1", "image": "acme/netshoot:1", "command": ["sleep", "90"]},
+                {"name": "debugger", "image": "acme/netshoot:1"}
             ]
         },
         "status": {
@@ -87,6 +91,10 @@ fn busy_pod() -> Value {
                 {"name": "worker", "ready": false, "restartCount": 3, "image": "acme/worker:1", "imageID": "",
                  "state": {"waiting": {"reason": "CrashLoopBackOff"}},
                  "lastState": {"terminated": {"exitCode": 1, "finishedAt": "2026-10-10T11:00:03Z"}}}
+            ],
+            "ephemeralContainerStatuses": [
+                {"name": "subduer-capture-1", "ready": false, "restartCount": 0, "image": "acme/netshoot:1", "imageID": "acme/netshoot@sha256:1",
+                 "state": {"running": {"startedAt": "2026-10-10T12:00:00Z"}}}
             ]
         }
     }))
@@ -148,8 +156,20 @@ async fn pod_details_with_metrics_server() {
     assert_eq!(d.memory.used, Some(110.0 * 1024.0 * 1024.0));
     assert_eq!(d.memory.node, Some(8.0 * 1024f64.powi(3)));
 
-    let names: Vec<_> = d.containers.iter().map(|c| (c.name.as_str(), c.init, c.sidecar)).collect();
-    assert_eq!(names, [("migrate", true, false), ("proxy", true, true), ("app", false, false), ("worker", false, false)]);
+    let names: Vec<_> = d.containers.iter().map(|c| (c.name.as_str(), c.init, c.sidecar, c.ephemeral)).collect();
+    assert_eq!(names, [
+        ("migrate", true, false, false),
+        ("proxy", true, true, false),
+        ("app", false, false, false),
+        ("worker", false, false, false),
+        ("subduer-capture-1", false, false, true),
+        ("debugger", false, false, true),
+    ]);
+    // Ephemeral containers: image and state only; running is their normal state.
+    let capture = &d.containers[4];
+    assert_eq!((capture.image.as_str(), capture.state, capture.started.as_deref()), ("acme/netshoot:1", State::Running, Some("2026-10-10T12:00:00Z")));
+    assert_eq!((capture.cpu.requests, capture.ports.len(), capture.env.len()), (None, 0, 0));
+    assert_eq!((d.containers[5].state, d.containers[5].detail.as_str()), (State::Starting, "Pending"));
     let migrate = &d.containers[0];
     assert_eq!(migrate.state, State::Stopped);
     assert_eq!(migrate.cpu.used, None);
@@ -227,7 +247,9 @@ async fn pod_details_falls_back_to_the_kubelet() {
     let api = MockApi::new();
     api.on("GET", POD, pod("shop", "api-1", "n1", json!({
         "spec": {"containers": [{"name": "app", "image": "acme/app:1",
-            "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}, "limits": {"cpu": "200m", "memory": "128Mi"}}}]}
+            "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}, "limits": {"cpu": "200m", "memory": "128Mi"}}}],
+            // Has no limits of its own, and mustn't hide the pod's.
+            "ephemeralContainers": [{"name": "subduer-capture-1", "image": "acme/netshoot:1"}]}
     })));
     api.on("GET", "/api/v1/nodes/n1/proxy/stats/summary", json!({"pods": [
         {"podRef": {"name": "api-1", "namespace": "shop"}, "containers": [

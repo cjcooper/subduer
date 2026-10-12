@@ -1,3 +1,4 @@
+mod capture;
 mod commands;
 mod desktop_entry;
 mod editor;
@@ -44,6 +45,8 @@ pub struct AppState {
     pub unsaved: AtomicBool,
     /// The running trace, if any; closing or quitting asks first too.
     pub traces: trace::TraceRunner,
+    /// Packet captures, one per capture window.
+    pub captures: capture::CaptureWindows,
 }
 
 /// Sent to the main window when a close or quit is held for unsaved edits
@@ -127,6 +130,10 @@ pub fn run() {
             logs::open_logs,
             logs::logs_start,
             exec::open_exec,
+            capture::start_capture,
+            capture::capture_session,
+            capture::stop_capture,
+            capture::choose_capture_file,
             exec::exec_start,
             exec::exec_input,
             exec::exec_resize,

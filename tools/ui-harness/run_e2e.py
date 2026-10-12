@@ -41,7 +41,51 @@ def S(id, stub, query, has=(), lacks=(), scheme=LIGHT, budget=8000, real_time=Fa
 
 SCENARIOS = [
     # ---- Pods (stub.js): details, delete, upload, download ----
-    S("pod/details", "stub.js", "pod=limited", has=["Resources", "QoS class", "Burstable", "Forward", "Upload", "Shell", "Logs"]),
+    S("pod/details", "stub.js", "pod=limited", has=["Resources", "QoS class", "Burstable", "Forward", "Upload", "Shell", "Logs", "Running containers 2"],
+      lacks=["Init containers", "Ephemeral containers"]),
+    # Containers by group: running (with the sidecar) open, init and ephemeral closed until opened.
+    S("pod/container-groups", "stub.js", "pod=groups",
+      has=["Running containers 2", "proxy", "Sidecar ·", "Init containers 1", "Ephemeral containers 1"], lacks=["ghcr.io/acme/migrate:1", "ghcr.io/acme/netshoot:1"]),
+    S("pod/container-groups-init", "stub.js", "pod=groups&opengroup=init", has=["migrate", "ghcr.io/acme/migrate:1", "Completed"], lacks=["ghcr.io/acme/netshoot:1"]),
+    S("pod/container-groups-ephemeral", "stub.js", "pod=groups&opengroup=ephemeral", has=["subduer-capture-1", "ghcr.io/acme/netshoot:1"]),
+    # No charts or environment for ephemeral containers: the app's containers have two each.
+    S("pod/container-groups-ephemeral-plain", "stub.js", "pod=groups&opengroup=ephemeral", has=["re:(Environment.*){2}"], lacks=["re:(Environment.*){3}"]),
+    S("pod/container-groups-dark", "stub.js", "pod=groups&opengroup=ephemeral", scheme=DARK, has=["Ephemeral containers"]),
+    # Capture traffic…: the dialog sends the request; Start needs an image and changes allowed.
+    S("capture/dialog", "stub.js", "pod=limited&cap=1",
+      has=["Capture traffic", "re:All traffic \\(TCP\\).*Inbound to port 8080 \\(http\\).*Custom filter.*TLS handshakes only", "5 min", "stays listed in the pod"],
+      lacks=["start_capture", "Inbound to port 8080 (http) Inbound to port 8080"]),
+    S("capture/start", "stub.js", "pod=limited&cap=1&capimg=acme/netshoot:1&capgo=1",
+      has=['start_capture {"namespace":"apps","pod":"acme-limited","image":"acme/netshoot:1","filter":{"traffic":"All","handshakes_only":true},"secs":300,'
+           '"path":"/Users/me/Documents/acme-uat-apps-acme-limited-']),
+    # The Save dialog comes first; cancelling it stays in the capture dialog.
+    S("capture/save-cancelled", "stub.js", "pod=limited&cap=1&capimg=x&capgo=1&capcancel=1",
+      has=["choose_capture_file acme-uat-apps-acme-limited-", "Capture traffic", "Save as and start…"], lacks=["start_capture"]),
+    S("capture/remembered-image", "stub.js", "pod=limited&cap=1&capsaved=ecr/netshoot:2&capsecs=60&capgo=1",
+      has=['"image":"ecr/netshoot:2","filter":{"traffic":"All","handshakes_only":true},"secs":60']),
+    S("capture/inbound-port", "stub.js", "pod=limited&cap=1&capimg=x&capfilter=port&capgo=1", has=['"filter":{"traffic":{"Inbound":8080},"handshakes_only":true}']),
+    S("capture/everything", "stub.js", "pod=limited&cap=1&capimg=x&caphs=0&capgo=1",
+      has=['"filter":{"traffic":"All","handshakes_only":false}']),
+    S("capture/everything-warns", "stub.js", "pod=limited&cap=1&capimg=x&caphs=0", has=["Without it, the capture holds any plain-text data"]),
+    S("capture/no-ports", "stub.js", "pod=unlimited&noports=1&cap=1", has=["All traffic (TCP)"], lacks=["Inbound to port"]),
+    S("capture/custom-filter", "stub.js", "pod=limited&cap=1&capimg=x&capfilter=custom&capexpr=port 443&capgo=1", has=['"filter":{"traffic":{"Custom":"port 443"},"handshakes_only":true}']),
+    S("capture/needs-image", "stub.js", "pod=limited&cap=1&capgo=1", has=["Capture traffic"], lacks=["start_capture"]),
+    S("capture/locked", "stub.js", "pod=limited&locked=1&cap=1&capimg=x&capgo=1", has=["is read-only", "Allow changes…"], lacks=["start_capture"]),
+    S("capture/prod-needs-name", "stub.js", "pod=limited&ctx=prod&cap=1&capimg=x&capgo=1", has=["Type its name to capture"], lacks=["start_capture"]),
+    S("capture/prod-typed", "stub.js", "pod=limited&ctx=prod&cap=1&capimg=x&capname=1&capgo=1", has=["start_capture"]),
+    S("capture/refused", "stub.js", "pod=limited&cap=1&capimg=x&capgo=1&capfail=1", has=["cannot patch resource", "Capture traffic"]),
+    S("capture/dialog-dark", "stub.js", "pod=limited&cap=1", scheme=DARK, has=["Capture traffic"]),
+    # The capture window, following a capture: starting, live, finished, failed, stopped early.
+    S("capture/window-starting", "capturestub.js", "capture=capture-1&slow=1",
+      has=["Starting the capture container", "acme-limited", "subduer-capture-1791804344", "No TLS handshakes seen yet", "ecr.example/netshoot:latest"],
+      lacks=["sha256"]),
+    S("capture/window-live", "capturestub.js", "capture=capture-1",
+      has=["Capturing", "left", "4 TLS connections", "api.example.com", "TLS 1.3 · 3", "no answer · 1", "netshoot@sha256:e47b97ba", "Stop", "59.8 KiB"]),
+    S("capture/window-old-version", "capturestub.js", "capture=capture-1&old=1", has=["TLS 1.2 · 1", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"]),
+    S("capture/window-done", "capturestub.js", "capture=capture-1&end=done", has=["Finished", "40 packets captured"], lacks=["Stop"]),
+    S("capture/window-failed", "capturestub.js", "capture=capture-1&end=fail", has=["Failed", "ErrImagePull: 403 Forbidden"], lacks=["Stop"]),
+    S("capture/window-stop", "capturestub.js", "capture=capture-1&stop=1", has=["sent=capture_session,stop_capture", "Stopping…"]),
+    S("capture/window-dark", "capturestub.js", "capture=capture-1&end=done", scheme=DARK, has=["Finished"]),
     S("pod/details-dark", "stub.js", "pod=unlimited", scheme=DARK, has=["Details", "YAML"]),
     # ---- Navigation ----
     # Section headings are uppercase on screen only (CSS); the text is title case.

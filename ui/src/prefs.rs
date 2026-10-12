@@ -170,6 +170,21 @@ fn reveal_label_for(desktop: Desktop) -> &'static str {
     }
 }
 
+/// The capture image last used on a context.
+fn capture_image_key(context: &str) -> String {
+    format!("capture.image.{context}")
+}
+
+pub fn load_capture_image(context: &str) -> String {
+    storage().and_then(|s| s.get_item(&capture_image_key(context)).ok().flatten()).unwrap_or_default()
+}
+
+pub fn save_capture_image(context: &str, image: &str) {
+    if let Some(s) = storage() {
+        let _ = s.set_item(&capture_image_key(context), image.trim());
+    }
+}
+
 const PULL_EVERY_KEY: &str = "traces.pullEvery";
 
 /// The last pull interval chosen for a trace, in seconds.

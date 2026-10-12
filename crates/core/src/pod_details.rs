@@ -37,7 +37,7 @@ pub async fn pod_details(client: &Client, namespace: &str, name: &str) -> Result
         .flat_map(|key| data["status"][key].as_array().into_iter().flatten())
         .collect();
 
-    let containers: Vec<ContainerDetails> = all_containers
+    let mut containers: Vec<ContainerDetails> = all_containers
         .iter()
         .zip(states)
         .map(|(c, state)| {
@@ -46,9 +46,11 @@ pub async fn pod_details(client: &Client, namespace: &str, name: &str) -> Result
             container_details(c, state, status.copied(), used, node, &config_maps, &secret_keys)
         })
         .collect();
+    containers.extend(ephemeral_containers(&data));
 
     let status = pod.status.as_ref();
-    let app: Vec<&ContainerDetails> = containers.iter().filter(|c| !c.init || c.sidecar).collect();
+    // Long-running containers; ephemeral ones have no resources and don't count.
+    let app: Vec<&ContainerDetails> = containers.iter().filter(|c| (!c.init || c.sidecar) && !c.ephemeral).collect();
     let pod_res = crate::overview::pod_resources(&spec);
     let all_limited = |pick: fn(&ContainerDetails) -> Option<f64>| app.iter().all(|c| pick(c).is_some());
     let used_sum = |pick: fn(&ContainerDetails) -> Option<f64>| {
@@ -93,6 +95,42 @@ pub async fn pod_details(client: &Client, namespace: &str, name: &str) -> Result
     })
 }
 
+/// The pod's ephemeral containers, from its JSON: image and state only, as
+/// they have no resources, ports or readiness. Running is their normal
+/// state and exiting 0 a normal end, as for init containers.
+fn ephemeral_containers(pod: &Value) -> Vec<ContainerDetails> {
+    let statuses = pod["status"]["ephemeralContainerStatuses"].as_array().map(Vec::as_slice).unwrap_or_default();
+    pod["spec"]["ephemeralContainers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|spec| {
+            let status = statuses.iter().find(|s| s["name"] == spec["name"]).unwrap_or(&Value::Null);
+            let (state, detail) = crate::table::run_to_end_state(status);
+            let last = &status["lastState"]["terminated"];
+            ContainerDetails {
+                name: text(&spec["name"]),
+                init: false,
+                sidecar: false,
+                ephemeral: true,
+                image: text(&spec["image"]),
+                state,
+                detail,
+                ready: false,
+                restarts: int(&status["restartCount"]),
+                started: status["state"]["running"]["startedAt"].as_str().map(str::to_owned),
+                last_termination: last.is_object().then(|| {
+                    format!("{} (exit {}) at {}", last["reason"].as_str().unwrap_or("Terminated"), int(&last["exitCode"]), text(&last["finishedAt"]))
+                }),
+                ports: vec![],
+                cpu: Usage::default(),
+                memory: Usage::default(),
+                env: vec![],
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn port_names(c: &Container) -> Vec<String> {
     c.ports
         .iter()
@@ -124,6 +162,7 @@ fn container_details(
         name: c.name.clone(),
         init: state.init,
         sidecar: state.init && c.restart_policy.as_deref() == Some("Always"),
+        ephemeral: false,
         image: c.image.clone().unwrap_or_default(),
         state: state.state,
         detail: state.detail,

@@ -423,6 +423,10 @@ pub struct ContainerDetails {
     pub init: bool,
     /// Init container with `restartPolicy: Always`: runs alongside the app.
     pub sidecar: bool,
+    /// Added to the running pod (`kubectl debug`, a capture); listed after
+    /// the others. It has no resources, ports or readiness of its own.
+    #[serde(default)]
+    pub ephemeral: bool,
     pub image: String,
     pub state: containers::State,
     pub detail: String,
@@ -471,7 +475,8 @@ pub struct PodDetails {
     pub cpu: Usage,
     pub memory: Usage,
     pub metrics_available: bool,
-    /// Init containers first, then app containers, in spec order.
+    /// Init containers first, then app containers, then ephemeral ones, in
+    /// spec order.
     pub containers: Vec<ContainerDetails>,
     /// Newest first.
     pub events: Vec<EventSummary>,
@@ -1115,6 +1120,129 @@ pub struct TraceWorkload {
     pub kind: KindRef,
     pub namespace: String,
     pub name: String,
+}
+
+/// Which traffic a packet capture takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureTraffic {
+    /// All TCP on the pod's interface.
+    All,
+    /// Connections to the pod on this port (both directions of them).
+    Inbound(u16),
+    /// A tcpdump (BPF) expression.
+    Custom(String),
+}
+
+/// What a packet capture records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureFilter {
+    pub traffic: CaptureTraffic,
+    /// Only the segments that start a TLS handshake record: enough to read
+    /// versions and ciphers, and no application data.
+    pub handshakes_only: bool,
+}
+
+/// A capture to start, from the dialog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureRequest {
+    pub namespace: String,
+    pub pod: String,
+    pub image: String,
+    pub filter: CaptureFilter,
+    pub secs: u32,
+    /// Where to write the pcap, as chosen in the Save dialog.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapturePhase {
+    /// The capture container is added; waiting for it to run (image pull).
+    Starting,
+    Capturing,
+    /// Stop was asked for; tcpdump is finishing the file.
+    Stopping,
+    Done,
+    Failed,
+}
+
+/// How a capture is going, sent to its window as it runs. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureUpdate {
+    pub phase: CapturePhase,
+    /// Why it failed, or what tcpdump said at the end.
+    pub message: Option<String>,
+    /// The image the container runs, with its digest, once running.
+    pub image_id: Option<String>,
+    pub started: Option<f64>,
+    /// When it stops by itself.
+    pub ends: Option<f64>,
+    pub bytes: u64,
+    pub scan: TlsScan,
+}
+
+/// A capture window's own capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureSession {
+    pub context: String,
+    pub namespace: String,
+    pub pod: String,
+    /// The capture container's name in the pod.
+    pub container: String,
+    pub image: String,
+    pub filter: CaptureFilter,
+    /// The tcpdump expression used.
+    pub expression: String,
+    pub secs: u32,
+    /// Where the pcap is being written.
+    pub path: String,
+    pub pod_ips: Vec<String>,
+    /// The event updates arrive on.
+    pub event: String,
+    /// The latest update, for a window that just opened.
+    pub update: CaptureUpdate,
+}
+
+/// Which way a TLS connection went, seen from the captured pod.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TlsDirection {
+    /// Something connected to the pod.
+    Inbound,
+    /// The pod connected out.
+    Outbound,
+    /// Neither end is the pod's address (or its address wasn't known).
+    Other,
+}
+
+/// One TLS connection found in a capture: its ClientHello and, if seen, the
+/// server's answer. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TlsConnection {
+    pub first_seen: f64,
+    /// `address:port`.
+    pub client: String,
+    pub server: String,
+    pub direction: TlsDirection,
+    /// The name the client asked for (SNI), if it sent one.
+    pub server_name: Option<String>,
+    /// Versions the client offered, best first, e.g. ["TLS 1.3", "TLS 1.2"].
+    pub offered: Vec<String>,
+    /// What the server chose: "TLS 1.3", "TLS 1.2", …, or `None` when its
+    /// answer wasn't captured.
+    pub version: Option<String>,
+    /// The cipher suite the server chose, by name where known.
+    pub cipher: Option<String>,
+    /// The server first asked for another key share (HelloRetryRequest).
+    pub retried: bool,
+}
+
+/// What a capture shows about TLS.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TlsScan {
+    /// Packets in the file, and those that held a ClientHello or ServerHello.
+    pub packets: u64,
+    pub hellos: u64,
+    /// In the order they started.
+    pub connections: Vec<TlsConnection>,
 }
 
 /// Why a trace ended.
