@@ -96,7 +96,6 @@ pub fn FolderBrowser(
     };
     let entry_row = move |dir_path: String, e: DirEntry| {
         let full = join(&dir_path, &e.name);
-        let icon = if e.dir { "📁" } else { "📄" };
         let (note, dim, enabled) = entry_state(mode, &e);
         let title = entry_title(mode, e.dir, &full);
         let click = move |_| {
@@ -108,7 +107,7 @@ pub fn FolderBrowser(
         };
         view! {
             <button class="browse-entry" class:dim=dim class:file=!e.dir title=title prop:disabled=!enabled on:click=click>
-                <span aria-hidden="true">{icon}</span>
+                <crate::icons::EntryIcon dir=e.dir />
                 <span class="mono name">{e.name.clone()}</span>
                 <span class="muted entry-note">{note}</span>
             </button>

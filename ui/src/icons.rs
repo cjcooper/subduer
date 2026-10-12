@@ -16,6 +16,7 @@ const PLAY: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M10 8.5l5.5 3.5-5.
 const CLOCK: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>"#;
 const FILE: &str = r#"<path d="M14 3H6.5A2.5 2.5 0 0 0 4 5.5v13A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>"#;
 const LOCK: &str = r#"<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>"#;
+const UNLOCK: &str = r#"<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.75-1.4"/>"#;
 const SCALE: &str = r#"<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>"#;
 const SHIELD: &str = r#"<path d="M12 3l8 3v6c0 4.8-3.4 8-8 9-4.6-1-8-4.2-8-9V6z"/>"#;
 const SHIELD_CHECK: &str = r#"<path d="M12 3l8 3v6c0 4.8-3.4 8-8 9-4.6-1-8-4.2-8-9V6z"/><path d="M9 12l2 2 4-4"/>"#;
@@ -244,6 +245,17 @@ const FORWARD: &str = r#"<path d="M4 8h13M14 4.5L17.5 8 14 11.5"/><path d="M20 1
 #[component]
 pub fn ForwardIcon() -> impl IntoView {
     svg(FORWARD)
+}
+
+/// Folder or file, for the file browser.
+#[component]
+pub fn EntryIcon(dir: bool) -> impl IntoView {
+    svg(if dir { FOLDER } else { FILE })
+}
+
+#[component]
+pub fn LockIcon(#[prop(optional)] open: bool) -> impl IntoView {
+    svg(if open { UNLOCK } else { LOCK })
 }
 
 /// Open/closed indicator for collapsible groups; rotates when `open`.
