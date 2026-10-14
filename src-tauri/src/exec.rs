@@ -12,7 +12,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::AppState;
+use crate::{AppState, Win};
 
 /// Window labels look like `exec-3`; capabilities grant `exec-*`.
 pub const LABEL_PREFIX: &str = "exec-";
@@ -46,13 +46,13 @@ impl ShellWindows {
 /// Opens a new shell window for `target` on the current cluster. Each call
 /// opens another session, like separate terminal tabs.
 #[tauri::command]
-pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, target: ExecTarget) -> Result<(), String> {
+pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, win: Win, target: ExecTarget) -> Result<(), String> {
     let (client, context) = {
-        let session = state.session.read().await;
+        let session = win.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.context.clone())
     };
-    state.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
+    win.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
     let id = state.shells.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let label = format!("{LABEL_PREFIX}{id}");
     let mut title = target.title(&context);
@@ -65,6 +65,7 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         label.clone(),
         ShellWindow { client, context: context.clone(), target, title: title.clone(), input: None, resize: None, task: None },
     );
+    state.adopt(&label, &win.label);
     tracing::info!(%context, %label, "shell window opened");
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?exec={label}").into()))
         .title(&title)
@@ -74,12 +75,15 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         .build()
         .map_err(|e| {
             state.shells.windows.lock().unwrap().remove(&label);
+            state.forget(&label);
             e.to_string()
         })?;
     let handle = app.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Destroyed = event {
-            handle.state::<AppState>().shells.stop(&label);
+            let state = handle.state::<AppState>();
+            state.shells.stop(&label);
+            state.forget(&label);
         }
     });
     Ok(())
@@ -88,11 +92,11 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
 /// Called by a shell window once it's listening and knows its size:
 /// (re)connects the session.
 #[tauri::command]
-pub fn exec_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<ExecSession, String> {
+pub fn exec_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, win: Win, cols: u16, rows: u16) -> Result<ExecSession, String> {
     let label = window.label().to_owned();
     let mut windows = state.shells.windows.lock().unwrap();
     let w = windows.get_mut(&label).ok_or("this shell window is no longer connected")?;
-    state.gate.ensure_writable(&w.context).map_err(|e| e.to_string())?;
+    win.gate.ensure_writable(&w.context).map_err(|e| e.to_string())?;
     if let Some(old) = w.task.take() {
         old.abort();
     }

@@ -11,7 +11,7 @@ use subduer_core::types::{LogBatch, LogSession, LogTarget};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
 
-use crate::AppState;
+use crate::{AppState, Win};
 
 /// Window labels look like `logs-3`; capabilities grant `logs-*`.
 const LABEL_PREFIX: &str = "logs-";
@@ -42,9 +42,9 @@ impl LogWindows {
 /// Opens (or focuses, if already open) a logs window for `target` on the
 /// current cluster.
 #[tauri::command]
-pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, target: LogTarget) -> Result<(), String> {
+pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, win: Win, target: LogTarget) -> Result<(), String> {
     let (client, context) = {
-        let session = state.session.read().await;
+        let session = win.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.context.clone())
     };
@@ -54,7 +54,7 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         .lock()
         .unwrap()
         .iter()
-        .find(|(_, w)| w.context == context && w.target == target)
+        .find(|(label, w)| w.context == context && w.target == target && state.owner(label).as_ref() == Some(&win.label))
         .map(|(label, _)| label.clone());
     if let Some(window) = existing.and_then(|label| app.get_webview_window(&label)) {
         let _ = window.unminimize();
@@ -68,6 +68,7 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         label.clone(),
         LogWindow { client, context, target, task: None },
     );
+    state.adopt(&label, &win.label);
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?logs={label}").into()))
         .title(&title)
         .inner_size(1100.0, 700.0)
@@ -76,12 +77,15 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         .build()
         .map_err(|e| {
             state.logs.windows.lock().unwrap().remove(&label);
+            state.forget(&label);
             e.to_string()
         })?;
     let handle = app.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Destroyed = event {
-            handle.state::<AppState>().logs.stop(&label);
+            let state = handle.state::<AppState>();
+            state.logs.stop(&label);
+            state.forget(&label);
         }
     });
     Ok(())
@@ -113,12 +117,14 @@ pub fn logs_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppStat
     Ok(LogSession { context: w.context.clone(), title: w.target.title(&w.context), target: w.target.clone(), event })
 }
 
-/// Closes every logs, shell and edit window, e.g. when the main window goes away.
-pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
-    for (label, window) in app.webview_windows() {
-        if label.starts_with(LABEL_PREFIX)
+/// Closes the logs, shell and edit windows opened from main window `owner`,
+/// when it goes away.
+pub fn close_all<R: Runtime>(app: &AppHandle<R>, owner: &str) {
+    for label in app.state::<AppState>().children(owner) {
+        if (label.starts_with(LABEL_PREFIX)
             || label.starts_with(crate::exec::LABEL_PREFIX)
-            || label.starts_with(crate::editor::LABEL_PREFIX)
+            || label.starts_with(crate::editor::LABEL_PREFIX))
+            && let Some(window) = app.get_webview_window(&label)
         {
             // Destroyed, not closed: the main window has already asked about unsaved edits.
             let _ = window.destroy();

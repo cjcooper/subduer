@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use subduer_core::forward::{self, ForwardStats};
 use subduer_core::types::{ForwardInfo, ForwardRequest, ForwardSource, PortOption, forward_events};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::AppState;
+use crate::Win;
 
 struct Forward {
     context: String,
@@ -51,18 +51,25 @@ impl Forwards {
             })
             .collect()
     }
+
+    /// Stops every forward, when their window closes.
+    pub fn stop_all(&self) {
+        for (id, f) in std::mem::take(&mut *self.forwards.lock().unwrap()) {
+            f.task.abort();
+            tracing::info!(id, "port-forward stopped with its window");
+        }
+    }
 }
 
-/// Sends the current list to the main window.
-fn broadcast<R: Runtime>(app: &AppHandle<R>) {
-    let list = app.state::<AppState>().forwards.list();
-    let _ = app.emit_to("main", forward_events::CHANGED, list);
+/// Sends the window's current list to it.
+fn broadcast<R: Runtime>(app: &AppHandle<R>, win: &Win) {
+    let _ = app.emit_to(&win.label, forward_events::CHANGED, win.forwards.list());
 }
 
 /// Ports offered by the start dialog.
 #[tauri::command]
 pub async fn forward_ports(
-    state: State<'_, AppState>,
+    state: Win,
     namespace: String,
     source: ForwardSource,
 ) -> Result<Vec<PortOption>, String> {
@@ -71,7 +78,7 @@ pub async fn forward_ports(
 }
 
 #[tauri::command]
-pub async fn start_forward<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, request: ForwardRequest) -> Result<ForwardInfo, String> {
+pub async fn start_forward<R: Runtime>(app: AppHandle<R>, state: Win, request: ForwardRequest) -> Result<ForwardInfo, String> {
     let (client, context) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -81,33 +88,34 @@ pub async fn start_forward<R: Runtime>(app: AppHandle<R>, state: State<'_, AppSt
     let local_port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let stats = Arc::new(Mutex::new(ForwardStats::default()));
     let notify_app = app.clone();
-    let notify: forward::Notify = Arc::new(move || broadcast(&notify_app));
+    let notify_win = state.clone();
+    let notify: forward::Notify = Arc::new(move || broadcast(&notify_app, &notify_win));
     let task = tauri::async_runtime::spawn(forward::serve(client, request.clone(), listener, backend, stats.clone(), notify));
     let id = state.forwards.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     tracing::info!(%context, id, local_port, source = %request.source.label(), "port-forward started");
     state.forwards.forwards.lock().unwrap().insert(id, Forward { context, request, local_port, stats, task });
-    broadcast(&app);
+    broadcast(&app, &state);
     let info = state.forwards.list().into_iter().find(|f| f.id == id).ok_or("forward vanished")?;
     Ok(info)
 }
 
 #[tauri::command]
-pub fn list_forwards(state: State<'_, AppState>) -> Vec<ForwardInfo> {
+pub fn list_forwards(state: Win) -> Vec<ForwardInfo> {
     state.forwards.list()
 }
 
 #[tauri::command]
-pub fn stop_forward<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, id: u64) {
+pub fn stop_forward<R: Runtime>(app: AppHandle<R>, state: Win, id: u64) {
     if let Some(f) = state.forwards.forwards.lock().unwrap().remove(&id) {
         f.task.abort();
         tracing::info!(id, "port-forward stopped");
     }
-    broadcast(&app);
+    broadcast(&app, &state);
 }
 
 /// Opens `http://127.0.0.1:<port>` for a forward in the default browser.
 #[tauri::command]
-pub fn open_forward(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+pub fn open_forward(state: Win, id: u64) -> Result<(), String> {
     let port = state.forwards.forwards.lock().unwrap().get(&id).map(|f| f.local_port).ok_or("no such forward")?;
     open_in_browser(&format!("http://127.0.0.1:{port}/"))
 }

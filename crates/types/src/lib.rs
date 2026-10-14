@@ -926,6 +926,18 @@ pub struct LogBatch {
     pub notices: Vec<String>,
 }
 
+/// What the About window shows: the app, its license, and the licenses of
+/// everything it includes (`THIRD-PARTY-NOTICES.txt`, as generated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AboutInfo {
+    pub name: String,
+    pub version: String,
+    pub maker: String,
+    pub copyright: String,
+    pub license: String,
+    pub notices: String,
+}
+
 /// Returned to a logs window when it starts streaming.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSession {

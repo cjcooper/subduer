@@ -18,7 +18,7 @@ use subduer_core::types::{CapturePhase, CaptureRequest, CaptureSession, CaptureU
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
-use crate::AppState;
+use crate::{AppState, Win};
 use crate::commands::{CmdResult, connected_client};
 
 /// Window labels look like `capture-3`; capabilities grant `capture-*`.
@@ -111,10 +111,10 @@ pub async fn choose_capture_file<R: Runtime>(app: AppHandle<R>, suggested: Strin
 /// Attaches a capture container to the pod (after a dry run, so a refusal
 /// shows in the dialog) and opens the capture's window, which follows it.
 #[tauri::command]
-pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, request: CaptureRequest) -> CmdResult<String> {
-    let client = connected_client(&state).await?;
-    let context = state.session.read().await.as_ref().map(|s| s.context.clone()).ok_or("not connected to a cluster")?;
-    state.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
+pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, win: Win, request: CaptureRequest) -> CmdResult<String> {
+    let client = connected_client(&win).await?;
+    let context = win.session.read().await.as_ref().map(|s| s.context.clone()).ok_or("not connected to a cluster")?;
+    win.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
     let CaptureRequest { namespace, pod, image, filter, secs, path } = request.clone();
     if secs == 0 || secs > capture::MAX_SECS {
         return Err(format!("a capture lasts 1 to {} minutes", capture::MAX_SECS / 60));
@@ -125,7 +125,7 @@ pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppSt
     if path.trim().is_empty() {
         return Err("choose where to save the capture".into());
     }
-    let gate = &state.gate;
+    let gate = &win.gate;
     let lives = secs + GRACE_SECS;
     capture::attach(&client, gate, &context, &namespace, &pod, &image, lives, true).await.map_err(|e| e.user_message())?;
     // The file first: a folder that can't be written fails here, before the pod is changed.

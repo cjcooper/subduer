@@ -443,6 +443,10 @@ SCENARIOS = [
     # ---- Logs and shell windows ----
     S("logs/window", "logstub.js", "logs=app&merged=1", has=["GET /healthz", "web-7d9f-abcde/app", "Wrap"], lacks=["bad response"]),
     S("exec/window", "execstub.js", "exec=app", has=["Shell"]),
+    S("about/window", "aboutstub.js", "about&open=1",
+      has=["Version 0.1.0", "An it-problems application.", "free software under the MIT License", "MIT License · serde, tokio",
+           "Apache License 2.0 · k8s-openapi", "Vendored JavaScript: xterm", "tokio 1.48.0", "3 open-source Rust crates and 1 JavaScript libraries"]),
+    S("about/filter", "aboutstub.js", "about&filter=openapi", has=["Apache License 2.0 · k8s-openapi"], lacks=["MIT License · serde", "Vendored JavaScript"]),
 ]
 
 

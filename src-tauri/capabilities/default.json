@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main, logs, shell, edit and capture windows: core IPC and events",
-  "windows": ["main", "logs-*", "exec-*", "edit-*", "capture-*"],
+  "description": "Main, logs, shell, edit, capture and About windows: core IPC and events",
+  "windows": ["main", "main-*", "logs-*", "exec-*", "edit-*", "capture-*", "about"],
   "permissions": ["core:default"]
 }

@@ -39,6 +39,7 @@ Each system builds only its own bundles. `.github/workflows/build.yml` builds al
 
 ## Behaviour
 
+- **Several windows.** File › New Window (⌘N, Ctrl+N elsewhere) opens another main window. Each one connects on its own, to the same cluster or a different one, and is titled by its context. Nothing is shared between them: "allow changes", the live table, traces and port forwards all belong to one window. The logs, shell and edit windows you open from a window close with it, and its port forwards stop.
 - **Navigation by kind.** All listable kinds come from API discovery. Nodes and Events are listed at the top of the sidebar. Everything else is sorted into collapsible sections: Workloads, Config, Network, Storage, Namespaces, Access Control, Helm (releases), AWS, Google Cloud and Azure (shown only when present), Custom Resources (CRDs and aggregated APIs, grouped by API group) and Other. Kinds have icons, including well-known projects (Kyverno, Datadog, KEDA, External Secrets, Prometheus Operator). Sections start collapsed. Drag a section header to reorder the sections; the order is saved. The section map is in `crates/core/src/catalog.rs`.
 - **Namespace filter.** One namespace or all of them. The choice stays when you switch kinds and is ignored for cluster-scoped kinds.
 - **Cluster page.** Nodes, pods, namespaces and recent warnings, plus memory and CPU (available, used, requested and limits). Also requests by namespace and a per-node table. It refreshes every 30 s. "Used" comes from metrics-server, Prometheus or kubelet stats, and the last hour is charted when Prometheus is available.
@@ -74,6 +75,8 @@ MIT, see [LICENSE](LICENSE). Copyright (c) 2026 it-problems.
 
 The licenses of everything the app includes are in
 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which ships inside every
-installer. Regenerate it with `tools/third-party-notices.sh` after changing
+installer and is compiled into the app: the About window (app menu on macOS,
+Help elsewhere) shows the app's own license and every third-party license with
+the software it covers. Regenerate it with `tools/third-party-notices.sh` after changing
 dependencies (needs `cargo install cargo-about --features cli`); the script
 fails if a crate brings in a license not accepted in `about.toml`.

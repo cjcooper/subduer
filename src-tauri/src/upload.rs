@@ -3,17 +3,16 @@
 //! URL-encoded JSON. Gated: it changes the container's filesystem.
 
 use subduer_core::types::{DirListing, DownloadResult, UploadOutcome, UploadTarget};
-use tauri::State;
 use tauri::ipc::{InvokeBody, Request};
 
 use tauri::Runtime;
-use crate::AppState;
+use crate::Win;
 
 /// Lists a directory in a container for the upload dialog's browser. Read
 /// only, so not gated; `suggest` adds writable places (/tmp, $HOME, mounts).
 #[tauri::command]
 pub async fn browse_dir(
-    state: State<'_, AppState>,
+    state: Win,
     namespace: String,
     pod: String,
     container: String,
@@ -27,7 +26,7 @@ pub async fn browse_dir(
 }
 
 #[tauri::command]
-pub async fn upload_file(state: State<'_, AppState>, request: Request<'_>) -> Result<UploadOutcome, String> {
+pub async fn upload_file(state: Win, request: Request<'_>) -> Result<UploadOutcome, String> {
     let header = request
         .headers()
         .get("x-upload")
@@ -60,7 +59,7 @@ pub async fn upload_file(state: State<'_, AppState>, request: Request<'_>) -> Re
 #[tauri::command]
 pub async fn download_file<R: Runtime>(
     app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
+    state: Win,
     namespace: String,
     pod: String,
     container: String,

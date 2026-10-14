@@ -10,7 +10,7 @@ use subduer_core::kube::Client;
 use subduer_core::types::{EditSession, EditTarget, edit_events};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
-use crate::AppState;
+use crate::{AppState, Win};
 
 /// Window labels look like `edit-3`; capabilities grant `edit-*`.
 pub const LABEL_PREFIX: &str = "edit-";
@@ -47,12 +47,12 @@ fn prod_like(context: &str) -> bool {
 /// Opens (or focuses, if already open) an edit window for one object on the
 /// current cluster.
 #[tauri::command]
-pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, target: EditTarget) -> Result<(), String> {
+pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, win: Win, target: EditTarget) -> Result<(), String> {
     if !subduer_core::edit::editable(&target.kind) {
         return Err(format!("{} can't be edited as YAML", target.kind.kind));
     }
     let (client, context) = {
-        let session = state.session.read().await;
+        let session = win.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.context.clone())
     };
@@ -62,7 +62,7 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
         .lock()
         .unwrap()
         .iter()
-        .find(|(_, w)| w.context == context && w.target == target)
+        .find(|(label, w)| w.context == context && w.target == target && state.owner(label).as_ref() == Some(&win.label))
         .map(|(label, _)| label.clone());
     if let Some(window) = existing.and_then(|label| app.get_webview_window(&label)) {
         let _ = window.unminimize();
@@ -77,6 +77,7 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
         .lock()
         .unwrap()
         .insert(label.clone(), EditWindow { client, context, target, dirty: false });
+    state.adopt(&label, &win.label);
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?edit={label}").into()))
         .title(&title)
         .inner_size(1000.0, 780.0)
@@ -85,6 +86,7 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
         .build()
         .map_err(|e| {
             state.editors.windows.lock().unwrap().remove(&label);
+            state.forget(&label);
             e.to_string()
         })?;
     let handle = app.clone();
@@ -96,7 +98,9 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
             let _ = events.emit_to(events.label(), edit_events::CLOSE_REQUESTED, ());
         }
         WindowEvent::Destroyed => {
-            handle.state::<AppState>().editors.windows.lock().unwrap().remove(&label);
+            let state = handle.state::<AppState>();
+            state.editors.windows.lock().unwrap().remove(&label);
+            state.forget(&label);
         }
         _ => {}
     });
@@ -112,14 +116,14 @@ fn window_target<R: Runtime>(window: &WebviewWindow<R>, state: &AppState) -> Res
 /// Called by an edit window when it opens, and on Reload: the object's
 /// current YAML and what the window needs to know about its context.
 #[tauri::command]
-pub async fn editor_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>) -> Result<EditSession, String> {
+pub async fn editor_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, win: Win) -> Result<EditSession, String> {
     let (client, context, target) = window_target(&window, &state)?;
     let yaml = subduer_core::edit::load(&client, &target.kind, target.namespace.as_deref(), &target.name)
         .await
         .map_err(|e| e.user_message())?;
     Ok(EditSession {
         prod_like: prod_like(&context),
-        unlocked: state.gate.is_unlocked(&context),
+        unlocked: win.gate.is_unlocked(&context),
         title: target.title(&context),
         context,
         target,
@@ -128,19 +132,20 @@ pub async fn editor_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_,
 }
 
 /// Saves the edited YAML (or, with `dry_run`, only has the server validate
-/// it). Returns the saved YAML. After a real save the main window is told,
+/// it). Returns the saved YAML. After a real save its main window is told,
 /// so it can refresh what it shows.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn editor_save<R: Runtime>(
     window: WebviewWindow<R>,
     state: State<'_, AppState>,
+    win: Win,
     yaml: String,
     dry_run: bool,
 ) -> Result<String, String> {
     let (client, context, target) = window_target(&window, &state)?;
     let saved = subduer_core::edit::save(
         &client,
-        &state.gate,
+        &win.gate,
         &context,
         &target.kind,
         target.namespace.as_deref(),
@@ -154,7 +159,7 @@ pub async fn editor_save<R: Runtime>(
         if let Some(w) = state.editors.windows.lock().unwrap().get_mut(window.label()) {
             w.dirty = false;
         }
-        let _ = window.emit_to("main", edit_events::SAVED, &target);
+        let _ = window.emit_to(&win.label, edit_events::SAVED, &target);
     }
     Ok(saved)
 }
@@ -176,12 +181,20 @@ pub fn editor_close<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppSt
     let _ = window.close();
 }
 
-/// If an edit window holds unsaved YAML, focuses it and has it ask whether to
-/// discard (it closes itself then). True when one was asked: the caller holds
-/// its close or quit, and the user closes or quits again afterwards.
-pub fn ask_dirty<R: Runtime>(app: &AppHandle<R>) -> bool {
+/// If an edit window opened from main window `owner` (any, for quitting)
+/// holds unsaved YAML, focuses it and has it ask whether to discard (it closes
+/// itself then). True when one was asked: the caller holds its close or quit,
+/// and the user closes or quits again afterwards.
+pub fn ask_dirty<R: Runtime>(app: &AppHandle<R>, owner: Option<&str>) -> bool {
     let state = app.state::<AppState>();
-    let dirty = state.editors.windows.lock().unwrap().iter().find(|(_, w)| w.dirty).map(|(l, _)| l.clone());
+    let dirty = state
+        .editors
+        .windows
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(label, w)| w.dirty && owner.is_none_or(|o| state.owner(label).as_deref() == Some(o)))
+        .map(|(l, _)| l.clone());
     let Some(window) = dirty.and_then(|label| app.get_webview_window(&label)) else { return false };
     let _ = window.unminimize();
     let _ = window.set_focus();

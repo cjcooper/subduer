@@ -9,26 +9,32 @@ use subduer_core::types::{DataChange, ExecTarget, ForwardRequest, ForwardSource,
 use tauri::test::{MockRuntime, mock_app};
 use tauri::{App, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::{AppState, Session, commands};
+use crate::{AppState, MAIN_LABEL, Session, Win, commands};
 
 const CTX: &str = "acme-uat";
 
 fn app() -> App<MockRuntime> {
     let app = mock_app();
     app.manage(AppState::default());
+    app.state::<AppState>().add_window(MAIN_LABEL);
     app
+}
+
+/// The state of the app's main window.
+fn w(app: &App<MockRuntime>) -> Win {
+    app.state::<AppState>().window(MAIN_LABEL).unwrap()
 }
 
 /// A mock app connected to `api` as context `acme-uat`.
 async fn connected(api: &MockApi) -> App<MockRuntime> {
     let app = app();
-    *app.state::<AppState>().session.write().await =
+    *w(&app).session.write().await =
         Some(Session { context: CTX.into(), client: api.client(), history: Default::default() });
     app
 }
 
 fn unlock(app: &App<MockRuntime>) {
-    commands::set_unlocked(app.state(), CTX.into(), true);
+    commands::set_unlocked(w(app), CTX.into(), true);
 }
 
 fn deployment() -> subduer_core::types::KindRef {
@@ -38,7 +44,7 @@ fn deployment() -> subduer_core::types::KindRef {
 #[tokio::test]
 async fn reads_need_a_connection() {
     let app = app();
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     let not = "not connected to a cluster";
     assert_eq!(commands::pod_details(s(), "shop".into(), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::pod_history(s(), "shop".into(), "api".into()).await.unwrap_err(), not);
@@ -66,9 +72,9 @@ async fn connection_check_reports_expired_credentials() {
     let api = MockApi::new();
     api.on("GET", "/version", json!({"major": "1", "minor": "36", "gitVersion": "v1.36.0"}));
     let app = connected(&api).await;
-    commands::check_connection(app.state()).await.unwrap();
+    commands::check_connection(w(&app)).await.unwrap();
     api.on_error("GET", "/version", 401, "Unauthorized", "Unauthorized");
-    assert!(commands::check_connection(app.state()).await.unwrap_err().contains("Unauthorized"));
+    assert!(commands::check_connection(w(&app)).await.unwrap_err().contains("Unauthorized"));
 }
 
 #[tokio::test]
@@ -76,7 +82,7 @@ async fn changes_need_the_same_context_and_an_unlocked_gate() {
     let api = MockApi::new();
     api.on("DELETE", "/apis/apps/v1/namespaces/shop/deployments/api", json!({"kind": "Status", "status": "Success"}));
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     // The dialog's context isn't the connected one.
     let err = commands::delete_resource(s(), "acme-prd".into(), deployment(), Some("shop".into()), "api".into()).await.unwrap_err();
     assert_eq!(err, "connected to acme-uat now, not acme-prd; nothing was deleted");
@@ -94,7 +100,7 @@ async fn changes_need_the_same_context_and_an_unlocked_gate() {
 
     // Not connected at all.
     let other = self::app();
-    let err = commands::restart_workload(other.state(), CTX.into(), deployment(), "shop".into(), "api".into()).await.unwrap_err();
+    let err = commands::restart_workload(w(&other), CTX.into(), deployment(), "shop".into(), "api".into()).await.unwrap_err();
     assert_eq!(err, "not connected to a cluster");
 }
 
@@ -115,7 +121,7 @@ async fn workload_changes_reach_the_api() {
     api.on("POST", "/apis/batch/v1/namespaces/shop/jobs", object("batch/v1", "Job", Some("shop"), "nightly-manual-abcde", json!({})));
     let app = connected(&api).await;
     unlock(&app);
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
 
     let r = commands::get_replicas(s(), deployment(), "shop".into(), "api".into()).await.unwrap();
     assert_eq!((r.desired, r.current), (3, 2));
@@ -149,7 +155,7 @@ async fn config_and_storage_changes_reach_the_api() {
     api.on("POST", "/api/v1/namespaces", object("v1", "Namespace", None, "team-sandbox", json!({})));
     let app = connected(&api).await;
     unlock(&app);
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
 
     let cm = kind("", "v1", "ConfigMap", "configmaps", true);
     let changes = vec![DataChange { key: "a".into(), value: Some("1".into()) }];
@@ -176,7 +182,7 @@ async fn config_and_storage_changes_reach_the_api() {
 async fn helm_changes_are_refused_before_helm_runs() {
     let api = MockApi::new();
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     // Locked: refused before `helm` would run.
     let err = commands::helm_rollback(s(), CTX.into(), "shop".into(), "web".into(), 2, false).await.unwrap_err();
     assert!(err.contains("read-only"), "{err}");
@@ -207,7 +213,7 @@ async fn reads_come_back_from_the_api() {
         "apiVersion": "authorization.k8s.io/v1", "kind": "SubjectAccessReview",
         "spec": {}, "status": {"allowed": true, "reason": "RBAC: allowed by RoleBinding"}}));
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
 
     let pod = commands::pod_details(s(), "shop".into(), "api-1".into()).await.unwrap();
     assert_eq!((pod.name.as_str(), pod.node.as_deref()), ("api-1", Some("node-a")));
@@ -233,14 +239,14 @@ async fn history_falls_back_to_local_samples() {
     api.on("GET", "/api/v1/services", list("ServiceList", vec![]));
     api.on("GET", "/api/v1/namespaces/shop/pods/api-1", pod("shop", "api-1", "node-a", json!({})));
     let app = connected(&api).await;
-    let history = commands::pod_history(app.state(), "shop".into(), "api-1".into()).await.unwrap();
+    let history = commands::pod_history(w(&app), "shop".into(), "api-1".into()).await.unwrap();
     assert_eq!(history.source, subduer_core::types::HistorySource::Local);
 }
 
 #[tokio::test]
 async fn small_commands() {
     let app = app();
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     commands::set_unsaved(s(), true);
     assert!(s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
     // No main window in the mock: closing just clears the flag.
@@ -261,7 +267,7 @@ async fn small_commands() {
 
 #[tokio::test]
 async fn connect_refuses_an_unknown_context() {
-    let err = commands::connect(app().state(), "no-such-context-anywhere".into()).await.unwrap_err();
+    let err = commands::connect(app().handle().clone(), w(&app()), "no-such-context-anywhere".into()).await.unwrap_err();
     assert!(err.contains("no-such-context-anywhere") || err.contains("kubeconfig"), "{err}");
 }
 
@@ -269,11 +275,11 @@ async fn connect_refuses_an_unknown_context() {
 async fn watching_returns_increasing_ids() {
     let api = MockApi::new();
     let app = connected(&api).await;
-    let first = commands::watch_resources(app.handle().clone(), app.state(), deployment(), None).await.unwrap();
-    let second = commands::watch_resources(app.handle().clone(), app.state(), deployment(), Some("shop".into())).await.unwrap();
+    let first = commands::watch_resources(app.handle().clone(), w(&app), deployment(), None).await.unwrap();
+    let second = commands::watch_resources(app.handle().clone(), w(&app), deployment(), Some("shop".into())).await.unwrap();
     assert_eq!((first, second), (1, 2));
-    commands::stop_watch(app.state());
-    assert!(app.state::<AppState>().watch.lock().unwrap().is_none());
+    commands::stop_watch(w(&app));
+    assert!(w(&app).watch.lock().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -282,9 +288,9 @@ async fn logs_windows_open_once_per_target() {
     api.on_text("GET", "/api/v1/namespaces/shop/pods/api-1/log", 200, "hello\n");
     let app = connected(&api).await;
     let target = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() } };
-    crate::logs::open_logs(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
     // The same target focuses the existing window instead of opening another.
-    crate::logs::open_logs(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
     let windows = app.webview_windows();
     let labels: Vec<&String> = windows.keys().filter(|l| l.starts_with("logs-")).collect();
     assert_eq!(labels.len(), 1);
@@ -292,13 +298,13 @@ async fn logs_windows_open_once_per_target() {
     let session = crate::logs::logs_start(window.clone(), app.state(), false).unwrap();
     assert_eq!(session.title, "app · shop/api-1 · acme-uat · Logs");
     assert_eq!(session.event, *labels[0]);
-    crate::logs::close_all(app.handle());
+    crate::logs::close_all(app.handle(), MAIN_LABEL);
 
     // A window the app doesn't know about isn't connected.
     let stray = WebviewWindowBuilder::new(&app, "logs-99", WebviewUrl::default()).build().unwrap();
     assert!(crate::logs::logs_start(stray, app.state(), false).is_err());
     let none = self::app();
-    assert!(crate::logs::open_logs(none.handle().clone(), none.state(), target).await.is_err());
+    assert!(crate::logs::open_logs(none.handle().clone(), none.state(), w(&none), target).await.is_err());
 }
 
 #[tokio::test]
@@ -306,21 +312,21 @@ async fn shell_windows_need_an_unlocked_context() {
     let api = MockApi::new();
     let app = connected(&api).await;
     let target = ExecTarget { namespace: "shop".into(), pod: "api-1".into(), container: "app".into() };
-    let err = crate::exec::open_exec(app.handle().clone(), app.state(), target.clone()).await.unwrap_err();
+    let err = crate::exec::open_exec(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     unlock(&app);
-    crate::exec::open_exec(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    crate::exec::open_exec(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
     let label = app.webview_windows().into_keys().find(|l| l.starts_with("exec-")).unwrap();
     let window = app.get_webview_window(&label).unwrap();
-    let session = crate::exec::exec_start(window.clone(), app.state(), 80, 24).unwrap();
+    let session = crate::exec::exec_start(window.clone(), app.state(), w(&app), 80, 24).unwrap();
     assert_eq!(session.title, "app · shop/api-1 · acme-uat · Shell");
     crate::exec::exec_input(window.clone(), app.state(), "ls\n".into());
     crate::exec::exec_resize(window.clone(), app.state(), 100, 30);
     // Locking the context stops a reconnect.
-    commands::set_unlocked(app.state(), CTX.into(), false);
-    assert!(crate::exec::exec_start(window, app.state(), 80, 24).is_err());
+    commands::set_unlocked(w(&app), CTX.into(), false);
+    assert!(crate::exec::exec_start(window, app.state(), w(&app), 80, 24).is_err());
     let none = self::app();
-    assert!(crate::exec::open_exec(none.handle().clone(), none.state(), target).await.is_err());
+    assert!(crate::exec::open_exec(none.handle().clone(), none.state(), w(&none), target).await.is_err());
 }
 
 #[tokio::test]
@@ -329,17 +335,59 @@ async fn port_forwards_start_list_and_stop() {
     api.on("GET", "/api/v1/namespaces/shop/pods/api-1", pod("shop", "api-1", "node-a", json!({
         "spec": {"containers": [{"name": "app", "image": "acme/app:1", "ports": [{"name": "http", "containerPort": 8080}]}]}})));
     let app = connected(&api).await;
-    let ports = crate::forward::forward_ports(app.state(), "shop".into(), ForwardSource::Pod { pod: "api-1".into() }).await.unwrap();
+    let ports = crate::forward::forward_ports(w(&app), "shop".into(), ForwardSource::Pod { pod: "api-1".into() }).await.unwrap();
     assert_eq!(ports[0].port, 8080);
     let request = ForwardRequest { namespace: "shop".into(), source: ForwardSource::Pod { pod: "api-1".into() }, remote_port: 8080, local_port: 0 };
-    let info = crate::forward::start_forward(app.handle().clone(), app.state(), request.clone()).await.unwrap();
+    let info = crate::forward::start_forward(app.handle().clone(), w(&app), request.clone()).await.unwrap();
     assert!(info.local_port > 0);
     assert_eq!((info.context.as_str(), info.remote_port), (CTX, 8080));
-    assert_eq!(crate::forward::list_forwards(app.state()).len(), 1);
-    crate::forward::stop_forward(app.handle().clone(), app.state(), info.id);
-    assert!(crate::forward::list_forwards(app.state()).is_empty());
+    assert_eq!(crate::forward::list_forwards(w(&app)).len(), 1);
+    crate::forward::stop_forward(app.handle().clone(), w(&app), info.id);
+    assert!(crate::forward::list_forwards(w(&app)).is_empty());
     let none = self::app();
-    assert!(crate::forward::start_forward(none.handle().clone(), none.state(), request).await.is_err());
+    assert!(crate::forward::start_forward(none.handle().clone(), w(&none), request).await.is_err());
+}
+
+#[tokio::test]
+async fn main_windows_keep_to_themselves() {
+    let uat = MockApi::new();
+    uat.on("GET", "/api/v1/namespaces/shop/pods/api-1", pod("shop", "api-1", "node-a", json!({
+        "spec": {"containers": [{"name": "app", "image": "acme/app:1", "ports": [{"containerPort": 8080}]}]}})));
+    let app = connected(&uat).await;
+    let state = app.state::<AppState>();
+    state.add_window("main-2");
+    let second = state.window("main-2").unwrap();
+    assert_eq!(second.label, "main-2");
+
+    // Not connected just because the first window is.
+    assert_eq!(commands::check_connection(second.clone()).await.unwrap_err(), "not connected to a cluster");
+    // Connected to the same context, allowing changes in one doesn't in the other.
+    *second.session.write().await = Some(Session { context: CTX.into(), client: uat.client(), history: Default::default() });
+    unlock(&app);
+    assert!(w(&app).gate.is_unlocked(CTX) && !second.gate.is_unlocked(CTX));
+    let target = ExecTarget { namespace: "shop".into(), pod: "api-1".into(), container: "app".into() };
+    let err = crate::exec::open_exec(app.handle().clone(), app.state(), second.clone(), target).await.unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+
+    // Each window lists only its own forwards.
+    let request = ForwardRequest { namespace: "shop".into(), source: ForwardSource::Pod { pod: "api-1".into() }, remote_port: 8080, local_port: 0 };
+    crate::forward::start_forward(app.handle().clone(), w(&app), request).await.unwrap();
+    assert_eq!(crate::forward::list_forwards(w(&app)).len(), 1);
+    assert!(crate::forward::list_forwards(second.clone()).is_empty());
+
+    // The same logs open once per window, each resolving to its own main
+    // window, which is the only one that closes it.
+    let logs = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() } };
+    crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), logs.clone()).await.unwrap();
+    crate::logs::open_logs(app.handle().clone(), app.state(), second.clone(), logs).await.unwrap();
+    let labels: Vec<String> = app.webview_windows().into_keys().filter(|l| l.starts_with("logs-")).collect();
+    assert_eq!(labels.len(), 2);
+    let owners: Vec<String> = labels.iter().map(|l| state.owner(l).unwrap()).collect();
+    assert!(owners.contains(&MAIN_LABEL.to_owned()) && owners.contains(&"main-2".to_owned()));
+    let first_child = &labels[owners.iter().position(|o| o == MAIN_LABEL).unwrap()];
+    assert_eq!(state.window(first_child).unwrap().label, MAIN_LABEL);
+    assert_eq!(state.children(MAIN_LABEL), vec![first_child.clone()]);
+    assert_eq!(state.children("main-2").len(), 1);
 }
 
 #[tokio::test]
@@ -347,9 +395,9 @@ async fn container_files_report_api_errors() {
     let api = MockApi::new();
     let app = connected(&api).await;
     // The fake server can't upgrade to a websocket: a clear error, no panic.
-    let err = crate::upload::browse_dir(app.state(), "shop".into(), "api-1".into(), "app".into(), "/".into(), true).await.unwrap_err();
+    let err = crate::upload::browse_dir(w(&app), "shop".into(), "api-1".into(), "app".into(), "/".into(), true).await.unwrap_err();
     assert!(!err.is_empty());
-    let err = crate::upload::download_file(app.handle().clone(), app.state(), "shop".into(), "api-1".into(), "app".into(), "/etc/hosts".into())
+    let err = crate::upload::download_file(app.handle().clone(), w(&app), "shop".into(), "api-1".into(), "app".into(), "/etc/hosts".into())
         .await
         .unwrap_err();
     assert!(!err.is_empty());
@@ -375,8 +423,8 @@ fn contexts_come_from_the_kubeconfig() {
     // different expectation; connect_refuses_an_unknown_context fails either way.
     unsafe { std::env::set_var("KUBECONFIG", &path) };
     let app = app();
-    commands::set_unlocked(app.state(), "acme-uat".into(), true);
-    let list = commands::list_contexts(app.state()).unwrap();
+    commands::set_unlocked(w(&app), "acme-uat".into(), true);
+    let list = commands::list_contexts(w(&app)).unwrap();
     assert_eq!(list.current.as_deref(), Some("acme-uat"));
     let uat = list.contexts.iter().find(|c| c.name == "acme-uat").unwrap();
     let prd = list.contexts.iter().find(|c| c.name == "acme-prd").unwrap();
@@ -402,18 +450,18 @@ async fn overview_and_workloads_come_back_from_the_api() {
     api.on("GET", "/api/v1/namespaces/shop/events", list("EventList", vec![]));
     let app = connected(&api).await;
 
-    let overview = commands::cluster_overview(app.state()).await.unwrap();
+    let overview = commands::cluster_overview(w(&app)).await.unwrap();
     assert_eq!(overview.nodes.len(), 1);
     assert_eq!(overview.nodes[0].name, "node-a");
-    let details = commands::workload_details(app.state(), deployment(), "shop".into(), "api".into()).await.unwrap();
+    let details = commands::workload_details(w(&app), deployment(), "shop".into(), "api".into()).await.unwrap();
     assert_eq!((details.kind.as_str(), details.status.as_str()), ("Deployment", "Available"));
-    let history = commands::workload_history(app.state(), deployment(), "shop".into(), "api".into()).await.unwrap();
+    let history = commands::workload_history(w(&app), deployment(), "shop".into(), "api".into()).await.unwrap();
     assert_eq!(history.source, subduer_core::types::HistorySource::Local);
     // No Prometheus, kubelet stats or metrics-server here: an empty local series.
-    let history = commands::node_history(app.state(), "node-a".into()).await.unwrap();
+    let history = commands::node_history(w(&app), "node-a".into()).await.unwrap();
     assert_eq!(history.source, subduer_core::types::HistorySource::Local);
     assert!(history.pod.cpu.is_empty());
-    let err = commands::workload_details(app.state(), deployment(), "shop".into(), "gone".into()).await.unwrap_err();
+    let err = commands::workload_details(w(&app), deployment(), "shop".into(), "gone".into()).await.unwrap_err();
     assert!(!err.is_empty());
 }
 
@@ -430,45 +478,45 @@ async fn edit_windows_load_save_and_guard_unsaved_edits() {
 
     // Helm releases aren't editable; opening twice focuses the same window.
     let helm = EditTarget { kind: subduer_core::helm::release_kind(), namespace: Some("shop".into()), name: "web".into() };
-    assert!(crate::editor::open_editor(app.handle().clone(), app.state(), helm).await.is_err());
-    crate::editor::open_editor(app.handle().clone(), app.state(), target.clone()).await.unwrap();
-    crate::editor::open_editor(app.handle().clone(), app.state(), target.clone()).await.unwrap();
+    assert!(crate::editor::open_editor(app.handle().clone(), app.state(), w(&app), helm).await.is_err());
+    crate::editor::open_editor(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
+    crate::editor::open_editor(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
     let labels: Vec<String> = app.webview_windows().into_keys().filter(|l| l.starts_with("edit-")).collect();
     assert_eq!(labels.len(), 1);
     let window = app.get_webview_window(&labels[0]).unwrap();
 
-    let session = crate::editor::editor_start(window.clone(), app.state()).await.unwrap();
+    let session = crate::editor::editor_start(window.clone(), app.state(), w(&app)).await.unwrap();
     assert_eq!(session.title, "ConfigMap shop/app · acme-uat · Edit");
     assert!(!session.unlocked && session.yaml.contains("a: '1'"));
     let edited = session.yaml.replace("a: '1'", "a: '2'");
 
     // A dry run works while locked; a real save needs the context unlocked.
-    let checked = crate::editor::editor_save(window.clone(), app.state(), edited.clone(), true).await.unwrap();
+    let checked = crate::editor::editor_save(window.clone(), app.state(), w(&app), edited.clone(), true).await.unwrap();
     assert!(checked.contains("a: '2'"));
     assert!(api.calls_to("PUT", path).pop().unwrap().query.contains("dryRun=All"));
-    let err = crate::editor::editor_save(window.clone(), app.state(), edited.clone(), false).await.unwrap_err();
+    let err = crate::editor::editor_save(window.clone(), app.state(), w(&app), edited.clone(), false).await.unwrap_err();
     assert!(err.contains("read-only"), "{err}");
-    let err = crate::editor::editor_save(window.clone(), app.state(), "kind: [".into(), true).await.unwrap_err();
+    let err = crate::editor::editor_save(window.clone(), app.state(), w(&app), "kind: [".into(), true).await.unwrap_err();
     assert!(err.starts_with("Not valid YAML"), "{err}");
 
     // Unsaved edits hold closing the main window or quitting.
     crate::editor::editor_dirty(window.clone(), app.state(), true);
-    assert!(crate::editor::ask_dirty(app.handle()));
+    assert!(crate::editor::ask_dirty(app.handle(), None));
     unlock(&app);
-    crate::editor::editor_save(window.clone(), app.state(), edited, false).await.unwrap();
+    crate::editor::editor_save(window.clone(), app.state(), w(&app), edited, false).await.unwrap();
     assert!(!api.calls_to("PUT", path).pop().unwrap().query.contains("dryRun"));
     // Saving clears the unsaved flag.
-    assert!(!crate::editor::ask_dirty(app.handle()));
+    assert!(!crate::editor::ask_dirty(app.handle(), None));
     crate::editor::editor_dirty(window.clone(), app.state(), true);
     crate::editor::editor_close(window.clone(), app.state());
-    assert!(!crate::editor::ask_dirty(app.handle()));
+    assert!(!crate::editor::ask_dirty(app.handle(), None));
 
     // A window the app doesn't know about isn't connected; nor is a session-less app.
     let stray = WebviewWindowBuilder::new(&app, "edit-99", WebviewUrl::default()).build().unwrap();
-    assert!(crate::editor::editor_start(stray.clone(), app.state()).await.is_err());
-    assert!(crate::editor::editor_save(stray, app.state(), String::new(), true).await.is_err());
+    assert!(crate::editor::editor_start(stray.clone(), app.state(), w(&app)).await.is_err());
+    assert!(crate::editor::editor_save(stray, app.state(), w(&app), String::new(), true).await.is_err());
     let none = self::app();
-    assert!(crate::editor::open_editor(none.handle().clone(), none.state(), target).await.is_err());
+    assert!(crate::editor::open_editor(none.handle().clone(), none.state(), w(&none), target).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -494,7 +542,7 @@ async fn traces_start_report_and_stop() {
     };
     api.on("GET", "/apis/batch/v1/namespaces/shop/jobs", list("JobList", vec![job("nightly-1", Some("nightly")), job("once", None)]));
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     let dir = std::env::temp_dir().join(format!("subduer-tauri-trace-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("shop").display().to_string();
@@ -519,8 +567,15 @@ async fn traces_start_report_and_stop() {
     // No Prometheus here; the hour of retention assumed still allows 30 minutes.
     assert_eq!((status.context.as_str(), status.prometheus, status.stopping, status.pull_every), (CTX, false, false, 1800.0));
     assert!(s().must_ask(), "closing and quitting ask while a trace runs");
-    let again = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, file.clone(), EVERY);
+    let again = trace::start_trace(app.handle().clone(), s(), CTX.into(), scope.clone(), file.clone(), EVERY);
     assert!(again.await.unwrap_err().contains("already running"));
+    // Another window may trace too, but not into the same file.
+    let second_window = app.state::<AppState>().add_window("main-2");
+    *second_window.session.write().await = Some(Session { context: CTX.into(), client: api.client(), history: Default::default() });
+    let w2 = app.state::<AppState>().window("main-2").unwrap();
+    let same_file = trace::start_trace(app.handle().clone(), w2.clone(), CTX.into(), scope, file.clone(), EVERY);
+    assert!(same_file.await.unwrap_err().contains("another window"));
+    assert!(!w2.must_ask());
     assert_eq!(trace::trace_status(s()).await.unwrap().unwrap().path, status.path);
     // Only files this app recorded can be revealed.
     assert!(trace::reveal_trace(s(), "/etc/hosts".into()).unwrap_err().contains("only traces recorded"));
@@ -547,8 +602,8 @@ async fn traces_start_report_and_stop() {
     trace::start_trace(app.handle().clone(), s(), CTX.into(), scope, third.clone(), EVERY).await.unwrap();
     let handle = app.handle().clone();
     tokio::task::spawn_blocking(move || {
-        trace::stop_on_exit(&handle.state::<AppState>().traces);
-        trace::stop_on_exit(&handle.state::<AppState>().traces);
+        trace::stop_on_exit(&handle.state::<AppState>().window(MAIN_LABEL).unwrap().traces);
+        trace::stop_on_exit(&handle.state::<AppState>().window(MAIN_LABEL).unwrap().traces);
     })
     .await
     .unwrap();
@@ -591,7 +646,7 @@ async fn rightsizing_needs_the_context_and_the_gate() {
     api.on("GET", path, web.clone());
     api.on("PATCH", path, web);
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     let change = RightsizeChange {
         kind: "Deployment".into(),
         namespace: "shop".into(),
@@ -616,7 +671,7 @@ async fn captures_are_gated_checked_and_dry_run_first() {
     let all = || CaptureFilter { traffic: CaptureTraffic::All, handshakes_only: true };
     let api = MockApi::new();
     let app = connected(&api).await;
-    let s = || app.state::<AppState>();
+    let s = || w(&app);
     let dir = std::env::temp_dir().join(format!("subduer-tauri-capture-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("api-1.pcap");
@@ -628,7 +683,7 @@ async fn captures_are_gated_checked_and_dry_run_first() {
         secs,
         path: file.display().to_string(),
     };
-    let start = |r: CaptureRequest| crate::capture::start_capture(app.handle().clone(), s(), r);
+    let start = |r: CaptureRequest| crate::capture::start_capture(app.handle().clone(), app.state(), s(), r);
 
     // It changes the pod, so it's refused while the context is locked.
     let locked = start(request(60, all())).await.unwrap_err();
@@ -661,10 +716,24 @@ async fn captures_are_gated_checked_and_dry_run_first() {
     let api = MockApi::new();
     api.on_query("PATCH", path, "dryRun", pod("shop", "api-1", "n1", json!({})));
     api.on_error("PATCH", path, 409, "Conflict", "the object has been modified");
-    *app.state::<AppState>().session.write().await = Some(Session { context: CTX.into(), client: api.client(), history: Default::default() });
+    *w(&app).session.write().await = Some(Session { context: CTX.into(), client: api.client(), history: Default::default() });
     let refused = start(request(60, all())).await.unwrap_err();
     assert!(refused.contains("modified"), "{refused}");
     assert_eq!(api.calls_to("PATCH", path).len(), 2);
     assert!(!file.exists());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn about_carries_every_license() {
+    let app = app();
+    let info = crate::about::about_info(app.handle().clone());
+    assert!(info.license.starts_with("MIT License"));
+    assert_eq!(info.maker, crate::menu::MAKER);
+    // The crates the app is built on, and the vendored JavaScript.
+    for name in ["\n  tauri ", "\n  kube ", "\n  leptos ", "Vendored JavaScript: ace", "Vendored JavaScript: xterm"] {
+        assert!(info.notices.contains(name), "{name:?} missing from the notices");
+    }
+    // Our own crates aren't third-party.
+    assert!(!info.notices.contains("\n  subduer-"));
 }

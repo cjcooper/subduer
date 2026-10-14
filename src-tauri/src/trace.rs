@@ -13,10 +13,10 @@ use subduer_core::types::{
     TraceComparison, TraceDaily, TraceEnd, TraceKey, TraceReview, TraceScope, TraceSeries, TraceStatus, TraceSummary, TraceTargets,
 };
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::oneshot;
 
-use crate::AppState;
+use crate::{AppState, Win};
 use crate::commands::{CmdResult, connected_client, err};
 
 /// Sent to every window with the running trace's status, or `null` once it ended.
@@ -85,7 +85,7 @@ pub fn stop_on_exit(runner: &TraceRunner) {
 
 /// Workloads and running pods in a namespace, for the start dialog.
 #[tauri::command]
-pub async fn trace_targets(state: State<'_, AppState>, namespace: String) -> CmdResult<TraceTargets> {
+pub async fn trace_targets(state: Win, namespace: String) -> CmdResult<TraceTargets> {
     let client = connected_client(&state).await?;
     subduer_core::trace::targets(&client, &namespace).await.map_err(err)
 }
@@ -95,7 +95,6 @@ pub async fn trace_targets(state: State<'_, AppState>, namespace: String) -> Cmd
 /// asked about replacing an existing file.
 #[tauri::command]
 pub async fn choose_trace_file<R: Runtime>(app: AppHandle<R>, suggested: String) -> CmdResult<Option<String>> {
-    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = oneshot::channel();
     let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_file_name(&suggested).set_title("Save trace as");
@@ -128,7 +127,7 @@ fn with_extension(path: &Path) -> PathBuf {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn start_trace<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     scope: TraceScope,
     path: String,
@@ -148,6 +147,15 @@ pub async fn start_trace<R: Runtime>(
         return Err("a trace is already running; stop it first".into());
     }
     let path = with_extension(Path::new(&path));
+    // Each window runs its own trace, but never two into one file.
+    for other in app.state::<AppState>().main_windows() {
+        if other.label != state.label
+            && let Some(status) = other.traces.status().await
+            && Path::new(&status.path) == path
+        {
+            return Err("another window is already tracing into that file; choose another".into());
+        }
+    }
     tracing::info!(%context, path = %path.display(), ?scope, pull_every, "starting trace");
     let trace = Arc::new(Trace::start(client, &context, scope, &path, true, pull_every).await.map_err(err)?);
     let (stop, stopped) = oneshot::channel();
@@ -161,31 +169,31 @@ pub async fn start_trace<R: Runtime>(
     runner.active.store(true, Ordering::SeqCst);
     runner.known.lock().unwrap().insert(path);
     drop(running);
-    let _ = app.emit(TRACE_CHANGED, Some(&status));
+    let _ = app.emit_to(&state.label, TRACE_CHANGED, Some(&status));
     Ok(status)
 }
 
 #[tauri::command]
-pub async fn trace_status(state: State<'_, AppState>) -> CmdResult<Option<TraceStatus>> {
+pub async fn trace_status(state: Win) -> CmdResult<Option<TraceStatus>> {
     Ok(state.traces.status().await)
 }
 
 /// Stops the running trace, waiting (a few seconds at most) for its last
 /// pull and the file to close.
 #[tauri::command]
-pub async fn stop_trace<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, reason: TraceEnd) -> CmdResult<TraceSummary> {
-    // Tell windows it's stopping while the last pull runs.
+pub async fn stop_trace<R: Runtime>(app: AppHandle<R>, state: Win, reason: TraceEnd) -> CmdResult<TraceSummary> {
+    // Tell the window it's stopping while the last pull runs.
     if let Some(status) = state.traces.status().await {
-        let _ = app.emit(TRACE_CHANGED, Some(&TraceStatus { stopping: true, ..status }));
+        let _ = app.emit_to(&state.label, TRACE_CHANGED, Some(&TraceStatus { stopping: true, ..status }));
     }
     let result = state.traces.stop(reason).await.ok_or_else(|| "no trace is running".to_owned())?;
-    let _ = app.emit(TRACE_CHANGED, None::<TraceStatus>);
+    let _ = app.emit_to(&state.label, TRACE_CHANGED, None::<TraceStatus>);
     result
 }
 
 /// Shows a trace file this app recorded in Finder (or its folder elsewhere).
 #[tauri::command]
-pub fn reveal_trace(state: State<'_, AppState>, path: String) -> CmdResult<()> {
+pub fn reveal_trace(state: Win, path: String) -> CmdResult<()> {
     let path = PathBuf::from(path);
     if !state.traces.known.lock().unwrap().contains(&path) {
         return Err("only traces recorded or opened in this session can be revealed".into());
@@ -196,7 +204,6 @@ pub fn reveal_trace(state: State<'_, AppState>, path: String) -> CmdResult<()> {
 /// The native Open dialog for a trace file, starting in Documents. `None` if cancelled.
 #[tauri::command]
 pub async fn choose_trace_to_open<R: Runtime>(app: AppHandle<R>) -> CmdResult<Option<String>> {
-    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = oneshot::channel();
     let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_title("Open trace");
@@ -218,7 +225,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> subduer_core::Result<T>
 /// Reads a trace file for review: its header and the right-sizing table.
 /// Works without a cluster; a trace still being recorded can be read too.
 #[tauri::command]
-pub async fn trace_review(state: State<'_, AppState>, path: String) -> CmdResult<TraceReview> {
+pub async fn trace_review(state: Win, path: String) -> CmdResult<TraceReview> {
     let path = PathBuf::from(path);
     let recording = state.traces.status().await.is_some_and(|s| Path::new(&s.path) == path);
     let read = path.clone();
@@ -267,7 +274,7 @@ pub async fn trace_set_note(path: String, key: Option<TraceKey>, text: String) -
 
 /// Two or more trace files side by side, oldest data first.
 #[tauri::command]
-pub async fn trace_compare(state: State<'_, AppState>, paths: Vec<String>) -> CmdResult<TraceComparison> {
+pub async fn trace_compare(state: Win, paths: Vec<String>) -> CmdResult<TraceComparison> {
     let recording = state.traces.status().await.map(|s| PathBuf::from(s.path));
     let files: Vec<(PathBuf, bool)> = paths
         .into_iter()
@@ -308,7 +315,7 @@ pub async fn choose_report_file<R: Runtime>(app: AppHandle<R>, trace: String) ->
 /// Writes a trace's review as a self-contained HTML page to `out` (the Save
 /// dialog has already asked about replacing it). Returns where it went.
 #[tauri::command]
-pub async fn export_trace_report(state: State<'_, AppState>, path: String, out: String) -> CmdResult<String> {
+pub async fn export_trace_report(state: Win, path: String, out: String) -> CmdResult<String> {
     let recording = state.traces.status().await.is_some_and(|s| Path::new(&s.path) == Path::new(&path));
     let out_path = PathBuf::from(&out);
     let target = out_path.clone();

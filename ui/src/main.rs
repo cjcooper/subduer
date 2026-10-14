@@ -1,3 +1,4 @@
+mod about;
 mod app;
 mod browser;
 mod capture;
@@ -31,8 +32,10 @@ fn main() {
     console_error_panic_hook::set_once();
     // Every window (main, logs, shell, capture) follows the Appearance setting.
     prefs::follow_theme();
-    // The same page serves logs, edit, shell and capture windows: `?logs=`, `?edit=`, `?exec=`, `?capture=<label>`.
-    if let Some(label) = capture::label_from_url() {
+    // The same page serves logs, edit, shell, capture and About windows: `?logs=`, `?edit=`, `?exec=`, `?capture=<label>`, `?about`.
+    if about::from_url() {
+        leptos::mount::mount_to_body(about::AboutApp);
+    } else if let Some(label) = capture::label_from_url() {
         leptos::mount::mount_to_body(move || leptos::view! { <capture::CaptureApp label=label.clone() /> });
     } else if let Some(label) = logs::label_from_url() {
         leptos::mount::mount_to_body(move || leptos::view! { <logs::LogsApp label=label.clone() /> });

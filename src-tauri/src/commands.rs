@@ -7,9 +7,9 @@ use subduer_core::types::{
     SecretValues, WorkloadDetails, events,
 };
 use subduer_core::{actions, cluster, config, contexts, overview, pod_details, watch, workload};
-use tauri::{AppHandle, Emitter, State, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::{AppState, Session};
+use crate::{Session, Win, WindowState};
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
@@ -19,13 +19,13 @@ pub(crate) fn err(e: impl std::fmt::Display) -> String {
 
 /// Re-reads the kubeconfig every time so external edits show up.
 #[tauri::command]
-pub fn list_contexts(state: State<'_, AppState>) -> CmdResult<ContextList> {
+pub fn list_contexts(state: Win) -> CmdResult<ContextList> {
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
     Ok(contexts::list_contexts(&kubeconfig, &state.gate))
 }
 
 #[tauri::command]
-pub async fn connect(state: State<'_, AppState>, context: String) -> CmdResult<ClusterInfo> {
+pub async fn connect<R: Runtime>(app: AppHandle<R>, state: Win, context: String) -> CmdResult<ClusterInfo> {
     state.stop_watch();
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
     let client = contexts::client_for(&kubeconfig, &context).await.map_err(err)?;
@@ -43,6 +43,10 @@ pub async fn connect(state: State<'_, AppState>, context: String) -> CmdResult<C
         client,
         history: Default::default(),
     });
+    // With more than one main window, the Window menu tells them apart by this.
+    if let Some(window) = tauri::Manager::get_webview_window(&app, &state.label) {
+        let _ = window.set_title(&format!("{context} · {}", app.package_info().name));
+    }
     Ok(ClusterInfo {
         context,
         kinds,
@@ -54,14 +58,14 @@ pub async fn connect(state: State<'_, AppState>, context: String) -> CmdResult<C
 /// connection itself is gone (an expired token, say), and the UI offers
 /// Connect instead of retrying.
 #[tauri::command]
-pub async fn check_connection(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn check_connection(state: Win) -> CmdResult<()> {
     let client = connected_client(&state).await?;
     cluster::check_connection(&client).await.map_err(err)
 }
 
 /// Unlocking is confirmed in the UI (twice for production-like contexts).
 #[tauri::command]
-pub fn set_unlocked(state: State<'_, AppState>, context: String, unlocked: bool) {
+pub fn set_unlocked(state: Win, context: String, unlocked: bool) {
     tracing::info!(%context, unlocked, "safety gate changed");
     state.gate.set_unlocked(&context, unlocked);
 }
@@ -71,15 +75,16 @@ pub fn set_unlocked(state: State<'_, AppState>, context: String, unlocked: bool)
 #[tauri::command]
 pub async fn watch_resources<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: Option<String>,
 ) -> CmdResult<u64> {
     let client = connected_client(&state).await?;
     let watch_id = state.next_watch_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let label = state.label.clone();
     let handle = tauri::async_runtime::spawn(async move {
         watch::watch_table(client, kind, namespace, watch_id, |table| {
-            if let Err(e) = app.emit(events::RESOURCE_TABLE, table) {
+            if let Err(e) = app.emit_to(&label, events::RESOURCE_TABLE, table) {
                 tracing::warn!(error = %e, "emit failed");
             }
         })
@@ -92,13 +97,13 @@ pub async fn watch_resources<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn stop_watch(state: State<'_, AppState>) {
+pub fn stop_watch(state: Win) {
     state.stop_watch();
 }
 
 #[tauri::command]
 pub async fn get_yaml(
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: Option<String>,
     name: String,
@@ -110,7 +115,7 @@ pub async fn get_yaml(
 }
 
 #[tauri::command]
-pub async fn cluster_overview(state: State<'_, AppState>) -> CmdResult<ClusterOverview> {
+pub async fn cluster_overview(state: Win) -> CmdResult<ClusterOverview> {
     let (client, history) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -120,14 +125,14 @@ pub async fn cluster_overview(state: State<'_, AppState>) -> CmdResult<ClusterOv
 }
 
 #[tauri::command]
-pub async fn pod_details(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<PodDetails> {
+pub async fn pod_details(state: Win, namespace: String, name: String) -> CmdResult<PodDetails> {
     let client = connected_client(&state).await?;
     pod_details::pod_details(&client, &namespace, &name).await.map_err(err)
 }
 
 /// The pod's CPU and memory over the last hour, polled by the UI every 15 s.
 #[tauri::command]
-pub async fn pod_history(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<PodHistory> {
+pub async fn pod_history(state: Win, namespace: String, name: String) -> CmdResult<PodHistory> {
     let (client, history) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -139,7 +144,7 @@ pub async fn pod_history(state: State<'_, AppState>, namespace: String, name: St
 /// Details tab data for a Deployment or StatefulSet.
 #[tauri::command]
 pub async fn workload_details(
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: String,
     name: String,
@@ -153,7 +158,7 @@ pub async fn workload_details(
 /// Last hour of a workload's CPU/memory, summed over its pods; polled every 15 s.
 #[tauri::command]
 pub async fn workload_history(
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: String,
     name: String,
@@ -171,7 +176,7 @@ pub async fn workload_history(
 
 /// Last hour of a node's CPU/memory, every container on it summed; polled every 15 s.
 #[tauri::command]
-pub async fn node_history(state: State<'_, AppState>, name: String) -> CmdResult<PodHistory> {
+pub async fn node_history(state: Win, name: String) -> CmdResult<PodHistory> {
     let (client, history) = {
         let session = state.session.read().await;
         let session = session.as_ref().ok_or("not connected to a cluster")?;
@@ -184,7 +189,7 @@ pub async fn node_history(state: State<'_, AppState>, name: String) -> CmdResult
 /// unless `context` (what the confirmation showed) is still the connected one.
 #[tauri::command]
 pub async fn delete_resource(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: Option<String>,
@@ -199,7 +204,7 @@ pub async fn delete_resource(
 /// Desired and current replicas of a Deployment or StatefulSet, for the Scale dialog.
 #[tauri::command]
 pub async fn get_replicas(
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: String,
     name: String,
@@ -213,7 +218,7 @@ pub async fn get_replicas(
 /// Rollout restart, checked like `delete_resource`.
 #[tauri::command]
 pub async fn restart_workload(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: String,
@@ -228,7 +233,7 @@ pub async fn restart_workload(
 /// Sets replicas, checked like `delete_resource`.
 #[tauri::command]
 pub async fn scale_workload(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: String,
@@ -244,7 +249,7 @@ pub async fn scale_workload(
 /// Suspends or resumes a Job or CronJob, checked like `delete_resource`.
 #[tauri::command]
 pub async fn suspend_workload(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: String,
@@ -259,7 +264,7 @@ pub async fn suspend_workload(
 
 /// Starts a Job from a CronJob now, checked like `delete_resource`. Returns the Job's name.
 #[tauri::command]
-pub async fn run_cron_job(state: State<'_, AppState>, context: String, namespace: String, name: String) -> CmdResult<String> {
+pub async fn run_cron_job(state: Win, context: String, namespace: String, name: String) -> CmdResult<String> {
     let client = client_for_change(&state, &context, "started").await?;
     actions::run_cron_job(&client, &state.gate, &context, &namespace, &name, false)
         .await
@@ -273,7 +278,7 @@ pub async fn run_cron_job(state: State<'_, AppState>, context: String, namespace
 /// connected one; changes nothing, so not gated.
 #[tauri::command]
 pub async fn rightsize_preview(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     change: subduer_types::RightsizeChange,
 ) -> CmdResult<subduer_types::RightsizePreview> {
@@ -284,12 +289,12 @@ pub async fn rightsize_preview(
 /// Applies new requests to one workload (one patch, one rollout), checked
 /// like `delete_resource`.
 #[tauri::command]
-pub async fn rightsize_apply(state: State<'_, AppState>, context: String, change: subduer_types::RightsizeChange) -> CmdResult<()> {
+pub async fn rightsize_apply(state: Win, context: String, change: subduer_types::RightsizeChange) -> CmdResult<()> {
     let client = client_for_change(&state, &context, "changed").await?;
     subduer_core::rightsize::apply(&client, &state.gate, &context, &change).await.map_err(|e| e.user_message())
 }
 
-async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {
+async fn client_for_change(state: &WindowState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {
     let session = state.session.read().await;
     let session = session.as_ref().ok_or("not connected to a cluster")?;
     if session.context != context {
@@ -301,7 +306,7 @@ async fn client_for_change(state: &AppState, context: &str, done: &str) -> CmdRe
 /// Details tab of a Config-section kind (ConfigMap, Secret, HPA, PDB, …).
 #[tauri::command]
 pub async fn object_details(
-    state: State<'_, AppState>,
+    state: Win,
     kind: KindRef,
     namespace: Option<String>,
     name: String,
@@ -315,7 +320,7 @@ pub async fn object_details(
 /// Every value of a Secret, when the user starts editing it. Returned to the
 /// UI only; never logged.
 #[tauri::command]
-pub async fn secret_values(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<SecretValues> {
+pub async fn secret_values(state: Win, namespace: String, name: String) -> CmdResult<SecretValues> {
     let client = connected_client(&state).await?;
     tracing::info!(%namespace, secret = %name, "secret values revealed for editing");
     pod_details::secret_values(&client, &namespace, &name).await.map_err(err)
@@ -325,7 +330,7 @@ pub async fn secret_values(state: State<'_, AppState>, namespace: String, name: 
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 pub async fn save_config_data(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: String,
@@ -342,7 +347,7 @@ pub async fn save_config_data(
 /// Sets an HPA's min and max replicas, checked like `delete_resource`.
 #[tauri::command]
 pub async fn set_hpa_range(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     kind: KindRef,
     namespace: String,
@@ -359,7 +364,7 @@ pub async fn set_hpa_range(
 /// Grows a PersistentVolumeClaim, checked like `delete_resource`.
 #[tauri::command]
 pub async fn expand_claim(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     namespace: String,
     name: String,
@@ -373,7 +378,7 @@ pub async fn expand_claim(
 
 /// Sets a PersistentVolume's reclaim policy, checked like `delete_resource`.
 #[tauri::command]
-pub async fn set_reclaim_policy(state: State<'_, AppState>, context: String, name: String, policy: String) -> CmdResult<()> {
+pub async fn set_reclaim_policy(state: Win, context: String, name: String, policy: String) -> CmdResult<()> {
     let client = client_for_change(&state, &context, "changed").await?;
     actions::set_reclaim_policy(&client, &state.gate, &context, &name, &policy, false)
         .await
@@ -384,7 +389,7 @@ pub async fn set_reclaim_policy(state: State<'_, AppState>, context: String, nam
 /// question to the API server: nothing is changed, so it isn't gated.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_access(
-    state: State<'_, AppState>,
+    state: Win,
     account_namespace: String,
     account: String,
     verb: String,
@@ -402,7 +407,7 @@ pub async fn check_access(
 /// `delete_resource`. Returns Helm's output.
 #[tauri::command]
 pub async fn helm_rollback(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     namespace: String,
     name: String,
@@ -419,7 +424,7 @@ pub async fn helm_rollback(
 /// `delete_resource`. Returns Helm's output.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn helm_uninstall(
-    state: State<'_, AppState>,
+    state: Win,
     context: String,
     namespace: String,
     name: String,
@@ -434,7 +439,7 @@ pub async fn helm_uninstall(
 
 /// Creates a namespace, checked like `delete_resource`.
 #[tauri::command]
-pub async fn create_namespace(state: State<'_, AppState>, context: String, name: String) -> CmdResult<()> {
+pub async fn create_namespace(state: Win, context: String, name: String) -> CmdResult<()> {
     let client = client_for_change(&state, &context, "created").await?;
     subduer_core::namespace::create_namespace(&client, &state.gate, &context, &name, false)
         .await
@@ -469,21 +474,21 @@ pub fn set_app_theme<R: Runtime>(app: AppHandle<R>, theme: String) {
 /// The UI reports whether it holds unsaved edits, so closing the window or
 /// quitting can ask first.
 #[tauri::command]
-pub fn set_unsaved(state: State<'_, AppState>, unsaved: bool) {
+pub fn set_unsaved(state: Win, unsaved: bool) {
     state.unsaved.store(unsaved, Ordering::SeqCst);
 }
 
-/// Closes the main window (or quits) after the user chose to discard edits
+/// Closes the calling main window (or quits) after the user chose to discard edits
 /// and stop any running trace. The trace's file is closed first.
 #[tauri::command]
-pub async fn close_discarding<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, quit: bool) -> CmdResult<()> {
+pub async fn close_discarding<R: Runtime>(app: AppHandle<R>, state: Win, quit: bool) -> CmdResult<()> {
     if let Some(Err(e)) = state.traces.stop(subduer_types::TraceEnd::Quit).await {
         tracing::warn!(error = %e, "closing the trace on quit failed");
     }
     state.unsaved.store(false, Ordering::SeqCst);
     if quit {
         app.exit(0);
-    } else if let Some(main) = tauri::Manager::get_webview_window(&app, "main") {
+    } else if let Some(main) = tauri::Manager::get_webview_window(&app, &state.label) {
         let _ = main.close();
     }
     Ok(())
@@ -492,13 +497,13 @@ pub async fn close_discarding<R: Runtime>(app: AppHandle<R>, state: State<'_, Ap
 /// Reveals one Secret value on explicit user request. The value is returned
 /// to the UI only; it is never logged.
 #[tauri::command]
-pub async fn secret_value(state: State<'_, AppState>, namespace: String, secret: String, key: String) -> CmdResult<String> {
+pub async fn secret_value(state: Win, namespace: String, secret: String, key: String) -> CmdResult<String> {
     let client = connected_client(&state).await?;
     tracing::info!(%namespace, %secret, %key, "secret value revealed");
     pod_details::secret_value(&client, &namespace, &secret, &key).await.map_err(err)
 }
 
-pub(crate) async fn connected_client(state: &AppState) -> CmdResult<subduer_core::kube::Client> {
+pub(crate) async fn connected_client(state: &WindowState) -> CmdResult<subduer_core::kube::Client> {
     state
         .session
         .read()

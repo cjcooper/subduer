@@ -1,41 +1,27 @@
-//! The app menu: Tauri's default, with an About item that carries the app
-//! icon and says who makes the app, a Settings… item (⌘, / Ctrl+,), a
-//! Trace… item under Window, and our own Quit item on every system (⌘Q,
-//! Ctrl+Q on Linux, Exit / Alt+F4 on Windows), so quitting can be held.
-//! Without an explicit icon, macOS shows a generic one whenever the binary
-//! isn't running from a bundle (`cargo tauri dev`).
+//! The app menu: Tauri's default, with an About item that opens our own About
+//! window (the app, its license and every third-party license; the system's
+//! About box can't hold them, and on Windows it's a plain message box), a
+//! Settings… item (⌘, / Ctrl+,), File › New Window (⌘N / Ctrl+N), a Trace…
+//! item under Window, and our own Quit item on every system (⌘Q, Ctrl+Q on
+//! Linux, Exit / Alt+F4 on Windows), so quitting can be held.
 
-use tauri::image::Image;
-use tauri::menu::{AboutMetadata, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-const ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
 pub const MAKER: &str = "it-problems";
 const SETTINGS_ID: &str = "settings";
 const QUIT_ID: &str = "quit";
 const TRACE_ID: &str = "trace";
-/// Sent to the main window to open its Settings dialog.
+const NEW_WINDOW_ID: &str = "new-window";
+const ABOUT_ID: &str = "about";
+/// Sent to the focused main window to open its Settings dialog.
 pub const OPEN_SETTINGS: &str = "open-settings";
-/// Sent to the main window to open the trace dialog (start, or the running one).
+/// Sent to the focused main window to open the trace dialog (start, or its running one).
 pub const OPEN_TRACE: &str = "open-trace";
-
-fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
-    let info = app.package_info();
-    AboutMetadata {
-        name: Some(info.name.clone()),
-        version: Some(info.version.to_string()),
-        copyright: app.config().bundle.copyright.clone(),
-        credits: Some(format!("An {MAKER} application.")),
-        comments: Some(format!("An {MAKER} application.")),
-        authors: Some(vec![MAKER.to_owned()]),
-        icon: Image::from_bytes(ICON).ok(),
-        ..Default::default()
-    }
-}
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
-    let about = PredefinedMenuItem::about(app, None, Some(about_metadata(app)))?;
+    let about = MenuItem::with_id(app, ABOUT_ID, format!("About {}", app.package_info().name), true, None::<&str>)?;
     // macOS: About is the first item of the app-name menu. Elsewhere it's the
     // only item of the last (Help) menu.
     let (submenu, position) = if cfg!(target_os = "macos") {
@@ -75,8 +61,26 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         sub.append(&PredefinedMenuItem::separator(app)?)?;
         sub.append(&trace)?;
     }
+    // New Window: first in File.
+    let file_menu = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(sub) if sub.text().is_ok_and(|t| t == "File") => Some(sub),
+        _ => None,
+    });
+    if let Some(file) = file_menu {
+        let new_window = MenuItem::with_id(app, NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+N"))?;
+        file.insert(&new_window, 0)?;
+        file.insert(&PredefinedMenuItem::separator(app)?, 1)?;
+    }
     app.on_menu_event(|app, event| {
-        if event.id() == QUIT_ID {
+        if event.id() == ABOUT_ID {
+            if let Err(e) = crate::about::open(app) {
+                tracing::warn!(error = %e, "opening About failed");
+            }
+        } else if event.id() == NEW_WINDOW_ID {
+            if let Err(e) = crate::new_main_window(app) {
+                tracing::warn!(error = %e, "opening a new window failed");
+            }
+        } else if event.id() == QUIT_ID {
             // Goes through `RunEvent::ExitRequested`, which holds for unsaved
             // edits and a running trace.
             app.exit(0);
@@ -84,10 +88,10 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .iter()
             .find(|(id, _)| event.id() == *id)
             .map(|(_, name)| *name)
-            && let Some(main) = app.get_webview_window("main")
+            && let Some(main) = focused_main(app)
         {
             let _ = main.set_focus();
-            let _ = main.emit_to("main", name, ());
+            let _ = main.emit_to(main.label(), name, ());
         }
     });
     // macOS lists open windows (main and logs) under Window once it knows
@@ -102,6 +106,19 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     }
     app.set_menu(menu)?;
     Ok(())
+}
+
+/// The main window in front, or the one the window in front was opened from;
+/// any main window if none is focused.
+fn focused_main<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    let state = app.state::<crate::AppState>();
+    let windows = app.webview_windows();
+    let focused = windows
+        .iter()
+        .find(|(_, w)| w.is_focused().unwrap_or(false))
+        .and_then(|(label, _)| state.owner(label));
+    let label = focused.or_else(|| state.main_windows().into_iter().map(|w| w.label).min())?;
+    windows.get(&label).cloned()
 }
 
 /// macOS: the default menu's Quit (⌘Q) already asks the app first, so it
@@ -139,15 +156,4 @@ fn add_quit<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()>
         menu.insert(&tauri::menu::Submenu::with_items(app, "File", true, &[&quit])?, 0)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn about_icon_decodes() {
-        let icon = Image::from_bytes(ICON).unwrap();
-        assert_eq!((icon.width(), icon.height()), (256, 256));
-    }
 }
