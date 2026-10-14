@@ -4,6 +4,7 @@ description = "Types shared between the backend and the UI (must stay wasm-compa
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde.workspace = true

@@ -4,6 +4,7 @@ description = "Desktop app for browsing and controlling Kubernetes clusters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [lib]
 name = "k8s_subduer_lib"

@@ -31,6 +31,9 @@
     "copyright": "Copyright © 2026 it-problems",
     "license": "MIT",
     "licenseFile": "../LICENSE",
+    "resources": {
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+    },
     "targets": "all",
     "icon": [
       "icons/256x256.png",

@@ -71,3 +71,9 @@ Each system builds only its own bundles. `.github/workflows/build.yml` builds al
 ## License
 
 MIT, see [LICENSE](LICENSE). Copyright (c) 2026 it-problems.
+
+The licenses of everything the app includes are in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which ships inside every
+installer. Regenerate it with `tools/third-party-notices.sh` after changing
+dependencies (needs `cargo install cargo-about --features cli`); the script
+fails if a crate brings in a license not accepted in `about.toml`.
