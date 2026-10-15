@@ -20,6 +20,17 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
   - Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`
   - Linux (Arch): `sudo pacman -S --needed webkit2gtk-4.1 gtk3 librsvg libsoup3 base-devel patchelf file`
+  - Linux on a Raspberry Pi 4 or other older ARM64 machine: the `wasm-opt` that Trunk downloads can stop with `signal: 4 (SIGILL)`, because it uses CPU instructions these chips lack. Build version 123 on the machine itself and put it in Trunk's cache:
+
+    ```sh
+    sudo apt install cmake ninja-build g++ git
+    git clone --depth 1 --branch version_123 https://github.com/WebAssembly/binaryen.git ~/src/binaryen
+    cd ~/src/binaryen && git submodule update --init --depth 1
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_STATIC_LIB=ON -B build && ninja -C build wasm-opt   # 30–60 min on a Pi 4
+    cp build/bin/wasm-opt ~/.cache/trunk/wasm-opt-version_123/bin/wasm-opt
+    ```
+
+    `-DBUILD_STATIC_LIB=ON` builds Binaryen's library into `wasm-opt`. Without it, the build fails with `libbinaryen.so: cannot open shared object file`; either rebuild with the flag or copy `build/lib/libbinaryen.so` to `~/.cache/trunk/wasm-opt-version_123/lib/`. Debian's `binaryen` package is too old for Trunk to use.
   - Windows: Visual Studio Build Tools with "Desktop development with C++"; WebView2 is built into Windows 10 and 11
 - At runtime: `kubectl`-style kubeconfig access, and the `helm` CLI for Helm rollback and delete
 

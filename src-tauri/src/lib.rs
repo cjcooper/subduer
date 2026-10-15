@@ -236,6 +236,8 @@ pub fn run() {
     // Apps launched from Finder get a minimal PATH; kubeconfig exec plugins
     // such as `aws` need the user's shell PATH.
     shell_env::inherit_login_path();
+    // The Pi's GPU driver garbles WebKitGTK's first frame.
+    shell_env::work_around_pi_rendering();
     // Linux desktops take the window's icon from a desktop entry; give runs
     // that weren't installed from a package one.
     desktop_entry::ensure();
