@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::cluster::dynamic_api;
 use crate::types::{
     DataEntry, DataSet, InfoRow, InfoSection, InfoTable, InfoTableRow, KindRef, ObjectDetails, ObjectLink,
-    has_object_details,
+    has_object_details, is_external_secrets,
 };
 use crate::workload::{conditions, selector_string};
 use crate::{Error, Result};
@@ -50,6 +50,9 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
             crate::namespace::related(client, key, name, &mut d).await?;
             crate::node::related(client, key, name, &v, &mut d).await?;
         }
+    }
+    if is_external_secrets(kind) {
+        crate::external_secrets::related(client, kind, ns, name, &v, &mut d).await?;
     }
     if let Some(ns) = namespace {
         let fields = format!("involvedObject.kind={},involvedObject.name={name}", kind.kind);
@@ -85,6 +88,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
         sections: Vec::new(),
         events: Vec::new(),
         node: None,
+        logs: None,
     };
     match key {
         "core/ConfigMap" => config_map(&mut d, v),
@@ -106,6 +110,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
             crate::rbac::describe(key, &mut d, v);
             crate::namespace::describe(key, &mut d, v);
             crate::node::describe(key, &mut d, v);
+            crate::external_secrets::describe(key, &mut d, v);
         }
     }
     // Owner rows last, like workloads.

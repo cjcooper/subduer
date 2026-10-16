@@ -73,6 +73,13 @@ pub fn LogsApp(label: String) -> impl IntoView {
                 previous: bool,
             }
             let result = invoke::<_, LogSession>("logs_start", &Args { previous: previous.get_untracked() }).await;
+            // The target's filter applies when the window opens, not on every restart.
+            if let Ok(s) = &result
+                && let Some(f) = &s.target.filter
+                && session.with_untracked(Option::is_none)
+            {
+                filter.set(f.clone());
+            }
             session.set(Some(result));
         });
     };

@@ -47,5 +47,11 @@ async fn main() -> subduer_core::Result<()> {
         }
     }
     println!("events: {}", d.events.len());
+    for e in d.events.iter().take(3) {
+        println!("  {} {} {}", e.type_, e.reason, e.message);
+    }
+    if let Some(logs) = &d.logs {
+        println!("logs: {}", logs.title(context));
+    }
     Ok(())
 }

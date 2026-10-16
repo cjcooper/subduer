@@ -3,6 +3,7 @@
 //! ConfigMap/Secret: checks a save adding the key `subduer-dry-run` (no
 //! existing value is read or sent). HPA: checks setting its current range.
 //! PVC: checks growing it by 1Gi. PV: checks setting its current reclaim policy.
+//! ExternalSecret/ClusterExternalSecret (`external-secrets.io/…`): checks Force sync.
 //! Then checks that the locked gate refuses the real call.
 
 use subduer_core::safety::SafetyGate;
@@ -39,6 +40,15 @@ async fn main() -> subduer_core::Result<()> {
             Err(e) => println!("expand dry run refused: {}", e.user_message()),
         }
         let gated = actions::expand_claim(&client, &gate, context, namespace, name, &bigger, false).await;
+        println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        return Ok(());
+    }
+    if subduer_core::types::can_force_sync(kind) {
+        match subduer_core::external_secrets::force_sync(&client, &gate, context, kind, ns, name, true).await {
+            Ok(n) => println!("force sync dry run OK ({n} ExternalSecrets)"),
+            Err(e) => println!("force sync dry run refused: {}", e.user_message()),
+        }
+        let gated = subduer_core::external_secrets::force_sync(&client, &gate, context, kind, ns, name, false).await;
         println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
         return Ok(());
     }

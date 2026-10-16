@@ -1497,6 +1497,7 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
         let target = subduer_types::LogTarget {
             namespace,
             source: subduer_types::LogSource::Workload { kind, name: row.name.clone() },
+            filter: None,
         };
         Some(view! {
             <button
@@ -1504,6 +1505,33 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
                 title=title
                 on:click=move |_| crate::logs::open(target.clone(), move |e| store.error.set(Some(e)))
             >"Logs"</button>
+        })
+    }
+}
+
+/// Opens the logs the loaded details point to (an operator's controller,
+/// filtered to this object); hidden until they load, and when there are none.
+#[component]
+fn ObjectLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
+    move || {
+        let target = store.object.with(|o| match o {
+            Some(Ok(d)) if d.name == row.name && d.namespace == row.namespace => d.logs.clone(),
+            _ => None,
+        })?;
+        let controller = match &target.source {
+            subduer_types::LogSource::Workload { name, .. } => name.clone(),
+            subduer_types::LogSource::Container { pod, .. } => pod.clone(),
+        };
+        let title = format!(
+            "Open the logs of {controller} in a new window, filtered to {}",
+            target.filter.clone().unwrap_or_else(|| row.name.clone())
+        );
+        Some(view! {
+            <button
+                class="btn small"
+                title=title
+                on:click=move |_| crate::logs::open(target.clone(), move |e| store.error.set(Some(e)))
+            >"Controller logs"</button>
         })
     }
 }
@@ -1565,6 +1593,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <crate::namespace::FilterButton store=store row=row.clone() />
                             <ServiceForwardButton store=store row=row.clone() />
                             <WorkloadLogsButton store=store row=row.clone() />
+                            <ObjectLogsButton store=store row=row.clone() />
                             <crate::workload::WorkloadButtons store=store row=row.clone() />
                             <crate::trace::TraceThisButton store=store row=row.clone() />
                             <crate::capture::CaptureButton store=store row=row.clone() />

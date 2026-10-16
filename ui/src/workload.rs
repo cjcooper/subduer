@@ -1,6 +1,7 @@
 //! Changes confirmed in one dialog: Restart and Scale for Deployments and
 //! StatefulSets, Run now for CronJobs, Suspend/Resume for Jobs and CronJobs,
-//! Edit range for HPAs, and saving a ConfigMap's or Secret's edited data.
+//! Edit range for HPAs, saving a ConfigMap's or Secret's edited data, and
+//! Force sync for ExternalSecrets and ClusterExternalSecrets.
 //! Gated like Delete, and production-like contexts need the object's name
 //! typed out.
 
@@ -8,7 +9,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{
-    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, has_workload_details, is_scalable_workload,
+    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, can_force_sync, has_workload_details,
+    is_scalable_workload,
 };
 
 use crate::modal::Modal;
@@ -35,6 +37,8 @@ pub enum Op {
     Rollback,
     /// Delete a Helm release with `helm uninstall`.
     Uninstall,
+    /// Annotate an ExternalSecret or ClusterExternalSecret with `force-sync`.
+    ForceSync,
 }
 
 impl Op {
@@ -51,6 +55,7 @@ impl Op {
             Op::Reclaim => "Reclaim policy",
             Op::Rollback => "Rollback",
             Op::Uninstall => "Delete",
+            Op::ForceSync => "Force sync",
         }
     }
 
@@ -69,6 +74,8 @@ impl Op {
             (Op::Reclaim, _) => "Keep or delete the data when its claim is deleted",
             (Op::Rollback, _) => "Go back to an earlier revision with helm rollback",
             (Op::Uninstall, _) => "Delete the release and everything it created, with helm uninstall",
+            (Op::ForceSync, "ClusterExternalSecret") => "Have External Secrets fetch from the store now, for every namespace",
+            (Op::ForceSync, _) => "Have External Secrets fetch from the store now and update the Secret",
         }
     }
 }
@@ -166,6 +173,7 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
             .get()
             .filter(|k| {
                 has_workload_details(k)
+                    || can_force_sync(k)
                     || matches!(
                         k.key().as_str(),
                         "autoscaling/HorizontalPodAutoscaler"
@@ -210,6 +218,10 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
             let policy = detail("Reclaim policy");
             if patch && policy.is_some_and(|p| p.starts_with("Retain") || p.starts_with("Delete")) {
                 ops.push(Op::Reclaim);
+            }
+        } else if can_force_sync(&kind) {
+            if patch {
+                ops.push(Op::ForceSync);
             }
         } else if is_scalable_workload(&kind) {
             if patch {
@@ -320,6 +332,30 @@ fn release_objects(store: Store, name: &str) -> Vec<(String, String)> {
             .map(|t| t.rows.iter().filter_map(|r| Some((r.cells.first()?.clone(), r.cells.get(1)?.clone()))).collect())
             .unwrap_or_default(),
         _ => Vec::new(),
+    })
+}
+
+/// Why Force sync won't fetch, from the loaded ExternalSecret's refresh rows.
+fn force_sync_note(store: Store, name: &str) -> Option<&'static str> {
+    if object_row(store, name, "Refresh policy").is_some_and(|p| p.starts_with("CreatedOnce")) {
+        return Some("Its refresh policy is CreatedOnce: External Secrets fetched it once and ignores this annotation.");
+    }
+    if object_row(store, name, "Refresh interval").is_some_and(|i| i.contains("fetched once")) {
+        return Some("Its refresh interval is 0: External Secrets fetched it once and ignores this annotation.");
+    }
+    None
+}
+
+/// How many ExternalSecrets the loaded ClusterExternalSecret has made.
+fn provisioned_count(store: Store, name: &str) -> usize {
+    store.object.with_untracked(|o| match o {
+        Some(Ok(d)) if d.name == name => d
+            .sections
+            .iter()
+            .find(|s| s.id == "externalsecret-children")
+            .and_then(|s| s.table.as_ref())
+            .map_or(0, |t| t.rows.iter().filter(|r| r.link.is_some()).count()),
+        _ => 0,
     })
 }
 
@@ -513,6 +549,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             Op::Reclaim => ("set_reclaim_policy", None, None),
                             Op::Rollback => ("helm_rollback", None, None),
                             Op::Uninstall => ("helm_uninstall", None, None),
+                            Op::ForceSync => ("force_sync", None, None),
                         };
                         let args = Change {
                             context: &target.context.name,
@@ -529,8 +566,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             wait: matches!(target.op, Op::Rollback | Op::Uninstall).then_some(wait),
                             keep_history: (target.op == Op::Uninstall).then_some(keep_history),
                         };
-                        // Run now answers with the new Job's name; the others with nothing.
-                        match invoke::<_, Option<String>>(command, &args).await {
+                        // Run now answers with the new Job's name, Force sync with a
+                        // count; the others with nothing.
+                        match invoke::<_, serde_json::Value>(command, &args).await {
                             Ok(_) => {
                                 close();
                                 if target.op == Op::Save {
@@ -693,6 +731,30 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     }
                     .into_any()
                 }
+                Op::ForceSync => {
+                    let cluster = kind.kind == "ClusterExternalSecret";
+                    let children = if cluster { provisioned_count(store, &name) } else { 0 };
+                    view! {
+                        <p>
+                            {what}" gets the annotation "<span class="mono">"force-sync"</span>
+                            {if cluster {
+                                format!(
+                                    " set to now, and so {}. External Secrets then fetches from the store and updates each Secret.",
+                                    match children {
+                                        0 => "will each ExternalSecret it makes".to_owned(),
+                                        1 => "does its ExternalSecret".to_owned(),
+                                        n => format!("do its {n} ExternalSecrets"),
+                                    }
+                                )
+                            } else {
+                                " set to now. External Secrets then fetches from the store and updates the Secret.".to_owned()
+                            }}
+                        </p>
+                        {force_sync_note(store, &name).map(|n| view! { <p class="warn-text">{n}</p> })}
+                        <p class="muted">"Pods that read the Secret as environment variables keep the old values until they restart; mounted files update within about a minute."</p>
+                    }
+                    .into_any()
+                }
                 Op::Reclaim => {
                     let note = if new_policy == "Delete" {
                         "Once its claim is deleted, the volume and all its data are deleted too."
@@ -770,6 +832,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 Op::Rollback => ("Roll back Helm release?".to_owned(), "Rolling back…"),
                 Op::Uninstall => ("Delete Helm release?".to_owned(), "Deleting…"),
                 Op::Save => (format!("Save {}?", kind.kind), "Saving…"),
+                Op::ForceSync => (format!("Force sync {}?", kind.kind), "Syncing…"),
             };
             let label = move || {
                 if busy.get() {

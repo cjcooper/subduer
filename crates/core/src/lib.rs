@@ -10,6 +10,7 @@ pub mod cron;
 pub mod download;
 pub mod edit;
 pub mod exec;
+pub mod external_secrets;
 pub mod forward;
 pub mod helm;
 pub mod history;

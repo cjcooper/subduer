@@ -543,6 +543,10 @@ pub struct ObjectDetails {
     /// A Node's CPU, memory and pods, charted at the top like a pod's.
     #[serde(default)]
     pub node: Option<NodeResources>,
+    /// Logs that explain this object, e.g. its operator's controller filtered
+    /// to its name; offered as a header button.
+    #[serde(default)]
+    pub logs: Option<LogTarget>,
 }
 
 /// What a node's pods request and use against what it can hold.
@@ -686,10 +690,10 @@ pub struct DataChange {
 /// A Secret's values for editing; `None` for binary values.
 pub type SecretValues = Vec<(String, Option<String>)>;
 
-/// Config, Network, Storage and Access Control kinds, Namespaces and Nodes
-/// with an [`ObjectDetails`] Details tab.
+/// Config, Network, Storage and Access Control kinds, Namespaces, Nodes and
+/// External Secrets kinds with an [`ObjectDetails`] Details tab.
 pub fn has_object_details(kind: &KindRef) -> bool {
-    matches!(
+    is_external_secrets(kind) || matches!(
         kind.key().as_str(),
         "core/ConfigMap"
             | "core/Secret"
@@ -726,6 +730,18 @@ pub fn has_object_details(kind: &KindRef) -> bool {
             | "core/Namespace"
             | "core/Node"
     )
+}
+
+/// External Secrets Operator kinds (`external-secrets.io`) and its
+/// generators (`generators.external-secrets.io`).
+pub fn is_external_secrets(kind: &KindRef) -> bool {
+    matches!(kind.group.as_str(), "external-secrets.io" | "generators.external-secrets.io")
+}
+
+/// ExternalSecrets and ClusterExternalSecrets: Force sync annotates them with
+/// `force-sync`, which makes External Secrets fetch from the store now.
+pub fn can_force_sync(kind: &KindRef) -> bool {
+    matches!(kind.key().as_str(), "external-secrets.io/ExternalSecret" | "external-secrets.io/ClusterExternalSecret")
 }
 
 /// The API server's answer to "may this account do that?".
@@ -861,18 +877,27 @@ pub enum LogSource {
 pub struct LogTarget {
     pub namespace: String,
     pub source: LogSource,
+    /// Text the window's filter starts with, e.g. an object's name in its
+    /// controller's logs.
+    #[serde(default)]
+    pub filter: Option<String>,
 }
 
 impl LogTarget {
-    /// Window title, e.g. `api · shop/web-7d9f · Logs`.
+    /// Window title, e.g. `api · shop/web-7d9f · Logs`, with the starting
+    /// filter after it: `… · Logs (db-password)`.
     pub fn title(&self, context: &str) -> String {
-        match &self.source {
+        let title = match &self.source {
             LogSource::Container { pod, container } => {
                 format!("{container} · {}/{pod} · {context} · Logs", self.namespace)
             }
             LogSource::Workload { kind, name } => {
                 format!("{} {}/{name} · {context} · Logs", kind.kind, self.namespace)
             }
+        };
+        match &self.filter {
+            Some(f) => format!("{title} ({f})"),
+            None => title,
         }
     }
 }

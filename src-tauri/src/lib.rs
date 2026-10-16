@@ -313,6 +313,7 @@ pub fn run() {
             commands::check_access,
             commands::expand_claim,
             commands::set_reclaim_policy,
+            commands::force_sync,
             commands::close_discarding,
             trace::trace_targets,
             trace::choose_trace_file,

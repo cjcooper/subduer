@@ -5,13 +5,14 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 fn container(pod: &str, container: &str) -> LogTarget {
-    LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: pod.into(), container: container.into() } }
+    LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: pod.into(), container: container.into() }, filter: None }
 }
 
 fn workload(name: &str) -> LogTarget {
     LogTarget {
         namespace: "shop".into(),
         source: LogSource::Workload { kind: kind("apps", "v1", "Deployment", "deployments", true), name: name.into() },
+        filter: None,
     }
 }
 

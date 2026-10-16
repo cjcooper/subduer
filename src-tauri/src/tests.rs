@@ -152,6 +152,7 @@ async fn config_and_storage_changes_reach_the_api() {
     api.on("GET", "/api/v1/namespaces/shop/persistentvolumeclaims/data", pvc.clone());
     api.on("PATCH", "/api/v1/namespaces/shop/persistentvolumeclaims/data", pvc);
     api.on("PATCH", "/api/v1/persistentvolumes/pvc-1", object("v1", "PersistentVolume", None, "pvc-1", json!({})));
+    api.on("PATCH", "/apis/external-secrets.io/v1/namespaces/shop/externalsecrets/db", object("external-secrets.io/v1", "ExternalSecret", Some("shop"), "db", json!({})));
     api.on("POST", "/api/v1/namespaces", object("v1", "Namespace", None, "team-sandbox", json!({})));
     let app = connected(&api).await;
     unlock(&app);
@@ -172,6 +173,12 @@ async fn config_and_storage_changes_reach_the_api() {
     let err = commands::expand_claim(s(), CTX.into(), "shop".into(), "data".into(), "5Gi".into()).await.unwrap_err();
     assert!(err.contains("only grow"), "{err}");
     commands::set_reclaim_policy(s(), CTX.into(), "pvc-1".into(), "Retain".into()).await.unwrap();
+    let es = kind("external-secrets.io", "v1", "ExternalSecret", "externalsecrets", true);
+    assert_eq!(commands::force_sync(s(), CTX.into(), es.clone(), "shop".into(), "db".into()).await.unwrap(), 1);
+    let synced = api.calls_to("PATCH", "/apis/external-secrets.io/v1/namespaces/shop/externalsecrets/db").pop().unwrap().json();
+    assert!(synced["metadata"]["annotations"]["force-sync"].is_string());
+    let err = commands::force_sync(s(), "other".into(), es, "shop".into(), "db".into()).await.unwrap_err();
+    assert!(err.contains("nothing was synced"), "{err}");
     commands::create_namespace(s(), CTX.into(), "team-sandbox".into()).await.unwrap();
     assert_eq!(api.calls_to("POST", "/api/v1/namespaces").pop().unwrap().json()["metadata"]["name"], "team-sandbox");
     let err = commands::create_namespace(s(), CTX.into(), "Bad_Name".into()).await.unwrap_err();
@@ -287,7 +294,7 @@ async fn logs_windows_open_once_per_target() {
     let api = MockApi::new();
     api.on_text("GET", "/api/v1/namespaces/shop/pods/api-1/log", 200, "hello\n");
     let app = connected(&api).await;
-    let target = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() } };
+    let target = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() }, filter: None };
     crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
     // The same target focuses the existing window instead of opening another.
     crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), target.clone()).await.unwrap();
@@ -377,7 +384,7 @@ async fn main_windows_keep_to_themselves() {
 
     // The same logs open once per window, each resolving to its own main
     // window, which is the only one that closes it.
-    let logs = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() } };
+    let logs = LogTarget { namespace: "shop".into(), source: LogSource::Container { pod: "api-1".into(), container: "app".into() }, filter: None };
     crate::logs::open_logs(app.handle().clone(), app.state(), w(&app), logs.clone()).await.unwrap();
     crate::logs::open_logs(app.handle().clone(), app.state(), second.clone(), logs).await.unwrap();
     let labels: Vec<String> = app.webview_windows().into_keys().filter(|l| l.starts_with("logs-")).collect();

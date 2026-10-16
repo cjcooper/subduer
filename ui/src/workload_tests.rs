@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::tests_unit::{context, kind, row, store, store_on};
-use subduer_types::{InfoRow, InfoSection, InfoTable, InfoTableRow, ObjectDetails, Usage, WorkloadDetails};
+use subduer_types::{InfoRow, InfoSection, InfoTable, InfoTableRow, ObjectDetails, ObjectLink, Usage, WorkloadDetails};
 
-const ALL: [Op; 11] = [
+const ALL: [Op; 12] = [
     Op::Restart,
     Op::Scale,
     Op::Run,
@@ -14,6 +14,7 @@ const ALL: [Op; 11] = [
     Op::Reclaim,
     Op::Rollback,
     Op::Uninstall,
+    Op::ForceSync,
 ];
 
 #[test]
@@ -67,7 +68,8 @@ fn op_labels() {
             "Expand",
             "Reclaim policy",
             "Rollback",
-            "Delete"
+            "Delete",
+            "Force sync"
         ]
     );
 }
@@ -89,6 +91,8 @@ fn op_hints_depend_on_kind_for_suspend_and_resume() {
     assert_eq!(Op::Reclaim.hint(&job), "Keep or delete the data when its claim is deleted");
     assert_eq!(Op::Rollback.hint(&job), "Go back to an earlier revision with helm rollback");
     assert!(Op::Uninstall.hint(&job).contains("helm uninstall"));
+    assert!(Op::ForceSync.hint(&kind("external-secrets.io", "ClusterExternalSecret")).contains("every namespace"));
+    assert!(Op::ForceSync.hint(&kind("external-secrets.io", "ExternalSecret")).contains("update the Secret"));
     for op in ALL {
         assert!(!op.hint(&job).is_empty());
     }
@@ -217,6 +221,7 @@ fn object(kind: &str, name: &str, info: Vec<InfoRow>, sections: Vec<InfoSection>
         sections,
         events: vec![],
         node: None,
+        logs: None,
     }
 }
 
@@ -329,4 +334,24 @@ fn request_does_nothing_without_a_context() {
     request(s, kind("apps", "Deployment"), &row(Some("shop"), "web"), Op::Scale);
     assert_eq!(s.workload_prompt.get_untracked(), None);
     assert_eq!(s.pending_workload.get_untracked(), None);
+}
+
+#[test]
+fn force_sync_notes_and_counts_come_from_the_loaded_details() {
+    let s = store();
+    assert_eq!(force_sync_note(s, "db"), None);
+    assert_eq!(provisioned_count(s, "shared"), 0);
+    s.object.set(Some(Ok(object("ExternalSecret", "db", vec![info_row("Refresh interval", "1h")], vec![]))));
+    assert_eq!(force_sync_note(s, "db"), None);
+    s.object.set(Some(Ok(object("ExternalSecret", "db", vec![info_row("Refresh policy", "CreatedOnce: fetched once, never refreshed")], vec![]))));
+    assert!(force_sync_note(s, "db").unwrap().contains("CreatedOnce"));
+    s.object.set(Some(Ok(object("ExternalSecret", "db", vec![info_row("Refresh interval", "0s: fetched once, then never refreshed")], vec![]))));
+    assert!(force_sync_note(s, "db").unwrap().contains("interval is 0"));
+    assert_eq!(force_sync_note(s, "other"), None, "another object's details");
+
+    let mut linked = table_row(&["shop", "shared", "Synced", ""]);
+    linked.link = Some(ObjectLink { kind: "external-secrets.io/ExternalSecret".into(), namespace: Some("shop".into()), name: "shared".into() });
+    let failed = table_row(&["x", "", "Failed: denied", ""]);
+    s.object.set(Some(Ok(object("ClusterExternalSecret", "shared", vec![], vec![section("externalsecret-children", vec![linked.clone(), linked, failed])]))));
+    assert_eq!(provisioned_count(s, "shared"), 2, "failed namespaces have no ExternalSecret");
 }

@@ -1,6 +1,6 @@
 (function () {
   const params = new URLSearchParams(location.search);
-  const merged = params.get('merged') === '1';
+  const merged = params.get('merged') === '1' || params.get('target') === '1';
   const label = params.get('logs');
   const listeners = {};
   const now = Date.now();
@@ -15,6 +15,8 @@
   const session = merged
     ? { context: 'acme-uat', title: 'Deployment shop/web · acme-uat · Logs', event: label, target: { namespace: 'shop', source: { Workload: { kind: { group: 'apps', version: 'v1', kind: 'Deployment', plural: 'deployments', namespaced: true }, name: 'web' } } } }
     : { context: 'acme-uat', title: 'app · shop/web-7d9f-abcde · acme-uat · Logs', event: label, target: { namespace: 'shop', source: { Container: { pod: 'web-7d9f-abcde', container: 'app' } } } };
+  // target=1: the target names a starting filter, like an operator's controller logs for one object.
+  if (params.get('target')) session.target.filter = 'Reconciling';
   window.__TAURI__ = {
     core: { invoke: async (cmd) => {
       if (cmd === 'logs_start') {

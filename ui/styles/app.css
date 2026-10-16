@@ -632,6 +632,11 @@ button.link:hover { text-decoration: underline; }
 .size-input { width: 120px; }
 .badge-sensitive { background: var(--warn-bg); color: var(--warn-text); }
 .badge-full-access, .badge-everyone, .badge-role-missing { background: var(--danger-soft); color: var(--danger); }
+/* External Secrets: ExternalSecret, PushSecret, stores, cluster kinds. */
+.badge-synced, .badge-valid { color: var(--ok); }
+.badge-partly-failed, .badge-owned-by-other { background: var(--warn-bg); color: var(--warn-text); }
+.badge-sync-failed, .badge-secret-missing, .badge-not-ready, .badge-invalid { background: var(--danger-soft); color: var(--danger); }
+.badge-deleted, .badge-unknown { color: var(--muted); }
 .access-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
 .access-field { display: flex; flex-direction: column; gap: 2px; }
 .access-field .confirm-input { width: 170px; padding: 3px 6px; }

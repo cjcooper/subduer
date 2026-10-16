@@ -502,6 +502,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     let logs_target = LogTarget {
         namespace: namespace.clone(),
         source: LogSource::Container { pod: pod.clone(), container: c.name.clone() },
+        filter: None,
     };
     // A shell needs a running container.
     let running = c.state == subduer_types::containers::State::Running;

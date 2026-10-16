@@ -138,10 +138,25 @@ fn kind_predicates() {
         ("helm.sh", "Release"),
         ("", "Namespace"),
         ("", "Node"),
+        ("external-secrets.io", "ExternalSecret"),
+        ("external-secrets.io", "ClusterSecretStore"),
+        ("generators.external-secrets.io", "Password"),
     ] {
         assert!(has_object_details(&kind(key.0, key.1)), "{key:?}");
     }
     assert!(!has_object_details(&pod) && !has_object_details(&deploy));
+    assert!(!has_object_details(&kind("keda.sh", "ScaledObject")));
+}
+
+#[test]
+fn force_sync_is_for_external_secrets_only() {
+    assert!(can_force_sync(&kind("external-secrets.io", "ExternalSecret")));
+    assert!(can_force_sync(&kind("external-secrets.io", "ClusterExternalSecret")));
+    assert!(!can_force_sync(&kind("external-secrets.io", "SecretStore")));
+    assert!(!can_force_sync(&kind("external-secrets.io", "PushSecret")));
+    assert!(!can_force_sync(&kind("generators.external-secrets.io", "Password")));
+    assert!(is_external_secrets(&kind("generators.external-secrets.io", "UUID")));
+    assert!(!is_external_secrets(&kind("", "Secret")));
 }
 
 #[test]
@@ -149,13 +164,17 @@ fn window_titles_and_labels() {
     let logs = LogTarget {
         namespace: "shop".into(),
         source: LogSource::Container { pod: "api-1".into(), container: "app".into() },
+        filter: None,
     };
     assert_eq!(logs.title("acme-uat"), "app · shop/api-1 · acme-uat · Logs");
     let merged = LogTarget {
         namespace: "shop".into(),
         source: LogSource::Workload { kind: kind("apps", "Deployment"), name: "api".into() },
+        filter: None,
     };
     assert_eq!(merged.title("acme-uat"), "Deployment shop/api · acme-uat · Logs");
+    let filtered = LogTarget { filter: Some("db-password".into()), ..merged };
+    assert_eq!(filtered.title("acme-uat"), "Deployment shop/api · acme-uat · Logs (db-password)");
 
     let exec = ExecTarget { namespace: "shop".into(), pod: "api-1".into(), container: "app".into() };
     assert_eq!(exec.title("acme-prd"), "app · shop/api-1 · acme-prd · Shell");

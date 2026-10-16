@@ -20,7 +20,7 @@ async fn main() -> subduer_core::Result<()> {
         let kind = kinds.into_iter().find(|k| k.kind.key() == args[2]).expect("kind").kind;
         LogSource::Workload { kind, name: args[3].clone() }
     };
-    let target = LogTarget { namespace: namespace.clone(), source };
+    let target = LogTarget { namespace: namespace.clone(), source, filter: None };
     println!("title: {}", target.title(context));
     let run = logs::stream(client, target, false, |b| {
         for n in &b.notices {

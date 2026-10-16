@@ -4,7 +4,7 @@ Stubs that fake `window.__TAURI__` so the UI can be rendered and screenshotted
 without the app or a cluster. See RUNBOOK.md section 3 for the full recipe.
 
 `run_e2e.py` turns them into an automated suite: it builds the UI, serves it
-with each stub, runs 296 scenarios in headless Chrome and checks the page title
+with each stub, runs 312 scenarios in headless Chrome and checks the page title
 (where stubs record what the app sent) and text. Run it with
 `python3 tools/ui-harness/run_e2e.py [filter…]`, or `--show <scenario>` to see
 what one scenario saw. Stubs must hand out increasing watch ids, as the app
@@ -29,7 +29,7 @@ python3 -m http.server 8765 &
 | `stub.js` | A pod's Details tab, delete, upload, download | `pod=limited\|unlimited`, `hang=<command>` (that call never returns), `slow=<command>` (it answers after 1.5 s), `again=<ms>` (reopen the Download or Upload dialog), `hover=0..1`, `del=1\|2`, `ctx=prod`, `locked=1`, `upload=choose\|send`, `exists=1`, `browse=1`, `download=pick\|done` |
 | `nav.js` | Sidebar with many kinds, Helm releases | `open=all\|some\|cr` |
 | `fwd.js` | Port Forwards page and start dialog | `page=forwards\|dialog`, `hang=<command>` (that call never returns), `late=1` (a second Service, grafana, whose ports come at once while prometheus's take 1.5 s; the dialog is reopened for grafana) |
-| `logstub.js` | A logs window | `logs=<label>`, `merged=1`, `filter=<text>` |
+| `logstub.js` | A logs window | `logs=<label>`, `merged=1`, `filter=<text>`, `target=1` (the target starts the filter at `Reconciling`) |
 | `execstub.js` | A shell window (xterm) | `exec=<label>`, `exit=1` |
 | `aboutstub.js` | The About window | `about`, `filter=<text>`, `open=1` (opens the first license) |
 | `workloadstub.js` | Deployment/StatefulSet Details tab, Restart and Scale dialogs | `rolling=1`, `local=1`, `collapse=resources,pods,…`, `scroll=<px>`, `openpod=1`, `op=restart\|scale`, `sts=1`, `ctx=prod`, `typed=1`, `locked=1`, `to=<n>`, `go=1` (the sent args land in the page title; read with `--dump-dom`) |
@@ -37,6 +37,7 @@ python3 -m http.server 8765 &
 | `configstub.js` | Config-section Details tabs, ConfigMap/Secret editing and Save, HPA Edit range | `kind=cm\|secret\|hpa\|quota\|webhook\|pdb\|lease`, `show=1`, `edit=1`, `change=1`, `add=1`, `badkey=1`, `remove=1`, `save=1`, `range=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>`, `yamledit=1` (YAML tab → Edit; `open_editor` args land in the title), `leave=row\|close\|yaml\|kind\|refresh\|link\|ns\|context\|cancel\|window\|quit` with `keep=1` or `discard=1` (the title then reports unsaved, prompt, editing, selection, tab, namespace and close) |
 | `networkstub.js` | Network-section Details tabs (Service, Ingress, NetworkPolicy, EndpointSlice) | `kind=svc\|ingress\|netpol\|slice`, `open=1` (clicks the first Open; the URL lands in the page title), `link=1`, `collapse=…`, `scroll=<px>` |
 | `storagestub.js` | Storage-section Details tabs, Expand and Reclaim policy | `kind=pvc\|pv\|sc\|va`, `pending=1`, `op=expand\|reclaim`, `size=<new size>`, `ctx=prod`, `typed=1`, `go=1` (sent args land in the page title), `collapse=…`, `scroll=<px>` |
+| `esostub.js` | External Secrets Details tabs, Force sync, Controller logs | `kind=es\|ces\|store\|gen`, `failed=1`, `once=1` (CreatedOnce), `op=force`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (args land in the page title), `ctl=1` (Controller logs; `open_logs` args in the title; not `logs=`, which makes the page a logs window), `link=1`, `collapse=…`, `scroll=<px>` |
 | `rbacstub.js` | Access Control Details tabs and Check access | `kind=sa\|role\|binding`, `check=<resource>` (`secrets` is denied, others allowed; args land in the page title), `collapse=…`, `scroll=<px>` |
 | `helmstub.js` | Helm release Details tab, Rollback and Delete | `op=rollback\|delete`, `keep=1` (keep history), `to=<revision>`, `nowait=1`, `fail=1`, `ctx=prod`, `typed=1`, `locked=1`, `go=1` (args land in the page title), `link=1` (follows the ClusterRole link), `collapse=…`, `scroll=<px>`. Watch ids count up, as the app drops tables from older watches. |
 | `settingsstub.js` | Settings dialog and Appearance (preview cards) | `theme=auto\|light\|dark` (saved before start), `pick=auto\|light\|dark`, `open=1`, `noauto=1` (no system appearance), `click=outside\|inside` (on the backdrop, or the dialog's heading). The title reports `data-theme`, the background, what's saved, the `set_app_theme` calls and whether the dialog is open; vary `preferredColorScheme` to play the system. |

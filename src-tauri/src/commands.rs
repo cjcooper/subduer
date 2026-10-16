@@ -385,6 +385,19 @@ pub async fn set_reclaim_policy(state: Win, context: String, name: String, polic
         .map_err(|e| e.user_message())
 }
 
+/// Annotates an ExternalSecret or ClusterExternalSecret with `force-sync`,
+/// so External Secrets fetches from its store now; checked like
+/// `delete_resource`. An empty namespace means cluster-scoped. Returns how
+/// many ExternalSecrets were annotated.
+#[tauri::command]
+pub async fn force_sync(state: Win, context: String, kind: KindRef, namespace: String, name: String) -> CmdResult<usize> {
+    let client = client_for_change(&state, &context, "synced").await?;
+    let namespace = Some(namespace.as_str()).filter(|n| !n.is_empty());
+    subduer_core::external_secrets::force_sync(&client, &state.gate, &context, &kind, namespace, &name, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Whether a ServiceAccount may do something (a SubjectAccessReview). A
 /// question to the API server: nothing is changed, so it isn't gated.
 #[tauri::command(rename_all = "snake_case")]
