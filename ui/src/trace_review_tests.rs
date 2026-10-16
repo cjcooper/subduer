@@ -39,7 +39,7 @@ fn sorting_puts_missing_values_last() {
     assert_eq!(rows.iter().map(|r| r.key.name.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
     sort_rows(&mut rows, SortBy::Workload, true);
     assert_eq!(rows[0].key.name, "c");
-    for by in [SortBy::Pods, SortBy::CpuRequest, SortBy::CpuP95, SortBy::MemRequest, SortBy::MemPeak, SortBy::MemSpare] {
+    for by in [SortBy::Pods, SortBy::CpuRequest, SortBy::CpuP95, SortBy::MemRequest, SortBy::MemPeak, SortBy::MemSpare, SortBy::Suggested, SortBy::Flags] {
         sort_rows(&mut rows, by, true);
     }
 }
@@ -98,4 +98,24 @@ fn plurals() {
     assert_eq!(plural(0, "rollout", "rollouts"), "0 rollouts");
     assert_eq!(severity(&ReviewFlag::OomKilled { count: 1 }), 0);
     assert_eq!(severity(&ReviewFlag::RequestsChanged), 3);
+}
+
+#[test]
+fn suggested_and_flags_sort_too() {
+    let names = |rows: &[ReviewRow]| rows.iter().map(|r| r.key.name.clone()).collect::<Vec<_>>();
+    let mut many_warnings = row("warned", "shop", None, vec![ReviewFlag::NoCpuRequest, ReviewFlag::NoMemoryRequest, ReviewFlag::Restarts { count: 3 }]);
+    many_warnings.suggestion = None;
+    let mut rows = vec![
+        row("quiet", "shop", None, vec![ReviewFlag::RequestsChanged]),
+        many_warnings,
+        row("oom", "shop", None, vec![ReviewFlag::OomKilled { count: 1 }]),
+    ];
+    rows[2].suggestion.as_mut().unwrap().cpu_request = 500.0;
+    sort_rows(&mut rows, SortBy::Flags, true);
+    assert_eq!(names(&rows), ["oom", "warned", "quiet"], "one critical outweighs three warnings");
+    assert!(flag_score(&rows[0]) > flag_score(&rows[1]));
+    sort_rows(&mut rows, SortBy::Suggested, true);
+    assert_eq!(names(&rows), ["oom", "quiet", "warned"], "no suggestion goes last");
+    sort_rows(&mut rows, SortBy::Suggested, false);
+    assert_eq!(names(&rows), ["quiet", "oom", "warned"]);
 }

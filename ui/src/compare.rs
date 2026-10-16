@@ -46,6 +46,31 @@ fn ends(row: &CompareRow) -> Option<(&CompareCell, &CompareCell)> {
     Some((first, present.last().unwrap_or(first)))
 }
 
+const TABLE: &str = "compare";
+
+/// The sortable headings: `Workload`, `Trace 1` … `Trace n`, `Change`.
+pub(crate) fn headers(n: usize) -> Vec<String> {
+    std::iter::once("Workload".to_owned()).chain((1..=n).map(|i| format!("Trace {i}"))).chain(["Change".to_owned()]).collect()
+}
+
+/// How a row sorts under column `i` of `n` traces: the workload by name, a
+/// trace by its CPU request, Change by how much the request changed.
+pub(crate) fn row_key(row: &CompareRow, i: usize, n: usize) -> crate::sort::Key {
+    use crate::sort::Key;
+    match i {
+        0 => Key::text(&format!("{} {} {}", row.key.name, row.key.container, row.key.namespace)),
+        i if i <= n => row.cells.get(i - 1).and_then(Option::as_ref).map_or(Key::Missing, |c| Key::opt(c.cpu_request.or(Some(c.cpu_p95)))),
+        _ => {
+            let Some((a, b)) = ends(row) else { return Key::Missing };
+            let ratio = |x: Option<f64>, y: Option<f64>| match (x, y) {
+                (Some(x), Some(y)) if x > 0.0 => Some((y - x) / x),
+                _ => None,
+            };
+            Key::opt(ratio(a.cpu_request, b.cpu_request).or_else(|| ratio(a.mem_request, b.mem_request)))
+        }
+    }
+}
+
 /// A request or limit differs between the traces that have the row.
 pub(crate) fn requests_changed(row: &CompareRow) -> bool {
     let mut cells = row.cells.iter().flatten();
@@ -107,15 +132,18 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                         .to_locale_date_string("default", &wasm_bindgen::JsValue::UNDEFINED)
                         .as_string()
                         .unwrap_or_default();
+                    let header = format!("Trace {}", i + 1);
+                    let (h1, h2) = (header.clone(), header.clone());
                     view! {
-                        <th class="cmp-head">
-                            <span class="cmp-index">
+                        <th class="cmp-head" title="Sort by CPU request in this trace">
+                            <button class="th-sort cmp-index" class:on=move || store.sorts.get(TABLE).is_some_and(|(s, _)| s == h1) on:click=move |_| store.sorts.click(TABLE, &header)>
                                 // The trace's colour on overlays, beside its number.
                                 {trace_slot(i, c.traces.len()).map(|slot| view! {
                                     <span class="ochart-swatch" style=format!("--trace: var(--trace-{})", slot + 1) aria-hidden="true"></span>
                                 })}
                                 {format!("{}", i + 1)}
-                            </span>
+                                <span class="sort-arrow">{move || store.sorts.arrow(TABLE, &h2)}</span>
+                            </button>
                             <span class="cmp-file" title=t.path.clone()>{file_name(&t.path).to_owned()}</span>
                             <span class="muted small">{format!("{started} · {span} · {}", t.context)}</span>
                             <span class="muted small">{scope_text(&t.scope)}</span>
@@ -125,7 +153,10 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                 .collect_view();
             let n = c.traces.len();
             let (overlay_traces, overlay_rows) = (c.traces.clone(), c.rows.clone());
-            let rows = filter(&c.rows, &text.get(), changed_only.get());
+            let mut rows = filter(&c.rows, &text.get(), changed_only.get());
+            let headers = headers(n);
+            let names: Vec<&str> = headers.iter().map(String::as_str).collect();
+            crate::sort::sort(&mut rows, store.sorts.by(TABLE, &names), |r, i| row_key(r, i, n));
             let count = rows.len();
             let body = rows
                 .into_iter()
@@ -210,7 +241,15 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                 }}
                 <div class="review-table-wrap cmp-wrap">
                     <table class="resources review-table compare-table">
-                        <thead><tr><th>"Workload"</th>{heads}<th>{format!("Change, 1 → {n}")}</th></tr></thead>
+                        <thead><tr>
+                            <crate::sort::SortTh sorts=store.sorts table=TABLE header="Workload" />
+                            {heads}
+                            <th title="Sort by the change in CPU request (memory where CPU has none)">
+                                <button class="th-sort" class:on=move || store.sorts.get(TABLE).is_some_and(|(s, _)| s == "Change") on:click=move |_| store.sorts.click(TABLE, "Change")>
+                                    {format!("Change, 1 → {n}")}<span class="sort-arrow">{move || store.sorts.arrow(TABLE, "Change")}</span>
+                                </button>
+                            </th>
+                        </tr></thead>
                         <tbody>{body}</tbody>
                     </table>
                 </div>

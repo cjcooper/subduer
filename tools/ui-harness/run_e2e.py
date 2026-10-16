@@ -91,6 +91,11 @@ SCENARIOS = [
     # Section headings are uppercase on screen only (CSS); the text is title case.
     S("nav/sidebar", "nav.js", "open=all", has=["Workloads 7", "Config 9", "Network 5", "Storage 3", "Port Forwards", "Cluster"]),
     S("nav/forwards", "fwd.js", "page=forwards", has=["Port Forwards"]),
+    S("sort/table-number", "nav.js", "sort=Revision", has=["rows keda,datadog,migrate,canary,corporate-wallet"]),
+    S("sort/table-number-desc", "nav.js", "sort=Revision&clicks=2", has=["rows corporate-wallet,canary,migrate,datadog,keda"]),
+    S("sort/table-age", "nav.js", "sort=Updated", has=["rows canary,corporate-wallet,migrate,datadog,keda"]),
+    S("sort/table-name", "nav.js", "sort=Name", has=["rows canary,corporate-wallet,datadog,keda,migrate"]),
+    S("sort/table-off", "nav.js", "sort=Name&clicks=3", has=["rows datadog,keda,corporate-wallet,migrate,canary"]),
     # ---- Deployments / StatefulSets ----
     S("workload/details", "workloadstub.js", "rolling=1", has=["Rolling out", "Pods", "Conditions", "Resources"]),
     S("workload/restart", "workloadstub.js", "op=restart&go=1", has=["restart_workload", '"name":"acme-api"']),
@@ -156,6 +161,11 @@ SCENARIOS = [
     S("storage/reclaim-prod-untyped", "storagestub.js", "kind=pv&op=reclaim&ctx=prod&go=1", lacks=["set_reclaim_policy"]),
     S("storage/class", "storagestub.js", "kind=sc", has=["Default", "Claims", "Parameters"]),
     S("storage/attachment", "storagestub.js", "kind=va", has=["Error", "Attach error"]),
+    S("sort/details-asc", "storagestub.js", "kind=sc&sort=Status", has=["rows type,encrypted,shop,shop,ops", "Status ↑"]),
+    S("sort/details-ns", "storagestub.js", "kind=sc&sort=Namespace", has=["rows type,encrypted,ops,shop,shop"]),
+    S("sort/details-desc", "storagestub.js", "kind=sc&sort=Namespace&clicks=2", has=["rows type,encrypted,shop,shop,ops", "Namespace ↓"]),
+    S("sort/details-claim-desc", "storagestub.js", "kind=sc&sort=Claim&clicks=2", has=["rows type,encrypted,ops,shop,shop"]),
+    S("sort/details-off", "storagestub.js", "kind=sc&sort=Claim&clicks=3", has=["rows type,encrypted,shop,shop,ops"], lacks=["Claim ↑", "Claim ↓"]),
     # ---- External Secrets ----
     S("eso/external-secret", "esostub.js", "kind=es",
       has=["Synced", "SecretStore/default-store", "Target secret", "Next refresh", "Data from", "acme/uat/api-key", "secret updated", "Force sync", "Controller logs"]),

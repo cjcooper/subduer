@@ -226,12 +226,27 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
     }
 }
 
+/// How a forward sorts under column `i`: ports by number, connections by
+/// how many are open, then the total.
+pub(crate) fn forward_key(f: &ForwardInfo, i: usize) -> crate::sort::Key {
+    use crate::sort::Key;
+    match i {
+        0 => Key::text(&format!("{}/{}", f.namespace, f.source.label())),
+        1 => Key::text(&f.context),
+        2 => Key::num(f64::from(f.local_port)),
+        3 => Key::num(f64::from(f.remote_port)),
+        4 => Key::num(f.active as f64 * 1e12 + f.total as f64),
+        _ => Key::text(f.last_error.as_deref().unwrap_or_default()),
+    }
+}
+
 #[component]
 pub fn ForwardsPage(store: Store) -> impl IntoView {
+    const HEADERS: [&str; 6] = ["Target", "Context", "Local", "Remote", "Connections", "Last error"];
     let rows = move || {
-        store
-            .forwards
-            .get()
+        let mut forwards = store.forwards.get();
+        crate::sort::sort(&mut forwards, store.sorts.by("forwards", &HEADERS), forward_key);
+        forwards
             .into_iter()
             .map(|f| {
                 let (id, addr) = (f.id, address(&f));
@@ -281,8 +296,8 @@ pub fn ForwardsPage(store: Store) -> impl IntoView {
                 <div class="table-wrap">
                 <table class="resources forwards">
                     <thead><tr>
-                        <th>"Target"</th><th>"Context"</th><th>"Local"</th><th>"Remote"</th>
-                        <th>"Connections"</th><th>"Last error"</th><th></th>
+                        {HEADERS.map(|h| view! { <crate::sort::SortTh sorts=store.sorts table="forwards" header=h /> })}
+                        <th></th>
                     </tr></thead>
                     <tbody>{rows}</tbody>
                 </table>

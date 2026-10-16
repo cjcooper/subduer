@@ -245,3 +245,20 @@ fn sidebar_sections_get_a_colour_class() {
         assert_eq!(css.matches(&token).count(), 3, "{token} in light and both dark blocks");
     }
 }
+
+#[test]
+fn resource_cells_sort_by_their_kind() {
+    use crate::sort::Key;
+    use subduer_types::containers::{Container, State, encode};
+    let c = |state| Container { name: "c".into(), state, detail: String::new(), init: false };
+    assert_eq!(cell_key(ColumnKind::Number, "3 (5m ago)"), Key::Num(3.0));
+    assert_eq!(cell_key(ColumnKind::Text, "Web-2"), Key::Text("web-2".into()));
+    assert_eq!(cell_key(ColumnKind::Age, ""), Key::Missing);
+    assert!(matches!(cell_key(ColumnKind::Age, "2026-10-16T12:00:00Z"), Key::Num(n) if n < 0.0), "younger is smaller");
+    let ready = cell_key(ColumnKind::Containers, &encode(&[c(State::Running), c(State::Running)]));
+    let half = cell_key(ColumnKind::Containers, &encode(&[c(State::Running), c(State::Starting)]));
+    let failed = cell_key(ColumnKind::Containers, &encode(&[c(State::Running), c(State::Failed)]));
+    assert_eq!((ready, half), (Key::Num(1.0), Key::Num(0.5)));
+    assert_eq!(failed, Key::Num(-0.5), "failures sort first");
+    assert_eq!(cell_key(ColumnKind::Containers, ""), Key::Missing);
+}

@@ -98,3 +98,15 @@ fn small_text() {
     assert_eq!(label_in("?exec=exec-1"), None);
     assert_eq!(label_in("?capture=1"), None, "only capture window labels");
 }
+
+#[test]
+fn handshakes_sort_by_each_column() {
+    use crate::sort::Key;
+    let c = conn(Some("TLS 1.2"));
+    assert_eq!(connection_key(&c, 0), Key::Num(0.0));
+    assert_eq!(connection_key(&c, 1), Key::Text("out".into()));
+    assert_eq!(connection_key(&c, 3), Key::Text("192.0.2.9:443".into()));
+    assert_eq!(connection_key(&c, 5), Key::Text("tls 1.2".into()));
+    assert_eq!(connection_key(&conn(None), 5), Key::Missing, "no answer goes last");
+    assert_eq!(connection_key(&c, 6), Key::Missing);
+}

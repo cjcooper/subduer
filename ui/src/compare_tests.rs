@@ -36,3 +36,18 @@ fn from_to_texts() {
     assert_eq!(from_to(Some(15.0), None, Measure::Cpu), "15m → not set");
     assert_eq!(from_to(None, None, Measure::Cpu), "not set");
 }
+
+#[test]
+fn compare_rows_sort_by_trace_and_change() {
+    use crate::sort::Key;
+    assert_eq!(headers(2), ["Workload", "Trace 1", "Trace 2", "Change"]);
+    let r = row("web", vec![cell(Some(500.0), None), None, cell(Some(250.0), None)]);
+    assert_eq!(row_key(&r, 0, 3), Key::Text("web app shop".into()));
+    assert_eq!(row_key(&r, 1, 3), Key::Num(500.0));
+    assert_eq!(row_key(&r, 2, 3), Key::Missing, "not in that trace");
+    assert_eq!(row_key(&r, 4, 3), Key::Num(-0.5), "request halved");
+    let mem = row("db", vec![cell(None, Some(100.0)), cell(None, Some(150.0))]);
+    assert_eq!(row_key(&mem, 1, 2), Key::Num(10.0), "no request: its p95");
+    assert_eq!(row_key(&mem, 3, 2), Key::Num(0.5), "memory when CPU has no request");
+    assert_eq!(row_key(&row("x", vec![None, None]), 3, 2), Key::Missing);
+}

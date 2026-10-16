@@ -140,3 +140,17 @@ fn size_text_units() {
     assert_eq!(size_text(1024 * 1024), "1.0 MiB");
     assert_eq!(size_text(5 * 1024 * 1024 + 512 * 1024), "5.5 MiB");
 }
+
+#[test]
+fn details_tables_sort_by_column_type() {
+    use crate::sort::Key;
+    use subduer_types::{InfoTable, InfoTableRow};
+    let mut r = InfoTableRow::new(vec!["data-0".into(), "20Gi".into(), "2026-10-16T12:00:00Z".into()]);
+    r.fill = Some(0.87);
+    let t = InfoTable { columns: vec!["Claim".into(), "Size".into(), "Since".into()], numeric: vec![1], times: vec![2], rows: vec![r.clone()], ..Default::default() };
+    assert_eq!(info_key(&t, &r, 0), Key::Text("data-0".into()));
+    assert_eq!(info_key(&t, &r, 1), Key::Num(20.0 * 1024f64.powi(3)));
+    assert!(matches!(info_key(&t, &r, 2), Key::Num(n) if n < 0.0));
+    assert_eq!(info_key(&t, &r, 3), Key::Num(0.87), "the Used bar");
+    assert_eq!(info_key(&t, &InfoTableRow::new(vec![]), 1), Key::Missing);
+}

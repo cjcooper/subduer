@@ -839,6 +839,11 @@ button.link:hover { text-decoration: underline; }
 .review-name { font-weight: 500; }
 .th-sort { border: none; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; white-space: nowrap; }
 .th-sort.on { color: var(--text); }
+/* Sortable headings: the whole label is the button; the arrow keeps its space. */
+.th-sort:hover { color: var(--text); }
+.th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.resources th .th-sort { max-width: 100%; overflow: hidden; text-overflow: ellipsis; text-align: inherit; font-weight: inherit; }
+.sort-arrow:not(:empty) { margin-left: 4px; }
 .flag {
   display: inline-flex; align-items: center; gap: 5px; margin: 0 4px 3px 0; padding: 1px 7px;
   border-radius: 9px; font-size: 12px; background: var(--row-hover); white-space: nowrap;

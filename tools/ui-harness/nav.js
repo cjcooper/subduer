@@ -95,5 +95,14 @@
     document.querySelectorAll('.kind-section-title').forEach((b, i) => { if (open === 'all' || (open === 'cr' && /Custom/.test(b.textContent)) || (open === 'some' && i < 2)) b.click(); });
   }, 700);
   if (open !== 'cr') setTimeout(() => { [...document.querySelectorAll('button.kind')].find((b) => b.textContent.includes('Release'))?.click(); }, 1100);
-  setTimeout(() => { document.querySelectorAll('tbody tr')[1]?.click(); }, 1700);
+  if (!params.get('sort')) setTimeout(() => { document.querySelectorAll('tbody tr')[1]?.click(); }, 1700);
+  const SORT_SEL = 'table.resources', SORT_AT = 1700;
+  // sort=<heading>&clicks=<n>: clicks a table heading n times (default 1); the rows' first cells land in the title.
+  const sortBy = params.get('sort');
+  if (sortBy) {
+    const n = Number(params.get('clicks') || 1);
+    for (let i = 0; i < n; i++) setTimeout(() => [...document.querySelectorAll(SORT_SEL + ' th .th-sort')].find((b) => b.textContent.replace(/[↑↓]/g, '').trim() === sortBy)?.click(), SORT_AT + i * 200);
+    setTimeout(() => { document.title = 'rows ' + [...document.querySelectorAll(SORT_SEL + ' tbody tr')].map((tr) => tr.querySelector('td').textContent.trim()).join(','); }, SORT_AT + n * 200 + 200);
+  }
+
 })();

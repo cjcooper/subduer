@@ -92,7 +92,8 @@ impl ColumnWidths {
 }
 
 /// A header cell with a drag handle on its right edge. Double-click the handle
-/// to go back to automatic widths for the whole table.
+/// to go back to automatic widths for the whole table. With `sorts`, the
+/// heading also sorts the table (kept under the same table name).
 #[component]
 pub fn ResizableTh(
     widths: ColumnWidths,
@@ -100,7 +101,20 @@ pub fn ResizableTh(
     header: String,
     #[prop(optional)] class: &'static str,
     #[prop(optional, into)] title: String,
+    #[prop(optional)] sorts: Option<crate::sort::Sorts>,
 ) -> impl IntoView {
+    let label = match sorts {
+        Some(sorts) => view! { <crate::sort::SortButton sorts=sorts table=table.clone() header=header.clone() /> }.into_any(),
+        None => header.clone().into_any(),
+    };
+    let aria = {
+        let (t, h) = (table.clone(), header.clone());
+        move || match sorts.and_then(|s| s.get(&t)) {
+            Some((s, d)) if s == h => Some(if d { "descending" } else { "ascending" }),
+            _ if sorts.is_some() => Some("none"),
+            _ => None,
+        }
+    };
     // (pointer x, column width) when the drag started.
     let drag = StoredValue::new(None::<(f64, f64)>);
     let style = {
@@ -152,8 +166,8 @@ pub fn ResizableTh(
     };
 
     view! {
-        <th class=class style=style title=title data-header=header.clone()>
-            {header.clone()}
+        <th class=class style=style title=title data-header=header.clone() aria-sort=aria>
+            {label}
             <span
                 class="col-resize"
                 title="Drag to resize · double-click to reset"

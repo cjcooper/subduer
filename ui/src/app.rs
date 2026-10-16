@@ -103,6 +103,8 @@ pub(crate) struct Store {
     /// When `overview` was fetched (ms).
     pub(crate) overview_at: RwSignal<f64>,
     pub(crate) col_widths: ColumnWidths,
+    /// Each table's sorted column.
+    pub(crate) sorts: crate::sort::Sorts,
     pub(crate) detail_tab: RwSignal<DetailTab>,
     /// Details of the selected pod.
     pub(crate) pod: RwSignal<Option<Result<PodDetails, String>>>,
@@ -171,7 +173,8 @@ pub(crate) struct Store {
 
 impl Store {
     fn new() -> Self {
-        let store = Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load());
+        let mut store = Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load());
+        store.sorts = crate::sort::Sorts::load();
         store.recent_traces.set(crate::prefs::load_recent_traces());
         store
     }
@@ -221,6 +224,7 @@ impl Store {
             overview_loading: RwSignal::new(false),
             overview_at: RwSignal::new(0.0),
             col_widths,
+            sorts: crate::sort::Sorts::from_saved(""),
             detail_tab: RwSignal::new(DetailTab::Yaml),
             pod: RwSignal::new(None),
             workload: RwSignal::new(None),
@@ -1033,14 +1037,14 @@ fn ResourceView(store: Store) -> impl IntoView {
 
     let rows = move || {
         let filter = store.row_filter.get().to_lowercase();
-        store
-            .table
-            .get()
-            .map(|t| t.rows)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| filter.is_empty() || r.id.to_lowercase().contains(&filter))
-            .collect::<Vec<_>>()
+        let Some(table) = store.table.get() else { return vec![] };
+        let mut rows: Vec<ResourceRow> =
+            table.rows.into_iter().filter(|r| filter.is_empty() || r.id.to_lowercase().contains(&filter)).collect();
+        let table_id = store.kind.get_untracked().map(|k| k.key()).unwrap_or_default();
+        let headers: Vec<&str> = table.columns.iter().map(|c| c.header.as_str()).collect();
+        let by = store.sorts.by(&table_id, &headers);
+        crate::sort::sort(&mut rows, by, |r, i| cell_key(table.columns[i].kind, r.cells.get(i).map_or("", String::as_str)));
+        rows
     };
 
     let header = move || {
@@ -1117,6 +1121,7 @@ fn ResourceView(store: Store) -> impl IntoView {
                                             header=c.header.clone()
                                             class=column_class(c.kind)
                                             title=title
+                                            sorts=store.sorts
                                         />
                                     }
                                 })
@@ -1161,6 +1166,26 @@ fn visible(columns: &[Column], single_namespace: bool) -> impl Iterator<Item = (
         .iter()
         .enumerate()
         .filter(move |(_, c)| !(single_namespace && c.kind == ColumnKind::Namespace))
+}
+
+/// How a cell sorts: ages youngest first, numbers by value, containers with
+/// failures first and then by the share running, the rest as text.
+pub(crate) fn cell_key(kind: ColumnKind, value: &str) -> crate::sort::Key {
+    use crate::sort::Key;
+    match kind {
+        ColumnKind::Age => Key::age(value),
+        ColumnKind::Number => Key::quantity(value),
+        ColumnKind::Containers => {
+            let all = containers::decode(value);
+            if all.is_empty() {
+                return Key::Missing;
+            }
+            let running = all.iter().filter(|c| c.state == containers::State::Running).count();
+            let failed = all.iter().any(|c| c.state == containers::State::Failed);
+            Key::num(running as f64 / all.len() as f64 - if failed { 1.0 } else { 0.0 })
+        }
+        _ => Key::text(value),
+    }
 }
 
 fn column_class(kind: ColumnKind) -> &'static str {

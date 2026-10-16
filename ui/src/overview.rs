@@ -432,7 +432,25 @@ fn NamespaceBars(rows: Vec<(String, f64, usize)>, fmt: fn(f64) -> String) -> imp
 
 #[component]
 fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: bool) -> impl IntoView {
-    let rows = nodes
+    const TABLE: &str = "nodes";
+    let mut headers: Vec<(&str, &'static str)> = vec![
+        ("Name", ""),
+        ("Status", ""),
+        ("Type", ""),
+        ("Pods", "num"),
+        ("CPU requested", ""),
+        ("Memory requested", ""),
+    ];
+    if metrics {
+        headers.extend([("CPU used", ""), ("Memory used", "")]);
+    }
+    headers.extend([("CPU", "num"), ("Memory", "num"), ("Version", ""), ("Age", "")]);
+    let names: Vec<&'static str> = headers.iter().map(|(h, _)| *h).collect();
+    let rows = move || {
+        let mut nodes = nodes.clone();
+        let by = store.sorts.by(TABLE, &names);
+        crate::sort::sort(&mut nodes, by, |n, i| node_key(n, names[i]));
+        nodes
         .into_iter()
         .map(|n| {
             let mut status = if n.ready { "Ready".to_owned() } else { "NotReady".to_owned() };
@@ -483,20 +501,8 @@ fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: b
                 </tr>
             }
         })
-        .collect_view();
-    const TABLE: &str = "nodes";
-    let mut headers: Vec<(&str, &'static str)> = vec![
-        ("Name", ""),
-        ("Status", ""),
-        ("Type", ""),
-        ("Pods", "num"),
-        ("CPU requested", ""),
-        ("Memory requested", ""),
-    ];
-    if metrics {
-        headers.extend([("CPU used", ""), ("Memory used", "")]);
-    }
-    headers.extend([("CPU", "num"), ("Memory", "num"), ("Version", ""), ("Age", "")]);
+        .collect_view()
+    };
     let names: Vec<String> = headers.iter().map(|(h, _)| h.to_string()).collect();
     let style = move || store.col_widths.table_style(TABLE, &names);
     view! {
@@ -504,12 +510,34 @@ fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: b
             <table class="resources" class:fixed=move || store.col_widths.has_table(TABLE) style=style>
                 <thead><tr>
                     {headers.iter().map(|(h, class)| view! {
-                        <ResizableTh widths=store.col_widths table=TABLE.to_owned() header=h.to_string() class=*class />
+                        <ResizableTh widths=store.col_widths table=TABLE.to_owned() header=h.to_string() class=*class sorts=store.sorts />
                     }).collect_view()}
                 </tr></thead>
                 <tbody>{rows}</tbody>
             </table>
         </div>
+    }
+}
+
+/// How a node sorts under one heading: meters by their share, sizes by value.
+pub(crate) fn node_key(n: &NodeSummary, header: &str) -> crate::sort::Key {
+    use crate::sort::Key;
+    let share = |v: f64, total: f64| if total > 0.0 { Key::num(v / total) } else { Key::Missing };
+    match header {
+        "Name" => Key::text(&n.name),
+        // Not ready first, then cordoned.
+        "Status" => Key::num(f64::from(u8::from(n.ready)) * 2.0 + f64::from(u8::from(n.schedulable))),
+        "Type" => Key::text(n.instance_type.as_deref().unwrap_or_default()),
+        "Pods" => Key::num(n.pods as f64),
+        "CPU requested" => share(n.cpu.requests, n.cpu.allocatable),
+        "Memory requested" => share(n.memory.requests, n.memory.allocatable),
+        "CPU used" => n.cpu.used.map_or(Key::Missing, |u| share(u, n.cpu.allocatable)),
+        "Memory used" => n.memory.used.map_or(Key::Missing, |u| share(u, n.memory.allocatable)),
+        "CPU" => Key::num(n.cpu.allocatable),
+        "Memory" => Key::num(n.memory.allocatable),
+        "Version" => Key::text(&n.kubelet_version),
+        "Age" => Key::age(n.created.as_deref().unwrap_or_default()),
+        _ => Key::Missing,
     }
 }
 

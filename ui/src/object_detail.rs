@@ -264,25 +264,36 @@ fn InfoSectionView(store: Store, s: InfoSection) -> impl IntoView {
             {(!rows.is_empty()).then(|| view! {
                 <dl class="kv">{rows.iter().cloned().map(|r| view! { <InfoRowView store=store r=r /> }).collect_view()}</dl>
             })}
-            {table.clone().filter(|t| !t.rows.is_empty()).map(|t| view! { <InfoTableView store=store t=t /> })}
+            {table.clone().filter(|t| !t.rows.is_empty()).map(|t| view! { <InfoTableView store=store t=t id=s.id.clone() /> })}
             {empty.then(|| note.clone().map(|n| view! { <p class="muted">{n}</p> }))}
         </Section>
     }
 }
 
 #[component]
-fn InfoTableView(store: Store, t: InfoTable) -> impl IntoView {
+fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
     let has_fill = t.rows.iter().any(|r| r.fill.is_some());
     let (numeric, mono) = (t.numeric.clone(), t.mono.clone());
+    // Sorts are kept per section, so a section's order survives refreshes.
+    let table = format!("detail:{id}");
     let head = t
         .columns
         .iter()
         .enumerate()
-        .map(|(i, c)| view! { <th class:num=numeric.contains(&i)>{c.clone()}</th> })
+        .map(|(i, c)| {
+            let class = if numeric.contains(&i) { "num" } else { "" };
+            view! { <crate::sort::SortTh sorts=store.sorts table=table.clone() header=c.clone() class=class /> }
+        })
         .collect_view();
-    let rows = t
-        .rows
-        .into_iter()
+    let fill_head = has_fill.then(|| view! { <crate::sort::SortTh sorts=store.sorts table=table.clone() header=FILL_HEADER /> });
+    let mut headers: Vec<String> = t.columns.clone();
+    headers.push(FILL_HEADER.to_owned());
+    let rows = move || {
+        let names: Vec<&str> = headers.iter().map(String::as_str).collect();
+        let by = store.sorts.by(&table, &names);
+        let mut rows = t.rows.clone();
+        crate::sort::sort(&mut rows, by, |r, i| info_key(&t, r, i));
+        rows.into_iter()
         .map(|r| {
             let cells = r
                 .cells
@@ -327,12 +338,33 @@ fn InfoTableView(store: Store, t: InfoTable) -> impl IntoView {
                 >{cells}{fill}</tr>
             }
         })
-        .collect_view();
+        .collect_view()
+    };
     view! {
         <table class="resources itable">
-            <thead><tr>{head}{has_fill.then(|| view! { <th></th> })}</tr></thead>
+            <thead><tr>{head}{fill_head}</tr></thead>
             <tbody>{rows}</tbody>
         </table>
+    }
+}
+
+/// The heading of the bar column (quota used of hard, disk used, …).
+const FILL_HEADER: &str = "Used";
+
+/// How a cell of a details table sorts: times as ages, numeric columns by
+/// value, the bar by its share, the rest as text.
+pub(crate) fn info_key(t: &InfoTable, r: &subduer_types::InfoTableRow, i: usize) -> crate::sort::Key {
+    use crate::sort::Key;
+    if i == t.columns.len() {
+        return Key::opt(r.fill);
+    }
+    let cell = r.cells.get(i).map_or("", String::as_str);
+    if t.times.contains(&i) {
+        Key::age(cell)
+    } else if t.numeric.contains(&i) {
+        Key::quantity(cell)
+    } else {
+        Key::text(cell)
     }
 }
 

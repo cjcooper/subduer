@@ -321,10 +321,33 @@ fn phase_text(p: CapturePhase) -> &'static str {
 }
 
 /// The capture window.
+const TABLE: &str = "capture";
+const HEADERS: [&str; 7] = ["Time", "Way", "Client", "Server", "Server name", "Version", "Cipher"];
+
+/// How a handshake sorts under column `i`; addresses in natural order.
+pub(crate) fn connection_key(c: &TlsConnection, i: usize) -> crate::sort::Key {
+    use crate::sort::Key;
+    match i {
+        0 => Key::num(c.first_seen),
+        1 => Key::text(match c.direction {
+            TlsDirection::Inbound => "in",
+            TlsDirection::Outbound => "out",
+            TlsDirection::Other => "",
+        }),
+        2 => Key::text(&c.client),
+        3 => Key::text(&c.server),
+        4 => Key::text(c.server_name.as_deref().unwrap_or_default()),
+        5 => Key::text(c.version.as_deref().unwrap_or_default()),
+        _ => Key::text(c.cipher.as_deref().unwrap_or_default()),
+    }
+}
+
 #[component]
 pub fn CaptureApp(label: String) -> impl IntoView {
     let session = RwSignal::new(None::<Result<CaptureSession, String>>);
     let update = RwSignal::new(None::<CaptureUpdate>);
+    // This window has no Store: its own copy of the saved sorts.
+    let sorts = crate::sort::Sorts::load();
     let now = RwSignal::new(js_sys::Date::now() / 1000.0);
     set_interval(move || now.set(js_sys::Date::now() / 1000.0), std::time::Duration::from_millis(500));
     {
@@ -392,8 +415,9 @@ pub fn CaptureApp(label: String) -> impl IntoView {
         };
         let rows = move || {
             let mut list = u.get().scan.connections;
-            // Newest first: what just happened is on top.
+            // Newest first: what just happened is on top, unless sorted.
             list.reverse();
+            crate::sort::sort(&mut list, sorts.by(TABLE, &HEADERS), connection_key);
             if list.is_empty() {
                 return view! { <tr><td colspan="7" class="muted">"No TLS handshakes seen yet."</td></tr> }.into_any();
             }
@@ -460,7 +484,7 @@ pub fn CaptureApp(label: String) -> impl IntoView {
                 <div class="capture-counts">{counts}</div>
                 <div class="capture-table-wrap">
                     <table class="resources capture-table">
-                        <thead><tr><th>"Time"</th><th>"Way"</th><th>"Client"</th><th>"Server"</th><th>"Server name"</th><th>"Version"</th><th>"Cipher"</th></tr></thead>
+                        <thead><tr>{HEADERS.map(|h| view! { <crate::sort::SortTh sorts=sorts table=TABLE header=h /> })}</tr></thead>
                         <tbody>{rows}</tbody>
                     </table>
                 </div>

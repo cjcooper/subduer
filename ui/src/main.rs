@@ -18,6 +18,7 @@ mod overview;
 mod pod_detail;
 mod prefs;
 mod rightsize;
+mod sort;
 mod tauri;
 mod trace;
 mod trace_chart;

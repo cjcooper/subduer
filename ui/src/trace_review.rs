@@ -159,6 +159,19 @@ pub(crate) fn apply_blocked(store: Store) -> Option<String> {
 }
 
 /// Sort key: critical first.
+/// Flags weighed by severity: one critical outweighs any number of lesser ones.
+pub(crate) fn flag_score(r: &ReviewRow) -> f64 {
+    r.flags
+        .iter()
+        .map(|f| match severity(f) {
+            0 => 1e6,
+            1 => 1e4,
+            2 => 1e2,
+            _ => 1.0,
+        })
+        .sum()
+}
+
 fn severity(f: &ReviewFlag) -> u8 {
     match flag_level(f) {
         "critical" => 0,
@@ -190,6 +203,10 @@ pub(crate) enum SortBy {
     MemRequest,
     MemPeak,
     MemSpare,
+    /// The suggested CPU request, then memory.
+    Suggested,
+    /// The most severe flags first when descending.
+    Flags,
 }
 
 /// Sorts rows; numbers descending by default, names ascending. Missing values go last.
@@ -204,6 +221,8 @@ pub(crate) fn sort_rows(rows: &mut [ReviewRow], by: SortBy, descending: bool) {
             SortBy::MemRequest => r.mem_request,
             SortBy::MemPeak => Some(r.mem_max),
             SortBy::MemSpare => r.mem_spare,
+            SortBy::Suggested => r.suggestion.as_ref().map(|s| s.cpu_request * 1e12 + s.mem_request / 1e6),
+            SortBy::Flags => Some(flag_score(r)),
         }
     };
     rows.sort_by(|a, b| {
@@ -739,8 +758,8 @@ fn ReviewView(store: Store) -> impl IntoView {
                         {th("Memory request", SortBy::MemRequest, true)}
                         {th("Memory peak", SortBy::MemPeak, true)}
                         {th("Memory spare", SortBy::MemSpare, true)}
-                        <th class="num">"Suggested"</th>
-                        <th>"Flags"</th>
+                        {th("Suggested", SortBy::Suggested, true)}
+                        {th("Flags", SortBy::Flags, false)}
                     </tr>
                 </thead>
                 <tbody>{body}</tbody>

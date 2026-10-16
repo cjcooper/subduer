@@ -90,3 +90,35 @@ fn namespace_rows_skip_zero_values() {
     assert_eq!(namespace_rows(&sorted, |n| n.memory), [("acme".to_owned(), 512.0, 2)]);
     assert!(namespace_rows(&[], |n| n.cpu).is_empty());
 }
+
+#[test]
+fn nodes_sort_by_what_each_column_shows() {
+    use crate::sort::Key;
+    use subduer_types::{NodeSummary, ResourceTotals};
+    let totals = |requests, allocatable, used| ResourceTotals { capacity: allocatable, allocatable, requests, limits: 0.0, used };
+    let n = NodeSummary {
+        name: "node-2".into(),
+        ready: true,
+        schedulable: false,
+        roles: vec![],
+        instance_type: Some("m6i.large".into()),
+        kubelet_version: "v1.33.1".into(),
+        created: Some("2026-10-16T12:00:00Z".into()),
+        pods: 12,
+        pod_capacity: 29,
+        cpu: totals(500.0, 2000.0, None),
+        memory: totals(1.0, 4.0, Some(2.0)),
+    };
+    assert_eq!(node_key(&n, "Name"), Key::Text("node-2".into()));
+    assert_eq!(node_key(&n, "Status"), Key::Num(2.0), "ready but cordoned");
+    assert_eq!(node_key(&n, "Pods"), Key::Num(12.0));
+    assert_eq!(node_key(&n, "CPU requested"), Key::Num(0.25));
+    assert_eq!(node_key(&n, "Memory used"), Key::Num(0.5));
+    assert_eq!(node_key(&n, "CPU used"), Key::Missing);
+    assert_eq!(node_key(&n, "CPU"), Key::Num(2000.0));
+    assert_eq!(node_key(&n, "Type"), Key::Text("m6i.large".into()));
+    assert!(matches!(node_key(&n, "Age"), Key::Num(_)));
+    assert_eq!(node_key(&n, "Unknown"), Key::Missing);
+    let empty = NodeSummary { cpu: totals(1.0, 0.0, None), ..n };
+    assert_eq!(node_key(&empty, "CPU requested"), Key::Missing, "nothing allocatable");
+}

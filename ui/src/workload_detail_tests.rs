@@ -92,3 +92,39 @@ fn per_pod_shows_request_and_limit() {
     assert_eq!(per_pod(u, fmt_bytes), "request 64.0 MiB · limit not set");
     assert_eq!(per_pod(Usage::default(), fmt_cpu), "request not set · limit not set");
 }
+
+#[test]
+fn pods_and_jobs_sort_by_value() {
+    use crate::sort::Key;
+    let p = WorkloadPod {
+        name: "web-1".into(),
+        status: "Running".into(),
+        containers: vec![],
+        ready: "1/1".into(),
+        restarts: 4,
+        node: None,
+        created: None,
+        updated: true,
+        finished: false,
+        cpu: Some(12.0),
+        memory: None,
+    };
+    assert_eq!([pod_key(&p, 0), pod_key(&p, 2), pod_key(&p, 3), pod_key(&p, 4), pod_key(&p, 5)],
+        [Key::Text("web-1".into()), Key::Num(4.0), Key::Num(12.0), Key::Missing, Key::Missing]);
+    let j = JobRun {
+        name: "nightly-1".into(),
+        status: "Complete".into(),
+        completions: "1/1".into(),
+        manual: false,
+        created: Some("2026-10-16T12:00:00Z".into()),
+        started: Some("2026-10-16T12:00:00Z".into()),
+        finished: Some("2026-10-16T12:02:18Z".into()),
+    };
+    assert_eq!(job_key(&j, 3, 0.0), Key::Num(138_000.0));
+    let running = JobRun { finished: None, ..j.clone() };
+    let start = crate::sort::Key::time("2026-10-16T12:00:00Z");
+    let Key::Num(start) = start else { panic!() };
+    assert_eq!(job_key(&running, 3, start + 5000.0), Key::Num(5000.0), "a running Job counts up to now");
+    assert_eq!(job_key(&JobRun { started: None, ..j.clone() }, 3, 0.0), Key::Missing);
+    assert_eq!(job_key(&j, 2, 0.0), Key::Text("1/1".into()));
+}

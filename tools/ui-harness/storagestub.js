@@ -75,6 +75,14 @@
   if (params.get('size')) setTimeout(() => type(document.querySelector('.modal .size-input'), params.get('size')), 2600);
   if (prod && params.get('typed')) setTimeout(() => type([...document.querySelectorAll('.modal .confirm-input')].pop(), d.name), 2800);
   if (params.get('go')) setTimeout(() => document.querySelector('.modal-actions .primary')?.click(), 3100);
+  const SORT_SEL = '.itable', SORT_AT = 2300;
+  // sort=<heading>&clicks=<n>: clicks a table heading n times (default 1); the rows' first cells land in the title.
+  const sortBy = params.get('sort');
+  if (sortBy) {
+    const n = Number(params.get('clicks') || 1);
+    for (let i = 0; i < n; i++) setTimeout(() => [...document.querySelectorAll(SORT_SEL + ' th .th-sort')].find((b) => b.textContent.replace(/[↑↓]/g, '').trim() === sortBy)?.click(), SORT_AT + i * 200);
+    setTimeout(() => { document.title = 'rows ' + [...document.querySelectorAll(SORT_SEL + ' tbody tr')].map((tr) => tr.querySelector('td').textContent.trim()).join(','); }, SORT_AT + n * 200 + 200);
+  }
   const collapse = params.get('collapse');
   if (collapse) setTimeout(() => collapse.split(',').forEach((c) => [...document.querySelectorAll('.dsection-name')].find((n) => n.textContent.toLowerCase() === c)?.closest('button').click()), 2300);
   const scroll = params.get('scroll');

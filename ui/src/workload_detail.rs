@@ -267,7 +267,11 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
     if pods.is_empty() {
         return view! { <p class="muted">"No pods."</p> }.into_any();
     }
-    let rows = pods
+    const HEADERS: [&str; 6] = ["Name", "Status", "Restarts", "CPU", "Memory", "Age"];
+    let rows = move || {
+        let mut pods = pods.clone();
+        crate::sort::sort(&mut pods, store.sorts.by("pods", &HEADERS), pod_key);
+        pods
         .into_iter()
         .map(|p| {
             let icons = p.containers.iter().cloned().map(|c| view! { <ContainerIcon c=c /> }).collect_view();
@@ -296,23 +300,58 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
                 </tr>
             }
         })
-        .collect_view();
+        .collect_view()
+    };
     view! {
         <table class="resources wpods">
             <thead>
                 <tr>
-                    <th>"Name"</th>
-                    <th>"Status"</th>
-                    <th class="num">"Restarts"</th>
-                    <th class="num">"CPU"</th>
-                    <th class="num">"Memory"</th>
-                    <th>"Age"</th>
+                    {HEADERS.map(|h| {
+                        let class = if matches!(h, "Restarts" | "CPU" | "Memory") { "num" } else { "" };
+                        view! { <crate::sort::SortTh sorts=store.sorts table="pods" header=h class=class /> }
+                    })}
                 </tr>
             </thead>
             <tbody>{rows}</tbody>
         </table>
     }
     .into_any()
+}
+
+/// How a pod sorts under the Pods table's column `i`.
+pub(crate) fn pod_key(p: &WorkloadPod, i: usize) -> crate::sort::Key {
+    use crate::sort::Key;
+    match i {
+        0 => Key::text(&p.name),
+        1 => Key::text(&p.status),
+        2 => Key::num(p.restarts as f64),
+        3 => Key::opt(p.cpu),
+        4 => Key::opt(p.memory),
+        _ => Key::age(p.created.as_deref().unwrap_or_default()),
+    }
+}
+
+/// How a Job sorts under the Jobs table's column `i`; a running Job's
+/// duration counts up to `now` (ms).
+pub(crate) fn job_key(j: &JobRun, i: usize, now: f64) -> crate::sort::Key {
+    use crate::sort::Key;
+    match i {
+        0 => Key::text(&j.name),
+        1 => Key::text(&j.status),
+        2 => Key::text(&j.completions),
+        3 => {
+            let (Key::Num(start), end) = (Key::time(j.started.as_deref().unwrap_or_default()), j.finished.as_deref()) else {
+                return Key::Missing;
+            };
+            let end = match end.map(Key::time) {
+                Some(Key::Num(e)) => e,
+                Some(_) => return Key::Missing,
+                None => now,
+            };
+            Key::num(end - start)
+        }
+        _ => Key::age(j.created.as_deref().unwrap_or_default()),
+    }
 }
 
 /// Seconds-precise under an hour (`2m 18s`), then like ages.
@@ -329,7 +368,12 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
     if jobs.is_empty() {
         return view! { <p class="muted">"No Jobs kept."</p> }.into_any();
     }
-    let rows = jobs
+    const HEADERS: [&str; 5] = ["Name", "Status", "Done", "Duration", "Age"];
+    let rows = move || {
+        let mut jobs = jobs.clone();
+        let now = store.now.get_untracked();
+        crate::sort::sort(&mut jobs, store.sorts.by("jobs", &HEADERS), |j, i| job_key(j, i, now));
+        jobs
         .into_iter()
         .map(|j| {
             let created = j.created.clone().unwrap_or_default();
@@ -355,16 +399,16 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
                 </tr>
             }
         })
-        .collect_view();
+        .collect_view()
+    };
     view! {
         <table class="resources wpods">
             <thead>
                 <tr>
-                    <th>"Name"</th>
-                    <th>"Status"</th>
-                    <th class="num">"Done"</th>
-                    <th class="num">"Duration"</th>
-                    <th>"Age"</th>
+                    {HEADERS.map(|h| {
+                        let class = if matches!(h, "Done" | "Duration") { "num" } else { "" };
+                        view! { <crate::sort::SortTh sorts=store.sorts table="jobs" header=h class=class /> }
+                    })}
                 </tr>
             </thead>
             <tbody>{rows}</tbody>
