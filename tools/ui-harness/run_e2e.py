@@ -420,6 +420,21 @@ SCENARIOS = [
     S("edit/window-close-asks", "editorstub.js", "edit=edit-1&change=1&closereq=1", has=["modal=Discard your edits?"], lacks=[",close"]),
     S("edit/window-close-clean", "editorstub.js", "edit=edit-1&closereq=1", has=["calls=start,close"]),
     S("edit/reload-dirty-asks", "editorstub.js", "edit=edit-1&change=1&reload=1&discard=1", has=["calls=start,start", "dirty=false"]),
+    # ---- Find in a detail panel (find.js) ----
+    S("find/configmap", "configstub.js", "kind=cm&find=8080",
+      has=["find count=1 of 1", "current=8080", "painted=1", "bar=true"]),
+    S("find/button", "configstub.js", "kind=cm&find=helm&findbtn=1", has=["find count=1 of", "bar=true", "re:painted=[1-9]"]),
+    S("find/none", "configstub.js", "kind=cm&find=no-such-text", has=["count=No matches", "painted=0"]),
+    S("find/next-wraps", "configstub.js", "kind=cm&find=acme-api&next=1", has=["re:count=2 of [2-9]"]),
+    S("find/prev-wraps", "configstub.js", "kind=cm&find=acme-api&prev=1", has=["re:count=([2-9]) of \\1"]),
+    S("find/esc-closes-bar-only", "configstub.js", "kind=cm&find=info&findesc=1", has=["bar=false", "panel=true", "painted=0"]),
+    S("find/skips-revealed-secret", "configstub.js", "kind=secret&show=1&find=8f2a9c", has=["count=No matches", "tok_8f2a9c1e77"]),
+    S("find/secret-keys-still-found", "configstub.js", "kind=secret&find=api_token", has=["count=1 of 1", "current=API_TOKEN"]),
+    S("find/configmap-yaml", "configstub.js", "kind=cm&findtab=yaml&find=kind:", has=["count=1 of 1"]),
+    S("find/secret-yaml-skipped", "configstub.js", "kind=secret&findtab=yaml&find=kind:", has=["count=No matches"]),
+    S("find/opens-collapsed-section", "workloadstub.js", "collapse=pods&find=m8n3p",
+      has=["re:count=1 of [0-9]", "current=m8n3p", "section=Pods", "closed=0"]),
+    S("find/collapsed-not-opened-without-match", "workloadstub.js", "collapse=pods&find=no-such-pod", has=["count=No matches", "closed=1"]),
     # ---- Esc (esc.js) ----
     # The detail panel: closes, except while typing; unsaved edits ask first.
     S("esc/panel-closes", "configstub.js", "kind=cm&esc=2800", has=["before: dialog=none detail=yes after: dialog=none detail=no"]),
@@ -485,10 +500,10 @@ def build(out):
     for f in os.listdir(HARNESS):
         if f.endswith(".js"):
             shutil.copy(os.path.join(HARNESS, f), out)
-            # esc.js rides along with every stub (it does nothing without `esc=`); it has no page of its own.
-            if f == "esc.js":
+            # esc.js and find.js ride along with every stub (they do nothing without `esc=` / `find=`); no pages of their own.
+            if f in ("esc.js", "find.js"):
                 continue
-            page =index.replace("<head>", f'<head><script src="{f}"></script><script src="esc.js"></script>', 1)
+            page =index.replace("<head>", f'<head><script src="{f}"></script><script src="esc.js"></script><script src="find.js"></script>', 1)
             open(os.path.join(out, f"page-{f[:-3]}.html"), "w").write(page)
 
 

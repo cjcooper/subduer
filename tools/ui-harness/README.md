@@ -4,7 +4,7 @@ Stubs that fake `window.__TAURI__` so the UI can be rendered and screenshotted
 without the app or a cluster. See RUNBOOK.md section 3 for the full recipe.
 
 `run_e2e.py` turns them into an automated suite: it builds the UI, serves it
-with each stub, runs 322 scenarios in headless Chrome and checks the page title
+with each stub, runs 334 scenarios in headless Chrome and checks the page title
 (where stubs record what the app sent) and text. Run it with
 `python3 tools/ui-harness/run_e2e.py [filter…]`, or `--show <scenario>` to see
 what one scenario saw. Stubs must hand out increasing watch ids, as the app
@@ -48,6 +48,7 @@ python3 -m http.server 8765 &
 | `esc.js` | Loaded with every stub: presses Esc and reports the top dialog and detail panel before and after | `esc=dialog` (once a dialog is open), `esc=busy` (once its Cancel, the first action button, is disabled) or `esc=<ms>`, `eschold=1` (a key repeat follows), `escfrom=field` (from the dialog's text field, else the page's first one), `escfrom=select` (from the page's first dropdown) |
 | `tracestub.js` | Traces: Trace… button, start dialog, indicator, running panel, Stop, quit and context-switch prompts | `open=1`, `menu=1`, `this=1` (a pod's Trace… button), `level=cluster\|ns\|workloads\|pod`, `ns=<namespace>`, `pick=<name>`, `go=1` (Save as and start), `cancel=1` (the Save dialog is cancelled), `running=1`, `gaps=<n>`, `err=1`, `noprom=1`, `panel=1`, `stop=1`, `quit=1\|close=1` (the backend held quitting / closing), `switch=1` (picks acme-prd), `confirm=1`, `keep=1`, `x=1` (the × button), `esc=1` (Escape). The title reports the trace commands sent, the open dialogs and the indicator. |
 | `reviewstub.js` | Traces page and a trace's review: recent files, Open trace…, the right-sizing table, a row's charts and day-and-hour grid | `recent=1`, `running=1`, `page=1`, `open=1`, `cancel=1`, `bad=1`, `offline=1`, `file=1`, `sel=<name>`, `sort=<header>`, `flagged=1`, `ns=<namespace>`, `text=<filter>`, `quick=1h\|6h\|24h\|all`, `zoom=1` (drags across the CPU chart), `heat=mem`, `back=1`; applying: `apply=1`, `check=<name,…>`, `applysel=1`, `go=1`, `ctx=prod`, `typed=1`, `locked=1`, `unlock=1`, `other=1`, `refuse=1`, `fail=1`, `copy=1`; notes, compare, export: `noted=1`, `note=<text>`, `wnote=<text>`, `leave=1`, `compare=1`, `cmpwith=1`, `changed=1`, `export=1`, `exportfail=1`. The title reports the commands sent, the rows in order, the selected row, the active range and the grid's cells. |
+| `find.js` | Loaded with every stub: drives the detail panel's find bar | `find=<text>` (opens with ⌘F, or `findbtn=1` for the button), `findat=<ms>`, `findtab=yaml`, `next=<n>`, `prev=1`, `findesc=1`. The title reports the count, the current match and its section, the painted highlights, closed sections, and whether the bar and panel are open. |
 | `ov.js` | Cluster page | needs `ov.json`: `cargo run -p subduer-core --example overview -- <context> --json`, with node and namespace names replaced by generic ones |
 
 `appearance-previews.sh` regenerates the Appearance preview images in `ui/assets/` from `workloadstub.js`.

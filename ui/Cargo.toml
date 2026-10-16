@@ -16,4 +16,4 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = ["Storage", "DataTransfer", "DragEvent", "PointerEvent", "Element", "DomRect", "HtmlCollection", "MediaQueryList", "Location", "File", "FileList", "Blob", "HtmlInputElement", "HtmlSelectElement", "Navigator"] }
+web-sys = { version = "0.3", features = ["Storage", "DataTransfer", "DragEvent", "PointerEvent", "Element", "DomRect", "HtmlCollection", "MediaQueryList", "Location", "File", "FileList", "Blob", "HtmlInputElement", "HtmlSelectElement", "Navigator", "TreeWalker", "Range", "Selection", "Node", "Text", "MutationObserver", "MutationObserverInit", "CssStyleDeclaration", "HtmlElement"] }

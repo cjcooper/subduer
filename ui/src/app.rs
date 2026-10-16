@@ -105,6 +105,9 @@ pub(crate) struct Store {
     pub(crate) col_widths: ColumnWidths,
     /// Each table's sorted column.
     pub(crate) sorts: crate::sort::Sorts,
+    /// The detail panel's find bar, and what it looks for.
+    pub(crate) find_open: RwSignal<bool>,
+    pub(crate) find_query: RwSignal<String>,
     pub(crate) detail_tab: RwSignal<DetailTab>,
     /// Details of the selected pod.
     pub(crate) pod: RwSignal<Option<Result<PodDetails, String>>>,
@@ -225,6 +228,8 @@ impl Store {
             overview_at: RwSignal::new(0.0),
             col_widths,
             sorts: crate::sort::Sorts::from_saved(""),
+            find_open: RwSignal::new(false),
+            find_query: RwSignal::new(String::new()),
             detail_tab: RwSignal::new(DetailTab::Yaml),
             pod: RwSignal::new(None),
             workload: RwSignal::new(None),
@@ -1623,6 +1628,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             <crate::trace::TraceThisButton store=store row=row.clone() />
                             <crate::capture::CaptureButton store=store row=row.clone() />
                             <crate::delete::DeleteButton store=store row=row.clone() />
+                            <crate::find::FindButton store=store />
                             <button class="close" title="Close (Esc)" on:click=close>"×"</button>
                         </div>
                     </div>
@@ -1650,6 +1656,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                             })}
                         </div>
                     })}
+                    <crate::find::FindBar store=store root="aside.detail" />
                     <div class="detail-body">
                         {move || if store.detail_tab.get() == DetailTab::Details && has_details {
                             if selected_is_pod(store) {
@@ -1666,7 +1673,8 @@ fn DetailPanel(store: Store) -> impl IntoView {
                                     <div class="yaml-tools">
                                         <crate::editor::EditButton store=store row=row.clone() />
                                     </div>
-                                    <pre class="yaml">{yaml}</pre>
+                                    // A Secret's YAML holds its values: never searched.
+                                    <pre class="yaml" data-find-skip=move || store.kind.with(|k| k.as_ref().is_some_and(|k| k.key() == "core/Secret")).then_some("")>{yaml}</pre>
                                 }
                                 .into_any(),
                                 Some(Err(e)) => view! { <p class="warn">{e}</p> }.into_any(),

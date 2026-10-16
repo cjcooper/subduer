@@ -233,9 +233,17 @@ pub(crate) fn Section(
             </button>
                 {actions}
             </div>
-            <Show when=open>
-                <div class="dsection-body">{children()}</div>
-            </Show>
+            // While a find is on, closed sections render hidden so it can search
+            // them; going to a match there opens the section.
+            {
+                let shown = open.clone();
+                let finding = move || store.find_open.get() && store.find_query.with(|q| !q.trim().is_empty());
+                view! {
+                    <Show when=move || shown() || finding()>
+                        <div class="dsection-body" class:find-hidden={let open = open.clone(); move || !open()}>{children()}</div>
+                    </Show>
+                }
+            }
         </section>
     }
 }
@@ -695,7 +703,7 @@ pub(crate) fn SecretValue(
             }
             .into_any(),
             Some(Ok(v)) => view! {
-                <span class="mono secret-value">{v}</span>
+                <span class="mono secret-value" data-find-skip="">{v}</span>
                 <button class="btn small" on:click=hide.clone()>"Hide"</button>
             }
             .into_any(),

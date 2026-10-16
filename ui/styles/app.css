@@ -1031,3 +1031,22 @@ table.figures .num { text-align: right; }
 .about-notice[open] > summary { border-bottom: 1px solid var(--border); }
 .about-notice > .about-text { margin: 8px 10px 10px; }
 .about-crates { margin: 8px 10px 0; padding-left: 18px; font-size: 11.5px; line-height: 1.5; max-height: 200px; overflow: auto; }
+
+/* Find in a detail panel */
+.find-bar {
+  display: flex; align-items: center; gap: 6px; padding: 6px 16px;
+  border-bottom: 1px solid var(--border); background: var(--bg);
+}
+.review-detail .find-bar { padding: 6px 0; margin-bottom: 8px; }
+.find-input { flex: 1; min-width: 0; width: auto; margin: 0; }
+.find-count { min-width: 6.5em; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.find-step { min-width: 26px; }
+.find-open { display: inline-flex; align-items: center; justify-content: center; }
+.find-open.on { color: var(--accent); border-color: var(--accent); }
+.dsection-body.find-hidden { display: none; }
+::highlight(subduer-find) { background-color: rgba(250, 204, 21, 0.45); color: inherit; }
+::highlight(subduer-find-current) { background-color: rgb(249, 115, 22); color: #fff; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) ::highlight(subduer-find) { background-color: rgba(250, 204, 21, 0.35); }
+}
+:root[data-theme="dark"] ::highlight(subduer-find) { background-color: rgba(250, 204, 21, 0.35); }

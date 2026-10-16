@@ -9,6 +9,7 @@ mod delete;
 mod download;
 mod editor;
 mod exec;
+mod find;
 mod forward;
 mod icons;
 mod logs;

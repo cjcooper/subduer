@@ -1069,8 +1069,11 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                         <h2>{row.key.name.clone()}</h2>
                         <div class="muted small">{format!("{} · container {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
                     </div>
+                    <span class="spacer"></span>
+                    <crate::find::FindButton store=store />
                     <button class="close" title="Close" aria-label="Close" on:click=move |_| store.review_sel.set(None)>"×"</button>
                 </div>
+                <crate::find::FindBar store=store root="aside.review-detail" />
                 {suggestion}
                 <NoteBox store=store key=Some(row.key.clone()) text=row.note.clone() label="Note on this workload" />
                 {(!row.flags.is_empty()).then(|| view! { <ul class="flag-list">{flags}</ul> })}
