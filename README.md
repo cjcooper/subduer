@@ -31,6 +31,8 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
     ```
 
     `-DBUILD_STATIC_LIB=ON` builds Binaryen's library into `wasm-opt`. Without it, the build fails with `libbinaryen.so: cannot open shared object file`; either rebuild with the flag or copy `build/lib/libbinaryen.so` to `~/.cache/trunk/wasm-opt-version_123/lib/`. Debian's `binaryen` package is too old for Trunk to use.
+
+    At runtime the Pi's GPU driver draws WebKitGTK's first frame as random lines until the window is resized. On a Raspberry Pi (recognised from `/proc/device-tree/model`) the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup to prevent this, unless you've already set that variable. On another ARM board with the same symptom, start the app with `WEBKIT_DISABLE_DMABUF_RENDERER=1` yourself.
   - Windows: Visual Studio Build Tools with "Desktop development with C++"; WebView2 is built into Windows 10 and 11
 - At runtime: `kubectl`-style kubeconfig access, and the `helm` CLI for Helm rollback and delete
 
