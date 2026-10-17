@@ -6,3 +6,21 @@ src-tauri/gen/schemas
 # Packet captures hold real traffic: never commit them.
 *.pcap
 *.pcapng
+
+# Editors and IDEs
+.idea/
+*.iml
+.fleet/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.zed/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+.history/
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
