@@ -21,6 +21,7 @@ fn container(name: &str, init: bool, sidecar: bool, ephemeral: bool, state: subd
         cpu: Usage::default(),
         memory: Usage::default(),
         env: vec![],
+        spec: vec![],
     }
 }
 

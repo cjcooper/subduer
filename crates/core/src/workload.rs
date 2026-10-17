@@ -101,6 +101,7 @@ pub async fn workload_details(client: &Client, kind: &KindRef, namespace: &str, 
                 cpu: Usage { used: used.map(|u| u.0), ..cpu },
                 memory: Usage { used: used.map(|u| u.1), ..memory },
                 env: env_vars(c, &config_maps, &secret_keys),
+                spec: crate::container_spec::container_spec(&serde_json::to_value(c).unwrap_or_default()),
             }
         })
         .collect();

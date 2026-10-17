@@ -11,7 +11,7 @@ use subduer_types::{Condition, JobRun, KindRef, TemplateContainer, Usage, Worklo
 
 use crate::app::{ContainerIcon, Store, age_since, format_age, format_span};
 use crate::overview::{fmt_bytes, fmt_cpu};
-use crate::pod_detail::{EnvTable, EventList, HistoryNote, Resource, Section, UsageChart};
+use crate::pod_detail::{EnvTable, EventList, HistoryNote, Resource, Section, SpecRows, UsageChart};
 use crate::tauri::invoke;
 
 /// Re-fetches the selected workload's details and usage history.
@@ -457,6 +457,7 @@ fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: S
                 <dt>"CPU per pod"</dt><dd>{per_pod(c.cpu, fmt_cpu)}</dd>
                 <dt>"Memory per pod"</dt><dd>{per_pod(c.memory, fmt_bytes)}</dd>
                 {(!c.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{c.ports.join(", ")}</dd> })}
+                <SpecRows spec=c.spec.clone() />
             </dl>
             {
                 let (env, ns) = (c.env.clone(), namespace.clone());

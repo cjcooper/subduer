@@ -439,6 +439,10 @@ pub struct ContainerDetails {
     pub cpu: Usage,
     pub memory: Usage,
     pub env: Vec<EnvVar>,
+    /// The rest of the container's spec in display order, e.g.
+    /// `("Command", "sh -c …")`: command, probes, mounts and any other field.
+    #[serde(default)]
+    pub spec: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +827,10 @@ pub struct TemplateContainer {
     pub cpu: Usage,
     pub memory: Usage,
     pub env: Vec<EnvVar>,
+    /// The rest of the container's spec in display order, e.g.
+    /// `("Command", "sh -c …")`: command, probes, mounts and any other field.
+    #[serde(default)]
+    pub spec: Vec<(String, String)>,
 }
 
 /// Where a pod's usage history came from.

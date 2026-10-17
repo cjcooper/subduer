@@ -601,6 +601,7 @@ button.link:hover { text-decoration: underline; }
 .itable tbody tr.clickable { cursor: pointer; }
 .itable tr.warn-row td:first-child { color: var(--warn-text); }
 .itable .fill-cell { width: 72px; }
+.kv dd.spec { white-space: pre-wrap; }
 .kv dd.annotation { font-size: 12px; white-space: pre-wrap; max-height: 8em; overflow: auto; }
 .data-entry { padding: 8px 0; border-top: 1px solid var(--border); }
 .data-entry:first-of-type { border-top: none; }

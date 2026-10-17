@@ -94,8 +94,8 @@ pub async fn pod_details(client: &Client, namespace: &str, name: &str) -> Result
     })
 }
 
-/// The pod's ephemeral containers, from its JSON: image and state only, as
-/// they have no resources, ports or readiness. Running is their normal
+/// The pod's ephemeral containers, from its JSON: image, state and spec
+/// only, as they have no resources, ports or readiness. Running is their normal
 /// state and exiting 0 a normal end, as for init containers.
 fn ephemeral_containers(pod: &Value) -> Vec<ContainerDetails> {
     let statuses = pod["status"]["ephemeralContainerStatuses"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -125,6 +125,7 @@ fn ephemeral_containers(pod: &Value) -> Vec<ContainerDetails> {
                 cpu: Usage::default(),
                 memory: Usage::default(),
                 env: vec![],
+                spec: crate::container_spec::container_spec(spec),
             }
         })
         .collect()
@@ -185,6 +186,7 @@ fn container_details(
             ..memory
         },
         env: env_vars(c, config_maps, secret_keys),
+        spec: crate::container_spec::container_spec(&serde_json::to_value(c).unwrap_or_default()),
     }
 }
 

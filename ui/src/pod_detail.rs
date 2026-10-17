@@ -578,6 +578,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                 })}
                 {info.last_termination.clone().map(|t| view! { <dt>"Last termination"</dt><dd>{t}</dd> })}
                 {(!info.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{info.ports.join(", ")}</dd> })}
+                <SpecRows spec=info.spec.clone() />
             </dl>
             // Ephemeral containers have no environment of their own to show.
             {(!info.ephemeral).then(|| {
@@ -596,6 +597,14 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
             })}
         </Section>
     }
+}
+
+/// The rest of a container's spec (command, probes, mounts, …) as `kv` rows.
+#[component]
+pub(crate) fn SpecRows(spec: Vec<(String, String)>) -> impl IntoView {
+    spec.into_iter()
+        .map(|(label, value)| view! { <dt>{label}</dt><dd class="mono spec">{value}</dd> })
+        .collect_view()
 }
 
 #[component]

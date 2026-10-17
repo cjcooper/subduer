@@ -45,6 +45,7 @@ fn the_pods_tcp_ports_once_each() {
         cpu: Default::default(),
         memory: Default::default(),
         env: vec![],
+        spec: vec![],
     };
     let d = PodDetails {
         name: "web-1".into(),

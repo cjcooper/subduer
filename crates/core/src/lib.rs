@@ -5,6 +5,7 @@ pub mod capture;
 pub mod catalog;
 pub mod cluster;
 pub mod config;
+pub mod container_spec;
 pub mod contexts;
 pub mod cron;
 pub mod download;
