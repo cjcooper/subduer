@@ -418,7 +418,6 @@ fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
                 <input
                     class="confirm-input mono"
                     placeholder=placeholder
-                    spellcheck="false"
                     prop:value=move || value.get()
                     on:input=move |ev| {
                         value.set(event_target_value(&ev));
@@ -778,7 +777,6 @@ fn DataEditor(
                                         class="confirm-input data-key-input mono"
                                         class:invalid=bad_key
                                         placeholder="key"
-                                        spellcheck="false"
                                         prop:value=field(id, |x| x.key.clone())
                                         on:input=move |ev| {
                                             let v = event_target_value(&ev);
@@ -796,7 +794,6 @@ fn DataEditor(
                             view! {
                                 <textarea
                                     class="data-value-input mono"
-                                    spellcheck="false"
                                     rows=rows
                                     prop:value=field(id, |x| x.value.clone())
                                     on:input=move |ev| {

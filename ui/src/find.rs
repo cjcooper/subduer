@@ -299,7 +299,6 @@ pub fn FindBar(store: Store, root: &'static str) -> impl IntoView {
                     placeholder="Find in this panel"
                     aria-label="Find in this panel"
                     autofocus
-                    spellcheck="false"
                     prop:value=move || store.find_query.get()
                     on:input=move |ev| store.find_query.set(event_target_value(&ev))
                     on:keydown=move |ev| match ev.key().as_str() {

@@ -119,7 +119,6 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
                         <input
                             class="confirm-input mono"
                             placeholder="name, e.g. team-sandbox"
-                            spellcheck="false"
                             autofocus
                             prop:value=move || name.get()
                             on:input=move |ev| name.set(event_target_value(&ev))
