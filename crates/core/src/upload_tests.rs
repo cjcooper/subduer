@@ -59,6 +59,7 @@ async fn browse_exec_failure_is_an_error() {
 #[test]
 fn scripts_never_splice_arguments() {
     assert!(UPLOAD_SCRIPT.contains("exit 17") && UPLOAD_SCRIPT.contains("exit 18"));
+    assert!(UPLOAD_SCRIPT.contains(r#"head -c "$4""#) && !UPLOAD_SCRIPT.contains("cat"));
     assert!(BROWSE_SCRIPT.contains("\"$1\"") && BROWSE_SCRIPT.contains("-gt MAX"));
 }
 
@@ -113,13 +114,27 @@ use ws_fake::{Step, err, exit, out, start, success};
 #[tokio::test]
 async fn uploads_send_every_byte() {
     let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
-    let fake = start(vec![Step::Wait(|s| s.stdin_closed), out("/tmp/a.txt\n"), success()]).await;
+    let fake = start(vec![out("/tmp/a.txt\n"), Step::Wait(|s| s.stdin.len() == 200_000), out("200000\n"), success()]).await;
     let got = upload(fake.client, &target("/tmp/", "a.txt"), &data).await.unwrap();
     assert_eq!(got, UploadOutcome::Uploaded { bytes: 200_000, path: "/tmp/a.txt".into() });
     let seen = fake.seen.lock().unwrap().clone();
     assert_eq!(seen.stdin, data);
+    // Ending stdin early makes the runtime drop unread bytes; the container
+    // exits by itself once it has them all.
+    assert!(!seen.stdin_closed);
     let req = fake.requests.lock().unwrap()[0].clone();
-    assert!(req.contains("command=0"), "overwrite off: {req}");
+    assert!(req.contains("command=0") && req.contains("command=200000"), "overwrite off, size sent: {req}");
+}
+
+#[tokio::test]
+async fn short_uploads_are_errors() {
+    let fake = start(vec![out("/tmp/a.txt\n"), Step::Wait(|s| s.stdin.len() == 5), out("3\n"), success()]).await;
+    let e = upload(fake.client, &target("/tmp/", "a.txt"), b"hello").await.unwrap_err();
+    assert!(matches!(&e, Error::Message(m) if m == "Only 3 of 5 bytes reached /tmp/a.txt; the file in the container is incomplete."), "{e}");
+
+    let fake = start(vec![out("/tmp/a.txt\n"), success()]).await;
+    let e = upload(fake.client, &target("/tmp/", "a.txt"), b"hello").await.unwrap_err();
+    assert!(matches!(&e, Error::Message(m) if m.starts_with("Only some of 5 bytes")), "{e}");
 }
 
 #[tokio::test]

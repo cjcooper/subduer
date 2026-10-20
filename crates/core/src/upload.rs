@@ -1,6 +1,6 @@
 //! Copies a file into a container, like `kubectl cp` but without needing
-//! `tar`: a small `sh` script resolves the destination and `cat` reads the
-//! bytes from stdin. Also lists directories so the dialog can browse to a
+//! `tar`: a small `sh` script resolves the destination and `head -c` reads
+//! the bytes from stdin. Also lists directories so the dialog can browse to a
 //! writable place. Callers must check the safety gate before uploading.
 //! Images without `/bin/sh` (distroless) can't do either, as with `kubectl cp`.
 
@@ -8,6 +8,8 @@ use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status;
 use kube::Client;
 use kube::api::{Api, AttachParams};
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::types::{DirEntry, DirListing, UploadOutcome, UploadTarget};
@@ -18,9 +20,14 @@ pub const MAX_BYTES: usize = 512 * 1024 * 1024;
 /// Entries listed per directory.
 const MAX_ENTRIES: usize = 1000;
 
-/// $1 = path, $2 = original file name, $3 = 1 to overwrite. Prints the final
-/// path, then `cat` takes stdin. Exit 17: exists; 18: directory missing.
+/// $1 = path, $2 = original file name, $3 = 1 to overwrite, $4 = byte count.
+/// Prints the final path, then `head -c` takes exactly $4 bytes from stdin and
+/// the size written is printed. Exit 17: exists; 18: directory missing.
 /// Arguments are never spliced into the script.
+///
+/// Reading a known length matters: when the client ends stdin, the runtime
+/// discards whatever the process hasn't read yet, so `cat` until end-of-file
+/// kept only the first few KiB of anything sent while the script started up.
 const UPLOAD_SCRIPT: &str = r#"
 p="$1"
 case "$p" in
@@ -32,8 +39,13 @@ dir="${p%/*}"
 if [ ! -d "$dir" ]; then echo "$dir"; exit 18; fi
 if [ "$3" != 1 ] && [ -e "$p" ]; then echo "$p"; exit 17; fi
 echo "$p"
-exec cat > "$p"
+head -c "$4" > "$p" || exit
+wc -c < "$p"
 "#;
+
+/// How long after the last byte to wait for the container to finish reading
+/// before ending stdin anyway (then the size check reports what's missing).
+const STDIN_GRACE: Duration = Duration::from_secs(60);
 
 /// $1 = directory, $2 = 1 to include suggestions. Output lines: resolved
 /// path; `w` or `-`; `S <path>` suggestions; `E<d|f><w|-><r|-> <name>`
@@ -78,27 +90,44 @@ pub async fn upload(client: Client, target: &UploadTarget, data: &[u8]) -> Resul
         return Err(Error::Message(format!("Files over {} MiB aren't supported.", MAX_BYTES / 1024 / 1024)));
     }
     let overwrite = if target.overwrite { "1" } else { "0" };
+    let size = data.len().to_string();
     let pods: Api<Pod> = Api::namespaced(client, &target.namespace);
     let params = AttachParams::default().container(target.container.clone()).stdin(true).stdout(true).stderr(true);
-    let args = ["sh", "-c", UPLOAD_SCRIPT, "sh", target.path.as_str(), target.file_name.as_str(), overwrite];
+    let args = ["sh", "-c", UPLOAD_SCRIPT, "sh", target.path.as_str(), target.file_name.as_str(), overwrite, size.as_str()];
     let mut process = pods.exec(&target.pod, args, &params).await?;
     let (Some(mut stdin), Some(mut stdout), Some(mut stderr), Some(status)) =
         (process.stdin(), process.stdout(), process.stderr(), process.take_status())
     else {
         return Err(Error::Message("The API server didn't open the exec streams.".into()));
     };
+    // Stdin stays open until the container exits by itself, having read every
+    // byte; ending it sooner would drop data still in flight.
     let write = async move {
         for chunk in data.chunks(64 * 1024) {
             stdin.write_all(chunk).await?;
         }
+        tokio::time::sleep(STDIN_GRACE).await;
         stdin.shutdown().await
-        // Dropping stdin here sends end-of-file, so `cat` finishes.
     };
+    let read = async { tokio::join!(read_all(&mut stdout), read_all(&mut stderr)) };
+    tokio::pin!(read);
     // A broken pipe is expected when the script exits early (exists, no dir).
-    let (_written, out, err) = tokio::join!(write, read_all(&mut stdout), read_all(&mut stderr));
-    let path = out.lines().next().unwrap_or_default().to_owned();
+    let (out, err) = tokio::select! {
+        r = &mut read => r,
+        _ = write => read.await,
+    };
+    let mut lines = out.lines();
+    let path = lines.next().unwrap_or_default().to_owned();
+    let written = lines.next().and_then(|n| n.trim().parse::<u64>().ok());
     match status.await {
-        Some(s) if s.status.as_deref() == Some("Success") => Ok(UploadOutcome::Uploaded { bytes: data.len() as u64, path }),
+        Some(s) if s.status.as_deref() == Some("Success") => match written {
+            Some(n) if n == data.len() as u64 => Ok(UploadOutcome::Uploaded { bytes: n, path }),
+            n => Err(Error::Message(format!(
+                "Only {} of {} bytes reached {path}; the file in the container is incomplete.",
+                n.map_or_else(|| "some".to_owned(), |n| n.to_string()),
+                data.len()
+            ))),
+        },
         Some(s) => match exit_code(&s).as_deref() {
             Some("17") => Ok(UploadOutcome::Exists { path }),
             Some("18") => Err(Error::Message(format!("The directory {path} doesn't exist in the container."))),
