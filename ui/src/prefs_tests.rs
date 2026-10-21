@@ -108,3 +108,11 @@ fn accent_text_keeps_contrast() {
         assert_eq!(accent_text(bad), None, "{bad}");
     }
 }
+
+#[test]
+fn transparency_is_on_unless_turned_off() {
+    assert!(transparency_from(None));
+    assert!(transparency_from(Some("on")));
+    assert!(transparency_from(Some("bogus")));
+    assert!(!transparency_from(Some("off")));
+}

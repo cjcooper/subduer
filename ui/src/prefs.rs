@@ -134,6 +134,31 @@ pub fn follow_theme() {
     std::mem::forget(handle);
 }
 
+const TRANSPARENCY_KEY: &str = "appearance.transparency";
+
+/// Settings › Transparency; on unless turned off.
+pub fn load_transparency() -> bool {
+    let saved = storage().and_then(|s| s.get_item(TRANSPARENCY_KEY).ok().flatten());
+    transparency_from(saved.as_deref())
+}
+
+fn transparency_from(saved: Option<&str>) -> bool {
+    saved != Some("off")
+}
+
+pub fn save_transparency(on: bool) {
+    if let Some(s) = storage() {
+        let _ = s.set_item(TRANSPARENCY_KEY, if on { "on" } else { "off" });
+    }
+}
+
+/// `data-vibrancy` on the root element draws the sidebar and top bar clear,
+/// over the window's system material.
+pub fn apply_vibrancy(clear: bool) {
+    let Some(root) = leptos::prelude::document().document_element() else { return };
+    let _ = if clear { root.set_attribute("data-vibrancy", "") } else { root.remove_attribute("data-vibrancy") };
+}
+
 /// Uses the system accent colour, asking again whenever the window gets focus
 /// (the user may have changed it meanwhile). Without one, or outside the app,
 /// the stylesheet's own blue stays.

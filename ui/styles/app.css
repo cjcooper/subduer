@@ -149,6 +149,13 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 button, input, select { font: inherit; color: inherit; }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
+
+/* Settings › Transparency, where the system has a material behind the window
+   (vibrancy.rs): the sidebar and top bar show it; the table and details stay
+   opaque so they read as easily as before. */
+:root[data-vibrancy], :root[data-vibrancy] body { background: transparent; }
+:root[data-vibrancy] .topbar, :root[data-vibrancy] .sidebar { background: transparent; }
+:root[data-vibrancy] .main { background: var(--bg); }
 .body { display: flex; flex: 1; min-height: 0; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); }
@@ -683,6 +690,7 @@ button.link:hover { text-decoration: underline; }
 .theme-name { font-size: 12px; }
 .theme-card.on .theme-name { font-weight: 600; color: var(--accent); }
 .settings-note { margin: 8px 0 0; }
+.settings-check { margin-top: 16px; }
 
 /* CPU and memory colours: everything inside picks up --series. */
 .res-cpu { --series: var(--cpu); --series-track: var(--cpu-track); }

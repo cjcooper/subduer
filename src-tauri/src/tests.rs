@@ -261,6 +261,18 @@ async fn small_commands() {
     assert!(!s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
     // `set_app_theme` isn't called: Tauri's mock runtime doesn't implement
     // `set_theme`. The headless UI suite checks the requests it gets.
+    // Transparency is remembered for later windows; the mock has no real
+    // window to set effects on.
+    let state = app.state::<crate::AppState>();
+    assert!(!state.opaque.load(std::sync::atomic::Ordering::SeqCst), "on by default");
+    let supported = crate::vibrancy::set_transparency(app.handle().clone(), app.state(), false);
+    // Windows depends on the build (Mica is Windows 11 only).
+    if !cfg!(windows) {
+        assert_eq!(supported, cfg!(target_os = "macos"));
+    }
+    assert!(state.opaque.load(std::sync::atomic::Ordering::SeqCst));
+    crate::vibrancy::set_transparency(app.handle().clone(), app.state(), true);
+    assert!(!state.opaque.load(std::sync::atomic::Ordering::SeqCst));
     commands::stop_watch(s());
     for bad in ["file:///etc/passwd", "javascript:alert(1)", "https://acme.io/a b", "ftp://acme.io", "https://acme.io/\n"] {
         assert!(commands::open_url(bad.into()).is_err(), "{bad}");
