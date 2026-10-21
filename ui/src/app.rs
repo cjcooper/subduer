@@ -124,6 +124,10 @@ pub(crate) struct Store {
     /// The Settings dialog is open, and the Appearance setting.
     pub(crate) settings_open: RwSignal<bool>,
     pub(crate) theme: RwSignal<crate::prefs::Theme>,
+    /// Settings › Transparency, and whether the system has a material for it
+    /// (the backend says; until then, no).
+    pub(crate) transparency: RwSignal<bool>,
+    pub(crate) transparency_supported: RwSignal<bool>,
     /// What has unsaved edits, e.g. `ConfigMap app-config`; `None` when
     /// nothing would be lost. Leaving goes through [`guard`].
     pub(crate) dirty: RwSignal<Option<String>>,
@@ -179,6 +183,7 @@ impl Store {
         let mut store = Self::with(crate::prefs::load_section_order(), crate::prefs::load_theme(), js_sys::Date::now(), ColumnWidths::load());
         store.sorts = crate::sort::Sorts::load();
         store.recent_traces.set(crate::prefs::load_recent_traces());
+        store.transparency.set(crate::prefs::load_transparency());
         store
     }
 
@@ -239,6 +244,8 @@ impl Store {
             new_namespace: RwSignal::new(false),
             pending_new_namespace: RwSignal::new(false),
             theme: RwSignal::new(theme),
+            transparency: RwSignal::new(true),
+            transparency_supported: RwSignal::new(false),
             dirty: RwSignal::new(None),
             discard_prompt: RwSignal::new(false),
             discard_then: StoredValue::new_local(None),
@@ -489,6 +496,24 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             let _ = invoke::<_, ()>("set_app_theme", &Args { theme: theme.as_str() }).await;
         });
+    });
+    // The system material behind main windows, where there is one: the
+    // backend turns it on or off, the CSS draws the sidebar and top bar clear.
+    Effect::new(move |_| {
+        #[derive(Serialize)]
+        struct Args {
+            on: bool,
+        }
+        let on = store.transparency.get();
+        spawn_local(async move {
+            let supported = invoke::<_, bool>("set_transparency", &Args { on }).await.unwrap_or(false);
+            store.transparency_supported.set(supported);
+            crate::prefs::apply_vibrancy(on && supported);
+        });
+    });
+    // Another main window changed it.
+    let _transparency = window_event_listener_untyped("storage", move |_| {
+        store.transparency.set(crate::prefs::load_transparency());
     });
     // The backend holds window close and quit while there are unsaved edits.
     Effect::new(move |was: Option<bool>| {
@@ -1319,7 +1344,12 @@ fn SettingsDialog(store: Store) -> impl IntoView {
         store.theme.set(t);
     };
     let close = move || store.settings_open.set(false);
-    let card =move |t: Theme, label: &'static str| {
+    let transparency = move |_| {
+        let on = !store.transparency.get_untracked();
+        crate::prefs::save_transparency(on);
+        store.transparency.set(on);
+    };
+    let card = move |t: Theme, label: &'static str| {
         // Auto shows both, split diagonally, like the system's own setting.
         let preview = match t {
             Theme::Light => view! { <img src="assets/appearance-light.jpg" alt="" /> }.into_any(),
@@ -1359,6 +1389,13 @@ fn SettingsDialog(store: Store) -> impl IntoView {
                             {card(Theme::Dark, "Dark")}
                         </div>
                         <p class="muted small settings-note">{note}</p>
+                        {move || store.transparency_supported.get().then(|| view! {
+                            <label class="check settings-check">
+                                <input type="checkbox" prop:checked=move || store.transparency.get() on:change=transparency />
+                                "Transparency"
+                            </label>
+                            <p class="muted small settings-note">"Lets the desktop show through the sidebar and top bar."</p>
+                        })}
                     </fieldset>
                     <div class="modal-actions">
                         <button class="primary" on:click=move |_| close()>"Done"</button>

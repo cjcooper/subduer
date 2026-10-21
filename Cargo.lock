@@ -2316,6 +2316,8 @@ name = "k8s-subduer"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "objc2-app-kit",
+ "objc2-foundation",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -2327,6 +2329,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "winreg",
 ]
 
 [[package]]

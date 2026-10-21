@@ -34,6 +34,8 @@ fn main() {
     console_error_panic_hook::set_once();
     // Every window (main, logs, shell, capture) follows the Appearance setting.
     prefs::follow_theme();
+    // …and the system accent colour.
+    prefs::follow_accent();
     // The same page serves logs, edit, shell, capture and About windows: `?logs=`, `?edit=`, `?exec=`, `?capture=<label>`, `?about`.
     if about::from_url() {
         leptos::mount::mount_to_body(about::AboutApp);

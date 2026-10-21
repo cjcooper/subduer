@@ -29,6 +29,7 @@
   const emit = (u) => (listeners[session.event] || []).forEach((cb) => cb({ payload: u }));
   window.__TAURI__ = {
     core: { invoke: async (cmd) => {
+      if (cmd === 'system_accent') return null;
       sent.push(cmd);
       if (cmd === 'capture_session') return session;
       if (cmd === 'stop_capture') { emit(update('Stopping', { ...running, bytes: 4096, scan: scan(3) })); return null; }

@@ -1,4 +1,5 @@
 mod about;
+mod accent;
 mod capture;
 mod commands;
 mod desktop_entry;
@@ -10,6 +11,7 @@ mod menu;
 mod shell_env;
 mod trace;
 mod upload;
+mod vibrancy;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -78,6 +80,9 @@ pub struct AppState {
     pub editors: editor::EditWindows,
     /// Packet captures, one per capture window.
     pub captures: capture::CaptureWindows,
+    /// Settings › Transparency is off: main windows open without the
+    /// system material (`vibrancy`).
+    pub opaque: AtomicBool,
 }
 
 /// The first main window, from `tauri.conf.json`; later ones are `main-2`, ….
@@ -168,9 +173,16 @@ pub const UNSAVED_CLOSE: &str = "unsaved-close";
 
 /// Opens another main window, starting unconnected like the first.
 pub fn new_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let n = app.state::<AppState>().next_window.fetch_add(1, Ordering::Relaxed) + 2;
+    let window = open_main_window(app, &format!("{MAIN_LABEL}-{n}"))?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
+/// Builds main window `label` from the `main` window's config (which Tauri
+/// doesn't create itself: `vibrancy` decides transparency at creation).
+fn open_main_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<WebviewWindow<R>> {
     let state = app.state::<AppState>();
-    let n = state.next_window.fetch_add(1, Ordering::Relaxed) + 2;
-    let label = format!("{MAIN_LABEL}-{n}");
     let mut config = app
         .config()
         .app
@@ -179,16 +191,16 @@ pub fn new_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .find(|w| w.label == MAIN_LABEL)
         .cloned()
         .unwrap_or_default();
-    config.label = label.clone();
-    state.add_window(&label);
-    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+    config.label = label.to_owned();
+    config.create = true;
+    state.add_window(label);
+    match vibrancy::build_main(app, &config) {
         Ok(window) => {
             watch_main_window(app, &window);
-            let _ = window.set_focus();
-            Ok(())
+            Ok(window)
         }
         Err(e) => {
-            state.remove_window(&label);
+            state.remove_window(label);
             Err(e)
         }
     }
@@ -248,10 +260,7 @@ pub fn run() {
         .setup(|app| {
             menu::install(app.handle())?;
             // Logs and shell windows belong to the main window; they close with it.
-            if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-                app.state::<AppState>().add_window(MAIN_LABEL);
-                watch_main_window(app.handle(), &main);
-            }
+            open_main_window(app.handle(), MAIN_LABEL)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -300,6 +309,8 @@ pub fn run() {
             commands::secret_value,
             commands::set_unsaved,
             commands::set_app_theme,
+            accent::system_accent,
+            vibrancy::set_transparency,
             about::about_info,
             commands::open_url,
             editor::open_editor,
