@@ -93,3 +93,18 @@ fn recent_traces_newest_first_without_repeats() {
     assert_eq!(many.len(), 12);
     assert_eq!(many[0].path, "/19");
 }
+
+#[test]
+fn accent_text_keeps_contrast() {
+    // macOS blue, graphite, red: white text.
+    assert_eq!(accent_text("#007aff"), Some("#fff"));
+    assert_eq!(accent_text("#8c8c8c"), Some("#fff"));
+    assert_eq!(accent_text("#e0383e"), Some("#fff"));
+    // Green, orange, yellow are too light for white.
+    assert_eq!(accent_text("#62ba46"), Some("#1c2430"));
+    assert_eq!(accent_text("#f7821b"), Some("#1c2430"));
+    assert_eq!(accent_text("#ffc600"), Some("#1c2430"));
+    for bad in ["", "#", "007aff", "#07f", "#00zzff", "#007aff00", "#ééé"] {
+        assert_eq!(accent_text(bad), None, "{bad}");
+    }
+}

@@ -134,6 +134,53 @@ pub fn follow_theme() {
     std::mem::forget(handle);
 }
 
+/// Uses the system accent colour, asking again whenever the window gets focus
+/// (the user may have changed it meanwhile). Without one, or outside the app,
+/// the stylesheet's own blue stays.
+pub fn follow_accent() {
+    fn refresh() {
+        // Not Leptos's spawn_local: this runs before the app mounts and sets
+        // up its executor.
+        wasm_bindgen_futures::spawn_local(async {
+            let accent = crate::tauri::invoke::<_, Option<String>>("system_accent", &crate::tauri::NoArgs {}).await;
+            apply_accent(accent.ok().flatten().as_deref());
+        });
+    }
+    refresh();
+    let handle = leptos::prelude::window_event_listener_untyped("focus", |_| refresh());
+    // Lives as long as the window.
+    std::mem::forget(handle);
+}
+
+/// `data-accent` on the root element switches the CSS to `--os-accent`.
+fn apply_accent(accent: Option<&str>) {
+    let Some(root) = leptos::prelude::document().document_element() else { return };
+    let text = accent.and_then(accent_text);
+    let _ = match (accent, text) {
+        (Some(accent), Some(text)) => {
+            let _ = root.set_attribute("style", &format!("--os-accent: {accent}; --accent-text: {text}"));
+            root.set_attribute("data-accent", "")
+        }
+        _ => {
+            let _ = root.remove_attribute("style");
+            root.remove_attribute("data-accent")
+        }
+    };
+}
+
+/// The text colour for buttons filled with a `#rrggbb` accent: white, unless
+/// the accent is too light for it (under 3:1, e.g. yellow), then dark.
+/// `None` if it isn't a colour.
+fn accent_text(hex: &str) -> Option<&'static str> {
+    let hex = hex.strip_prefix('#').filter(|h| h.len() == 6)?;
+    let channel = |i: usize| -> Option<f64> {
+        let c = f64::from(u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()?) / 255.0;
+        Some(if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) })
+    };
+    let luminance = 0.2126 * channel(0)? + 0.7152 * channel(2)? + 0.0722 * channel(4)?;
+    Some(if 1.05 / (luminance + 0.05) >= 3.0 { "#fff" } else { "#1c2430" })
+}
+
 /// The desktop the app runs on, from the webview's user agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Desktop {

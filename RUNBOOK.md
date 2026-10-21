@@ -262,6 +262,7 @@ ui             Leptos CSR app
 | `object_details` | Details tab of a Config- or Network-section kind |
 | `create_namespace` | Creates a namespace (DNS-1123 name), checked like `delete_resource` |
 | `set_app_theme` | Native appearance of every window: `light`, `dark` or `auto` (follow the system) |
+| `system_accent` | The system accent colour as `#rrggbb`, or none (macOS Multicolor, no portal): `accent.rs` |
 | `helm_uninstall` | `helm uninstall` (optionally `--keep-history`, `--wait`), checked like `delete_resource`; returns Helm's output |
 | `helm_rollback` | `helm rollback` to a revision (optionally `--wait`), checked like `delete_resource`; returns Helm's output |
 | `check_access` | SubjectAccessReview for a ServiceAccount; read-only, so not gated |
@@ -400,6 +401,10 @@ ui             Leptos CSR app
   - Each window (main, logs, shell) applies it at startup (`prefs::follow_theme`) and again on the `storage` event when another window changes it. The CSS uses `data-theme` on `<html>`: dark colours come from the system unless it's `light`, and always when it's `dark`.
   - The main window also calls `set_app_theme` (Tauri `AppHandle::set_theme`) so title bars, scroll bars and form controls match; Auto passes `None`.
   - Shell windows pick xterm colours from the setting when they open (`prefs::is_dark`); an open terminal keeps its colours until reopened.
+- **System accent colour** (`src-tauri/src/accent.rs`, `prefs::follow_accent`): every window asks `system_accent` at startup and on each focus, so a changed accent shows when you come back. macOS reads `NSColor.controlAccentColor` (none for Multicolor, where apps keep their own), Windows the DWM `AccentColor`, Linux the freedesktop appearance portal's `accent-color` through `gdbus` (GNOME 47+, KDE Plasma 6).
+  - With a colour, `<html>` gets `data-accent` and inline `--os-accent` and `--accent-text`; the CSS then sets `--accent` to it and mixes `--accent-soft` over `--panel` (`--accent-soft-mix`: 14% light, 24% dark). Without one, the stylesheet's own blue stays as it was.
+  - `--accent-text` (text on accent-filled buttons) is white unless that's under 3:1 on the accent (green, orange, yellow), then dark (`prefs::accent_text`).
+  - It runs before the app mounts, so it uses `wasm_bindgen_futures::spawn_local`: Leptos's panics without its executor. Harness stubs that record every command skip it (`capturestub.js`).
 - **Helm release Details** (`helm::release_details`): the virtual `helm.sh/Release` kind gets a Details tab (YAML stays the summary).
   - Chart, app version, revision, last change, first and last deployed, chart description and home (Open). Values are never shown.
   - **History:** every kept revision (newest 20 decoded) with status, chart, app version, age and description; failed ones flagged.

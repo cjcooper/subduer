@@ -1,4 +1,5 @@
 mod about;
+mod accent;
 mod capture;
 mod commands;
 mod desktop_entry;
@@ -300,6 +301,7 @@ pub fn run() {
             commands::secret_value,
             commands::set_unsaved,
             commands::set_app_theme,
+            accent::system_accent,
             about::about_info,
             commands::open_url,
             editor::open_editor,

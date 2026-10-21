@@ -6,6 +6,10 @@
   --muted: #6b7686;
   --accent: #2f6fe4;
   --accent-soft: #e5eefc;
+  /* With a system accent: text on accent fills, and how much accent tints
+     --accent-soft over the panel. */
+  --accent-text: #fff;
+  --accent-soft-mix: 14%;
   --row-hover: #f1f4f8;
   --warn-bg: #fff4e0;
   --warn-text: #8a5300;
@@ -62,6 +66,7 @@
     --muted: #8b95a5;
     --accent: #5b8ff0;
     --accent-soft: #24324a;
+    --accent-soft-mix: 24%;
     --row-hover: #252a32;
     --warn-bg: #3a2c12;
     --warn-text: #f0c070;
@@ -101,6 +106,7 @@
   --muted: #8b95a5;
   --accent: #5b8ff0;
   --accent-soft: #24324a;
+  --accent-soft-mix: 24%;
   --row-hover: #252a32;
   --warn-bg: #3a2c12;
   --warn-text: #f0c070;
@@ -131,6 +137,12 @@
   --cat-other: #8b95a5;
 }
 :root[data-theme="light"] { color-scheme: light; }
+
+/* The system accent colour, where the app finds one (prefs::follow_accent). */
+:root[data-accent] {
+  --accent: var(--os-accent);
+  --accent-soft: color-mix(in srgb, var(--os-accent) var(--accent-soft-mix), var(--panel));
+}
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
@@ -541,7 +553,7 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .exec-ended { color: var(--muted); font-size: 12px; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Port forwards */
-.modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.modal-actions .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .modal-actions .primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .replicas { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 .replicas-input { width: 90px; }
@@ -619,7 +631,7 @@ button.link:hover { text-decoration: underline; }
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text);
 }
 .data-edit-foot { display: flex; align-items: center; gap: 12px; padding: 10px 0 4px; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .change-list { margin: 4px 0 8px; padding-left: 18px; }
 .chip.unsaved { background: var(--warn-bg); color: var(--warn-text); font-weight: 500; }
