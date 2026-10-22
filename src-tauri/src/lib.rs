@@ -1,5 +1,6 @@
 mod about;
 mod accent;
+mod app_icon;
 mod capture;
 mod commands;
 mod desktop_entry;
@@ -256,6 +257,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(app_icon::init())
         .manage(AppState::default())
         .setup(|app| {
             menu::install(app.handle())?;

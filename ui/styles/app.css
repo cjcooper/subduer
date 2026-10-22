@@ -1037,6 +1037,13 @@ table.figures .num { text-align: right; }
 .about-head { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; }
 .about-head h1 { margin: 0 0 4px; font-size: 22px; }
 .about-icon { width: 72px; height: 72px; flex: none; }
+.about-icon.dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .about-icon.light { display: none; }
+  :root:not([data-theme="light"]) .about-icon.dark { display: block; }
+}
+:root[data-theme="dark"] .about-icon.light { display: none; }
+:root[data-theme="dark"] .about-icon.dark { display: block; }
 .about-section { margin-bottom: 24px; }
 .about-section h2 { font-size: 15px; margin: 0 0 8px; }
 .about-section p { margin: 0 0 10px; line-height: 1.45; }

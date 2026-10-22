@@ -491,6 +491,9 @@ SCENARIOS = [
       has=["Version 0.1.0", "An it-problems application.", "free software under the MIT License", "MIT License · serde, tokio",
            "Apache License 2.0 · k8s-openapi", "Vendored JavaScript: xterm", "tokio 1.48.0", "3 open-source Rust crates and 1 JavaScript libraries"]),
     S("about/filter", "aboutstub.js", "about&filter=openapi", has=["Apache License 2.0 · k8s-openapi"], lacks=["MIT License · serde", "Vendored JavaScript"]),
+    S("about/icon-light", "aboutstub.js", "about", has=["icon=light"], lacks=["icon=light,"]),
+    S("about/icon-dark", "aboutstub.js", "about", scheme=DARK, has=["icon=dark"], lacks=["icon=dark,"]),
+    S("about/icon-light-over-dark", "aboutstub.js", "about&theme=light", scheme=DARK, has=["icon=light"], lacks=["icon=light,"]),
 ]
 
 

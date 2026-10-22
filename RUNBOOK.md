@@ -342,7 +342,11 @@ ui             Leptos CSR app
 - **Pod containers** get action buttons: Forward (needs declared ports), Upload, Download, Shell (Upload and Shell are gated, and all four need the container running), and Logs.
 - **Workloads** (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, ReplicationController) get merged Logs. Deployments and StatefulSets also get Restart and Scale, CronJobs get Run now, and Jobs and CronJobs get Suspend/Resume (all gated). Services get Forward. Every kind with the `delete` verb gets Delete (gated).
 - **Separate windows** for logs and shells, listed under the Window menu. **Port Forwards** page at the top of the sidebar.
-- **App icon:** `src-tauri/icons/make_icon.py` generates `icon.svg`, a 7-spoke helm inside a control dial. Regeneration steps are in the script's header.
+- **App icon:** `src-tauri/icons/make_icon.py` generates a 7-spoke helm inside a control dial, in a light version (blue helm on a white tile, `icon.svg`) and a dark one (light-blue helm on charcoal, `icon-dark.svg`), plus `AppIcon.icon`, an Icon Composer document with both. Regeneration and preview steps are in the script's header. Light is the default wherever a system can't show a dark icon. Per system:
+  - **macOS 26+:** `AppIcon.icon` is in `bundle.icon`; the bundler compiles it with `actool` (needs Xcode 26+, first-launch setup done: `xcodebuild -runFirstLaunch`) into `Assets.car` and sets `CFBundleIconName`, so the Dock and Finder switch light, dark, clear and tinted with the system. Older macOS uses the light `icon.icns`. Other bundlers skip `.icon` entries. `cargo tauri dev` shows the light icon in the Dock.
+  - **Windows:** the .exe icon is light (Windows has none for dark). The window icon (title bar, taskbar) follows each window's appearance: `src-tauri/src/app_icon.rs`, a small plugin that sets it as windows open and on `ThemeChanged`, and again from `set_app_theme`. Not yet tried on Windows.
+  - **Linux:** light; the desktop entry's hicolor icon has no dark version.
+  - **About window:** shows `128x128@2x.png` or `dark-256x256.png` by CSS, following Settings › Appearance (harness `about/icon-*`).
 
 ## 6. Decisions and why
 

@@ -1,8 +1,10 @@
 // The About window: `about_info` with a short license and notices in the
 // generated layout. `filter=<text>` types into the filter box; `open=1` opens
-// the first license.
+// the first license; `theme=light|dark` is saved before the app starts. The
+// title reports which app icon shows (`icon=light|dark`).
 (function () {
   const params = new URLSearchParams(location.search);
+  try { localStorage.clear(); if (params.get('theme')) localStorage.setItem('appearance.theme', params.get('theme')); } catch (e) {}
   const rule = '='.repeat(80);
   const notices = [
     'Third-party notices for k8s-subduer', '',
@@ -35,5 +37,7 @@
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
     if (params.get('open')) document.querySelector('.about-notice').open = true;
+    const shown = [...document.querySelectorAll('.about-icon')].filter(i => getComputedStyle(i).display !== 'none');
+    document.title = `icon=${shown.map(i => i.classList.contains('dark') ? 'dark' : 'light').join(',')}`;
   }, 400));
 })();

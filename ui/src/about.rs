@@ -108,7 +108,9 @@ fn About(info: AboutInfo) -> impl IntoView {
     };
     view! {
         <header class="about-head">
-            <img class="about-icon" src="128x128@2x.png" alt="" />
+            // The CSS shows the one that matches the appearance.
+            <img class="about-icon light" src="128x128@2x.png" alt="" />
+            <img class="about-icon dark" src="dark-256x256.png" alt="" />
             <div>
                 <h1>{info.name.clone()}</h1>
                 <div class="muted">{format!("Version {}", info.version)}</div>

@@ -482,6 +482,7 @@ pub fn set_app_theme<R: Runtime>(app: AppHandle<R>, theme: String) {
         _ => None,
     };
     app.set_theme(theme);
+    crate::app_icon::refresh(&app);
 }
 
 /// The UI reports whether it holds unsaved edits, so closing the window or
