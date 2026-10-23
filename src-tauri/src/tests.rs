@@ -290,6 +290,50 @@ async fn connect_refuses_an_unknown_context() {
     assert!(err.contains("no-such-context-anywhere") || err.contains("kubeconfig"), "{err}");
 }
 
+/// A cluster with only Pods, just enough for discovery to succeed.
+fn empty_cluster() -> MockApi {
+    let api = MockApi::new();
+    api.on("GET", "/version", json!({"major": "1", "minor": "31", "gitVersion": "v1.31.0"}));
+    api.on("GET", "/api", json!({"kind": "APIVersions", "versions": ["v1"], "serverAddressByClientCIDRs": []}));
+    api.on("GET", "/api/v1", json!({"kind": "APIResourceList", "groupVersion": "v1", "resources": [
+        {"name": "pods", "singularName": "pod", "namespaced": true, "kind": "Pod", "verbs": ["get", "list", "watch"]},
+    ]}));
+    api.on("GET", "/apis", json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": []}));
+    api
+}
+
+#[tokio::test]
+async fn opening_a_session_connects_the_window() {
+    let app = app();
+    let api = empty_cluster();
+    let info = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0).await.unwrap();
+    assert_eq!(info.context, CTX);
+    assert_eq!(w(&app).session.read().await.as_ref().unwrap().context, CTX);
+}
+
+#[tokio::test]
+async fn a_cluster_that_does_not_answer_fails_before_discovery() {
+    let app = app();
+    let api = MockApi::new();
+    api.on_error("GET", "/version", 401, "Unauthorized", "token expired");
+    let err = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0).await.unwrap_err();
+    assert!(err.contains("Unauthorized"), "{err}");
+    assert!(api.calls_to("GET", "/apis").is_empty());
+    assert!(w(&app).session.read().await.is_none());
+}
+
+#[tokio::test]
+async fn an_older_connect_does_not_replace_a_newer_one() {
+    let app = connected(&MockApi::new()).await;
+    // Another context was chosen while attempt 1 was still connecting.
+    w(&app).connect_attempt.store(2, std::sync::atomic::Ordering::SeqCst);
+    let api = empty_cluster();
+    let err = commands::open_session(app.handle(), &w(&app), "acme-dev".into(), api.client(), 1).await.unwrap_err();
+    assert_eq!(err, commands::SUPERSEDED);
+    assert!(api.calls_to("GET", "/apis").is_empty());
+    assert_eq!(w(&app).session.read().await.as_ref().unwrap().context, CTX);
+}
+
 #[tokio::test]
 async fn watching_returns_increasing_ids() {
     let api = MockApi::new();

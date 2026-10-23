@@ -318,6 +318,7 @@ impl Store {
         let resume = self.disconnected.get_untracked().is_some() && self.context.get_untracked().as_deref() == Some(&context);
         self.connecting.set(true);
         self.generation.update(|g| *g += 1);
+        let generation = self.generation.get_untracked();
         self.probe_failures.set(0);
         self.probing.set(false);
         self.overview_loading.set(false);
@@ -330,7 +331,13 @@ impl Store {
         self.table.set(None);
         self.selected.set(None);
         self.context.set(Some(context.clone()));
-        match invoke::<_, ClusterInfo>("connect", &Args { context: &context }).await {
+        let result = invoke::<_, ClusterInfo>("connect", &Args { context: &context }).await;
+        // Another context was picked while this one was still connecting
+        // (an unreachable one, say): that connect owns the state now.
+        if self.generation.get_untracked() != generation {
+            return;
+        }
+        match result {
             Ok(info) => {
                 let current = self.namespace.get_untracked();
                 let kept = resume && current.as_ref().is_none_or(|ns| info.namespaces.contains(ns));
@@ -672,7 +679,9 @@ fn TopBar(store: Store) -> impl IntoView {
             <span class="brand">"k8s-subduer"</span>
             <label class="field">
                 "Context"
-                <select on:change=on_context prop:disabled=move || store.connecting.get()>
+                // Stays enabled while connecting, so a context that doesn't
+                // answer can be left without waiting for it to time out.
+                <select on:change=on_context>
                     <For
                         each=move || store.contexts.get()
                         key=|c| c.name.clone()
@@ -685,24 +694,23 @@ fn TopBar(store: Store) -> impl IntoView {
                     />
                 </select>
             </label>
-            <label class="field">
-                "Namespace"
-                <select
-                    on:change=on_namespace
-                    prop:disabled=move || store.cluster.with(Option::is_none) || store.overview_open.get()
-                    title=move || if store.overview_open.get() { "The Cluster page is cluster-wide" } else { "" }
-                >
-                    <option value="" selected=move || store.namespace.get().is_none()>"All namespaces"</option>
-                    {move || {
-                        store.cluster.get().map(|c| c.namespaces).unwrap_or_default().into_iter().map(|ns| {
-                            let value = ns.clone();
-                            let label = ns.clone();
-                            let selected = move || store.namespace.get().as_deref() == Some(value.as_str());
-                            view! { <option value=ns selected=selected>{label}</option> }
-                        }).collect_view()
-                    }}
-                </select>
-            </label>
+            // The Cluster and Node pages are cluster-wide, so the namespace means nothing there.
+            <Show when=move || !store.needs_overview()>
+                <label class="field">
+                    "Namespace"
+                    <select on:change=on_namespace prop:disabled=move || store.cluster.with(Option::is_none)>
+                        <option value="" selected=move || store.namespace.get().is_none()>"All namespaces"</option>
+                        {move || {
+                            store.cluster.get().map(|c| c.namespaces).unwrap_or_default().into_iter().map(|ns| {
+                                let value = ns.clone();
+                                let label = ns.clone();
+                                let selected = move || store.namespace.get().as_deref() == Some(value.as_str());
+                                view! { <option value=ns selected=selected>{label}</option> }
+                            }).collect_view()
+                        }}
+                    </select>
+                </label>
+            </Show>
             <span class="spacer"></span>
             {move || store.connecting.get().then(|| view! { <span class="muted">"Connecting…"</span> })}
             <crate::trace::TraceButton store=store />

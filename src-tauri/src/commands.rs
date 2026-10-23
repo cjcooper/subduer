@@ -24,27 +24,74 @@ pub fn list_contexts(state: Win) -> CmdResult<ContextList> {
     Ok(contexts::list_contexts(&kubeconfig, &state.gate))
 }
 
+/// How long discovering a cluster's kinds and namespaces may take once it
+/// has answered. Discovery is many requests, and the client has no read
+/// timeout, so a cluster that stops answering midway would otherwise hold
+/// the window on "Connecting…" forever.
+pub(crate) const DISCOVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// What a connect returns once the user has picked another context meanwhile.
+pub(crate) const SUPERSEDED: &str = "superseded by a newer connection";
+
 #[tauri::command]
 pub async fn connect<R: Runtime>(app: AppHandle<R>, state: Win, context: String) -> CmdResult<ClusterInfo> {
     state.stop_watch();
+    let attempt = state.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
     let client = contexts::client_for(&kubeconfig, &context).await.map_err(err)?;
-    let kinds = cluster::discover_kinds(&client).await.map_err(err)?;
-    // Listing namespaces can be forbidden by RBAC; fall back to the context's default.
-    let namespaces = match cluster::list_namespaces(&client).await {
-        Ok(ns) => ns,
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot list namespaces");
-            vec![client.default_namespace().to_owned()]
+    open_session(&app, &state, context, client, attempt).await
+}
+
+/// Checks that the cluster answers, discovers it, and makes it the window's
+/// session unless a newer connect (attempt) has started since.
+pub(crate) async fn open_session<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Win,
+    context: String,
+    client: subduer_core::kube::Client,
+    attempt: u64,
+) -> CmdResult<ClusterInfo> {
+    let latest = || state.connect_attempt.load(Ordering::SeqCst) == attempt;
+    // One cheap request first, so an unreachable cluster (a VPN that's down)
+    // fails within `CHECK_TIMEOUT` rather than partway through discovery.
+    cluster::check_connection(&client).await.map_err(err)?;
+    if !latest() {
+        return Err(SUPERSEDED.into());
+    }
+    let discover = async {
+        let kinds = cluster::discover_kinds(&client).await?;
+        // Listing namespaces can be forbidden by RBAC; fall back to the context's default.
+        let namespaces = match cluster::list_namespaces(&client).await {
+            Ok(ns) => ns,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot list namespaces");
+                vec![client.default_namespace().to_owned()]
+            }
+        };
+        Ok::<_, subduer_core::Error>((kinds, namespaces))
+    };
+    let (kinds, namespaces) = match tokio::time::timeout(DISCOVER_TIMEOUT, discover).await {
+        Ok(found) => found.map_err(err)?,
+        Err(_) => {
+            return Err(format!(
+                "the cluster stopped answering while it was being read ({}s); check your network or VPN",
+                DISCOVER_TIMEOUT.as_secs()
+            ));
         }
     };
-    *state.session.write().await = Some(Session {
-        context: context.clone(),
-        client,
-        history: Default::default(),
-    });
+    {
+        let mut session = state.session.write().await;
+        if !latest() {
+            return Err(SUPERSEDED.into());
+        }
+        *session = Some(Session {
+            context: context.clone(),
+            client,
+            history: Default::default(),
+        });
+    }
     // With more than one main window, the Window menu tells them apart by this.
-    if let Some(window) = tauri::Manager::get_webview_window(&app, &state.label) {
+    if let Some(window) = tauri::Manager::get_webview_window(app, &state.label) {
         let _ = window.set_title(&format!("{context} · {}", app.package_info().name));
     }
     Ok(ClusterInfo {

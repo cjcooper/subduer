@@ -46,6 +46,9 @@ pub struct WindowState {
     /// The single live resource watch feeding the table.
     pub watch: Mutex<Option<JoinHandle<()>>>,
     pub next_watch_id: AtomicU64,
+    /// Bumped by every `connect`; an older one still waiting on an unreachable
+    /// cluster then doesn't replace the session a newer one opened.
+    pub connect_attempt: AtomicU64,
     /// The UI holds edits that haven't been saved: closing the window or
     /// quitting asks it first (event `UNSAVED_CLOSE`).
     pub unsaved: AtomicBool,
