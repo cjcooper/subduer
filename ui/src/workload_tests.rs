@@ -2,7 +2,7 @@ use super::*;
 use crate::app::tests_unit::{context, kind, row, store, store_on};
 use subduer_types::{InfoRow, InfoSection, InfoTable, InfoTableRow, ObjectDetails, ObjectLink, Usage, WorkloadDetails};
 
-const ALL: [Op; 12] = [
+const ALL: [Op; 14] = [
     Op::Restart,
     Op::Scale,
     Op::Run,
@@ -15,6 +15,8 @@ const ALL: [Op; 12] = [
     Op::Rollback,
     Op::Uninstall,
     Op::ForceSync,
+    Op::Pause,
+    Op::Unpause,
 ];
 
 #[test]
@@ -69,7 +71,9 @@ fn op_labels() {
             "Reclaim policy",
             "Rollback",
             "Delete",
-            "Force sync"
+            "Force sync",
+            "Pause",
+            "Resume"
         ]
     );
 }
@@ -93,9 +97,54 @@ fn op_hints_depend_on_kind_for_suspend_and_resume() {
     assert!(Op::Uninstall.hint(&job).contains("helm uninstall"));
     assert!(Op::ForceSync.hint(&kind("external-secrets.io", "ClusterExternalSecret")).contains("every namespace"));
     assert!(Op::ForceSync.hint(&kind("external-secrets.io", "ExternalSecret")).contains("update the Secret"));
+    let (so, sj) = (kind("keda.sh", "ScaledObject"), kind("keda.sh", "ScaledJob"));
+    assert_eq!(Op::Range.hint(&sj), "Change how many Jobs it may run at once");
+    assert_eq!(Op::Range.hint(&so), "Change its min and max replicas");
+    assert_eq!(Op::Pause.hint(&sj), "Stop KEDA starting new Jobs");
+    assert!(Op::Pause.hint(&so).contains("replica count"));
+    assert!(Op::Unpause.hint(&so).contains("again"));
     for op in ALL {
         assert!(!op.hint(&job).is_empty());
     }
+}
+
+#[test]
+fn keda_range_and_replicas_come_from_the_loaded_details() {
+    let s = store();
+    assert_eq!(keda_range(s, "web"), None);
+    s.object.set(Some(Ok(object("ScaledObject", "web", vec![info_row("Range", "0 to 10 replicas"), info_row("Replicas", "3 now · 4 wanted")], vec![]))));
+    assert_eq!(keda_range(s, "web"), Some((0, 10)));
+    assert_eq!(replicas_now(s, "web"), Some(3));
+    assert_eq!(keda_range(s, "other"), None, "another object's details");
+    s.object.set(Some(Ok(object("ScaledJob", "worker", vec![info_row("Jobs at once", "2 to 20")], vec![]))));
+    assert_eq!(keda_range(s, "worker"), Some((2, 20)));
+    assert_eq!(replicas_now(s, "worker"), None);
+    s.object.set(Some(Ok(object("ScaledObject", "odd", vec![info_row("Range", "many")], vec![]))));
+    assert_eq!(keda_range(s, "odd"), None);
+}
+
+#[test]
+fn helm_release_comes_from_the_loaded_labels() {
+    let s = store();
+    let mut d = object("ScaledObject", "java", vec![], vec![]);
+    s.object.set(Some(Ok(d.clone())));
+    assert_eq!(helm_release(s, "java"), None);
+    d.labels = vec![("app.kubernetes.io/managed-by".into(), "Helm".into())];
+    s.object.set(Some(Ok(d.clone())));
+    assert_eq!(helm_release(s, "java").as_deref(), Some(""));
+    d.annotations = vec![("meta.helm.sh/release-name".into(), "java".into())];
+    s.object.set(Some(Ok(d)));
+    assert_eq!(helm_release(s, "java").as_deref(), Some("java"));
+    assert_eq!(helm_release(s, "other"), None);
+}
+
+#[test]
+fn pause_notes() {
+    let (so, sj) = (kind("keda.sh", "ScaledObject"), kind("keda.sh", "ScaledJob"));
+    assert!(pause_note(&sj, true).contains("Jobs already running carry on"));
+    assert!(pause_note(&so, true).contains("stops scaling"));
+    assert!(pause_note(&sj, false).contains("starts Jobs"));
+    assert!(pause_note(&so, false).contains("within its range"));
 }
 
 #[test]

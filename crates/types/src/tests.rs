@@ -141,11 +141,17 @@ fn kind_predicates() {
         ("external-secrets.io", "ExternalSecret"),
         ("external-secrets.io", "ClusterSecretStore"),
         ("generators.external-secrets.io", "Password"),
+        ("keda.sh", "ScaledObject"),
+        ("keda.sh", "ClusterTriggerAuthentication"),
+        ("eventing.keda.sh", "CloudEventSource"),
     ] {
         assert!(has_object_details(&kind(key.0, key.1)), "{key:?}");
     }
     assert!(!has_object_details(&pod) && !has_object_details(&deploy));
-    assert!(!has_object_details(&kind("keda.sh", "ScaledObject")));
+    assert!(!has_object_details(&kind("monitoring.coreos.com", "ServiceMonitor")));
+    assert!(is_keda(&kind("eventing.keda.sh", "ClusterCloudEventSource")) && !is_keda(&kind("autoscaling", "HorizontalPodAutoscaler")));
+    assert!(is_keda_scaler(&kind("keda.sh", "ScaledObject")) && is_keda_scaler(&kind("keda.sh", "ScaledJob")));
+    assert!(!is_keda_scaler(&kind("keda.sh", "TriggerAuthentication")) && !is_keda_scaler(&kind("autoscaling", "HorizontalPodAutoscaler")));
 }
 
 #[test]

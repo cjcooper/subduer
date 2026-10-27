@@ -686,6 +686,9 @@ button.link:hover { text-decoration: underline; }
 .badge-partly-failed, .badge-owned-by-other { background: var(--warn-bg); color: var(--warn-text); }
 .badge-sync-failed, .badge-secret-missing, .badge-not-ready, .badge-invalid { background: var(--danger-soft); color: var(--danger); }
 .badge-deleted, .badge-unknown { color: var(--muted); }
+/* KEDA: ScaledObject, ScaledJob (Active, Inactive and Not ready are shared). */
+.badge-paused, .badge-fallback { background: var(--warn-bg); color: var(--warn-text); }
+.badge-idle { color: var(--muted); }
 .access-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
 .access-field { display: flex; flex-direction: column; gap: 2px; }
 .access-field .confirm-input { width: 170px; padding: 3px 6px; }

@@ -154,6 +154,9 @@ async fn config_and_storage_changes_reach_the_api() {
     api.on("PATCH", "/api/v1/persistentvolumes/pvc-1", object("v1", "PersistentVolume", None, "pvc-1", json!({})));
     api.on("PATCH", "/apis/external-secrets.io/v1/namespaces/shop/externalsecrets/db", object("external-secrets.io/v1", "ExternalSecret", Some("shop"), "db", json!({})));
     api.on("POST", "/api/v1/namespaces", object("v1", "Namespace", None, "team-sandbox", json!({})));
+    let so_path = "/apis/keda.sh/v1alpha1/namespaces/shop/scaledobjects/web";
+    api.on("GET", so_path, object("keda.sh/v1alpha1", "ScaledObject", Some("shop"), "web", json!({"spec": {}})));
+    api.on("PATCH", so_path, object("keda.sh/v1alpha1", "ScaledObject", Some("shop"), "web", json!({})));
     let app = connected(&api).await;
     unlock(&app);
     let s = || w(&app);
@@ -179,6 +182,14 @@ async fn config_and_storage_changes_reach_the_api() {
     assert!(synced["metadata"]["annotations"]["force-sync"].is_string());
     let err = commands::force_sync(s(), "other".into(), es, "shop".into(), "db".into()).await.unwrap_err();
     assert!(err.contains("nothing was synced"), "{err}");
+    let so = kind("keda.sh", "v1alpha1", "ScaledObject", "scaledobjects", true);
+    commands::pause_scaling(s(), CTX.into(), so.clone(), "shop".into(), "web".into(), true, Some(2)).await.unwrap();
+    let paused = api.calls_to("PATCH", so_path).pop().unwrap().json();
+    assert_eq!(paused["metadata"]["annotations"]["autoscaling.keda.sh/paused-replicas"], "2");
+    commands::set_scaling_range(s(), CTX.into(), so.clone(), "shop".into(), "web".into(), 0, 8).await.unwrap();
+    assert_eq!(api.calls_to("PATCH", so_path).pop().unwrap().json(), json!({"spec": {"minReplicaCount": 0, "maxReplicaCount": 8}}));
+    let err = commands::pause_scaling(s(), "other".into(), so, "shop".into(), "web".into(), false, None).await.unwrap_err();
+    assert!(err.contains("nothing was resumed"), "{err}");
     commands::create_namespace(s(), CTX.into(), "team-sandbox".into()).await.unwrap();
     assert_eq!(api.calls_to("POST", "/api/v1/namespaces").pop().unwrap().json()["metadata"]["name"], "team-sandbox");
     let err = commands::create_namespace(s(), CTX.into(), "Bad_Name".into()).await.unwrap_err();

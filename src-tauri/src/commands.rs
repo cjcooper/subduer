@@ -449,6 +449,42 @@ pub async fn force_sync(state: Win, context: String, kind: KindRef, namespace: S
         .map_err(|e| e.user_message())
 }
 
+/// Pauses (optionally holding a ScaledObject at `replicas`) or resumes a
+/// ScaledObject or ScaledJob, checked like `delete_resource`.
+#[tauri::command]
+pub async fn pause_scaling(
+    state: Win,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    paused: bool,
+    replicas: Option<i32>,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, if paused { "paused" } else { "resumed" }).await?;
+    subduer_core::keda::set_paused(&client, &state.gate, &context, &kind, &namespace, &name, paused, replicas, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Sets a ScaledObject's or ScaledJob's min and max replicas, checked like
+/// `delete_resource`.
+#[tauri::command]
+pub async fn set_scaling_range(
+    state: Win,
+    context: String,
+    kind: KindRef,
+    namespace: String,
+    name: String,
+    min: i32,
+    max: i32,
+) -> CmdResult<()> {
+    let client = client_for_change(&state, &context, "changed").await?;
+    subduer_core::keda::set_replica_range(&client, &state.gate, &context, &kind, &namespace, &name, min, max, false)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Whether a ServiceAccount may do something (a SubjectAccessReview). A
 /// question to the API server: nothing is changed, so it isn't gated.
 #[tauri::command(rename_all = "snake_case")]

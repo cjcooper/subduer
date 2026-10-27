@@ -83,7 +83,7 @@ pub(crate) async fn related(
         }
         _ => {}
     }
-    controller(client, name, d).await;
+    controller(client, CONTROLLER_LABEL, name, d).await;
     if !kind.namespaced {
         let fields = format!("involvedObject.kind={},involvedObject.name={name}", kind.kind);
         d.events = crate::pod_details::list_events(client, "", Some(&fields), |_| Some(None)).await;
@@ -330,7 +330,7 @@ fn data_from_section(data_from: &Value, namespace: Option<&str>) -> Option<InfoS
 
 /// Leaves out the `optional` columns no row fills (Version, From, …), keeping
 /// the mono indexes in step. Tables without rows keep every column.
-fn drop_empty_columns(mut table: InfoTable, optional: &[usize]) -> InfoTable {
+pub(crate) fn drop_empty_columns(mut table: InfoTable, optional: &[usize]) -> InfoTable {
     if table.rows.is_empty() {
         return table;
     }
@@ -345,7 +345,9 @@ fn drop_empty_columns(mut table: InfoTable, optional: &[usize]) -> InfoTable {
     for row in &mut table.rows {
         row.cells = std::mem::take(&mut row.cells).into_iter().enumerate().filter(|(i, _)| keep(*i)).map(|(_, c)| c).collect();
     }
-    table.mono = table.mono.iter().copied().filter(|&c| keep(c)).map(shift).collect();
+    for cols in [&mut table.mono, &mut table.numeric, &mut table.times] {
+        *cols = cols.iter().copied().filter(|&c| keep(c)).map(shift).collect();
+    }
     table
 }
 
@@ -858,30 +860,32 @@ fn es_kind(kind: &str, plural: &str, version: &str) -> KindRef {
 }
 
 /// The list, or none with a note on the kind's section saying why.
-fn list_or_note(result: Result<Vec<Value>>, what: &str, d: &mut ObjectDetails) -> Vec<Value> {
+pub(crate) fn list_or_note(result: Result<Vec<Value>>, what: &str, d: &mut ObjectDetails) -> Vec<Value> {
     result.unwrap_or_else(|e| {
         d.info.push(InfoRow::new("Note", format!("couldn't list {what}: {}", e.user_message())));
         Vec::new()
     })
 }
 
-/// The operator's controller Deployment, linked and offered as Logs filtered
-/// to this object's name. Skipped quietly if it can't be listed.
-async fn controller(client: &Client, name: &str, d: &mut ObjectDetails) {
-    let lp = ListParams::default().labels(CONTROLLER_LABEL);
-    let Ok(list) = Api::<Deployment>::all(client.clone()).list_metadata(&lp).await else { return };
-    let Some(m) = list.items.first().map(|o| &o.metadata) else { return };
-    let (Some(ns), Some(deploy)) = (m.namespace.clone(), m.name.clone()) else { return };
+/// The operator's controller Deployment (the first labelled `label`), linked
+/// and offered as Logs filtered to this object's name. Skipped quietly if it
+/// can't be listed. Returns its namespace.
+pub(crate) async fn controller(client: &Client, label: &str, name: &str, d: &mut ObjectDetails) -> Option<String> {
+    let lp = ListParams::default().labels(label);
+    let list = Api::<Deployment>::all(client.clone()).list_metadata(&lp).await.ok()?;
+    let m = &list.items.first()?.metadata;
+    let (ns, deploy) = (m.namespace.clone()?, m.name.clone()?);
     d.info.push(InfoRow::new("Controller", format!("{ns}/{deploy}")).link(link("apps/Deployment", Some(&ns), &deploy)));
     let kind = KindRef { group: "apps".into(), version: "v1".into(), kind: "Deployment".into(), plural: "deployments".into(), namespaced: true };
-    d.logs = Some(LogTarget { namespace: ns, source: LogSource::Workload { kind, name: deploy }, filter: Some(name.to_owned()) });
+    d.logs = Some(LogTarget { namespace: ns.clone(), source: LogSource::Workload { kind, name: deploy }, filter: Some(name.to_owned()) });
+    Some(ns)
 }
 
-fn link(kind: &str, namespace: Option<&str>, name: &str) -> ObjectLink {
+pub(crate) fn link(kind: &str, namespace: Option<&str>, name: &str) -> ObjectLink {
     ObjectLink { kind: kind.into(), namespace: namespace.map(str::to_owned), name: name.into() }
 }
 
-fn strings(v: &Value) -> Vec<String> {
+pub(crate) fn strings(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_owned)).collect()
 }
 

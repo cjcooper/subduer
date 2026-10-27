@@ -1,7 +1,8 @@
 //! Changes confirmed in one dialog: Restart and Scale for Deployments and
 //! StatefulSets, Run now for CronJobs, Suspend/Resume for Jobs and CronJobs,
-//! Edit range for HPAs, saving a ConfigMap's or Secret's edited data, and
-//! Force sync for ExternalSecrets and ClusterExternalSecrets.
+//! Edit range for HPAs, ScaledObjects and ScaledJobs, Pause/Resume for
+//! ScaledObjects and ScaledJobs, saving a ConfigMap's or Secret's edited
+//! data, and Force sync for ExternalSecrets and ClusterExternalSecrets.
 //! Gated like Delete, and production-like contexts need the object's name
 //! typed out.
 
@@ -9,7 +10,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use subduer_types::{
-    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, can_force_sync, has_workload_details,
+    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, can_force_sync, has_workload_details, is_keda_scaler,
     is_scalable_workload,
 };
 
@@ -25,7 +26,7 @@ pub enum Op {
     Run,
     Suspend,
     Resume,
-    /// An HPA's min and max replicas.
+    /// An HPA's, ScaledObject's or ScaledJob's min and max replicas.
     Range,
     /// Edited ConfigMap or Secret data.
     Save,
@@ -39,6 +40,10 @@ pub enum Op {
     Uninstall,
     /// Annotate an ExternalSecret or ClusterExternalSecret with `force-sync`.
     ForceSync,
+    /// Stop KEDA scaling a ScaledObject or ScaledJob.
+    Pause,
+    /// Let KEDA scale it again.
+    Unpause,
 }
 
 impl Op {
@@ -56,6 +61,8 @@ impl Op {
             Op::Rollback => "Rollback",
             Op::Uninstall => "Delete",
             Op::ForceSync => "Force sync",
+            Op::Pause => "Pause",
+            Op::Unpause => "Resume",
         }
     }
 
@@ -68,6 +75,7 @@ impl Op {
             (Op::Suspend, _) => "Stop its running pods until resumed",
             (Op::Resume, "CronJob") => "Start Jobs on its schedule again",
             (Op::Resume, _) => "Start its pods again",
+            (Op::Range, "ScaledJob") => "Change how many Jobs it may run at once",
             (Op::Range, _) => "Change its min and max replicas",
             (Op::Save, _) => "Save the edited data",
             (Op::Expand, _) => "Make the claim bigger",
@@ -76,6 +84,9 @@ impl Op {
             (Op::Uninstall, _) => "Delete the release and everything it created, with helm uninstall",
             (Op::ForceSync, "ClusterExternalSecret") => "Have External Secrets fetch from the store now, for every namespace",
             (Op::ForceSync, _) => "Have External Secrets fetch from the store now and update the Secret",
+            (Op::Pause, "ScaledJob") => "Stop KEDA starting new Jobs",
+            (Op::Pause, _) => "Stop KEDA scaling it, where it is or at a replica count",
+            (Op::Unpause, _) => "Let KEDA scale it from its triggers again",
         }
     }
 }
@@ -118,6 +129,8 @@ struct Change<'a> {
     replicas: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     suspend: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     min: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +187,7 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
             .filter(|k| {
                 has_workload_details(k)
                     || can_force_sync(k)
+                    || is_keda_scaler(k)
                     || matches!(
                         k.key().as_str(),
                         "autoscaling/HorizontalPodAutoscaler"
@@ -222,6 +236,13 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
         } else if can_force_sync(&kind) {
             if patch {
                 ops.push(Op::ForceSync);
+            }
+        } else if is_keda_scaler(&kind) {
+            // Both start from the loaded details: the range, and whether it's paused.
+            let loaded = store.object.with(|o| matches!(o, Some(Ok(d)) if d.name == row.name));
+            if patch && loaded {
+                ops.push(Op::Range);
+                ops.push(if detail("Paused").is_some() { Op::Unpause } else { Op::Pause });
             }
         } else if is_scalable_workload(&kind) {
             if patch {
@@ -394,6 +415,41 @@ fn object_row(store: Store, name: &str, key: &str) -> Option<String> {
     })
 }
 
+/// A ScaledObject's or ScaledJob's range from its loaded details:
+/// `Range: 0 to 10 replicas`, `Jobs at once: 0 to 20`.
+fn keda_range(store: Store, name: &str) -> Option<(i32, i32)> {
+    let text = object_row(store, name, "Range").or_else(|| object_row(store, name, "Jobs at once"))?;
+    let (lo, rest) = text.split_once(" to ")?;
+    let hi = rest.split_whitespace().next()?;
+    Some((lo.trim().parse().ok()?, hi.parse().ok()?))
+}
+
+/// `Some(release)` when the loaded object is managed by Helm (the release
+/// name may be empty if it isn't annotated).
+fn helm_release(store: Store, name: &str) -> Option<String> {
+    store.object.with_untracked(|o| match o {
+        Some(Ok(d)) if d.name == name => {
+            let helm = d.labels.iter().any(|(k, v)| k == "app.kubernetes.io/managed-by" && v == "Helm");
+            helm.then(|| d.annotations.iter().find(|(k, _)| k == "meta.helm.sh/release-name").map(|(_, v)| v.clone()).unwrap_or_default())
+        }
+        _ => None,
+    })
+}
+
+/// A ScaledObject's replicas now, from `Replicas: 3 now · 4 wanted`.
+fn replicas_now(store: Store, name: &str) -> Option<i32> {
+    object_row(store, name, "Replicas")?.split_whitespace().next()?.parse().ok()
+}
+
+fn pause_note(kind: &KindRef, pause: bool) -> &'static str {
+    match (kind.kind.as_str(), pause) {
+        ("ScaledJob", true) => "KEDA starts no new Jobs until it's resumed. Jobs already running carry on.",
+        (_, true) => "KEDA stops scaling it: its triggers are no longer acted on until it's resumed.",
+        ("ScaledJob", false) => "KEDA starts Jobs from its triggers again.",
+        (_, false) => "KEDA scales it from its triggers again, within its range.",
+    }
+}
+
 fn suspend_note(kind: &KindRef, suspend: bool) -> &'static str {
     match (kind.kind.as_str(), suspend) {
         ("CronJob", true) => "No new Jobs start until it's resumed. Jobs already running carry on.",
@@ -429,6 +485,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     let current = RwSignal::new(None::<Replicas>);
     let wanted = RwSignal::new(String::new());
     let (min, max) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
+    // Pause a ScaledObject at a replica count rather than where it is.
+    let hold_on = RwSignal::new(false);
+    let hold = RwSignal::new(String::new());
     let size = RwSignal::new(String::new());
     let rollback_to = RwSignal::new(String::new());
     let wait = RwSignal::new(true);
@@ -436,6 +495,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     let close = move || {
         typed.set(String::new());
         keep_history.set(false);
+        hold_on.set(false);
         error.set(None);
         busy.set(false);
         current.set(None);
@@ -448,8 +508,18 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     Effect::new(move |_| {
         let Some(target) = store.workload_prompt.get() else { return };
         if target.op == Op::Range {
-            min.set(object_row(store, &target.name, "Min replicas").unwrap_or_default());
-            max.set(object_row(store, &target.name, "Max replicas").unwrap_or_default());
+            if is_keda_scaler(&target.kind) {
+                let (lo, hi) = keda_range(store, &target.name).map_or_else(Default::default, |(lo, hi)| (lo.to_string(), hi.to_string()));
+                min.set(lo);
+                max.set(hi);
+            } else {
+                min.set(object_row(store, &target.name, "Min replicas").unwrap_or_default());
+                max.set(object_row(store, &target.name, "Max replicas").unwrap_or_default());
+            }
+            return;
+        }
+        if target.op == Op::Pause {
+            hold.set(replicas_now(store, &target.name).unwrap_or(0).to_string());
             return;
         }
         if target.op == Op::Expand {
@@ -487,10 +557,14 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
             let WorkloadTarget { context, kind, namespace, name, op, save } = target.clone();
             let prod = context.prod_like;
             let replicas = move || wanted.get().trim().parse::<i32>().ok().filter(|n| *n >= 0);
+            // KEDA can scale to zero; an HPA can't.
+            let keda = is_keda_scaler(&kind);
+            let floor = if keda { 0 } else { 1 };
             let range = move || {
                 let parse = |s: RwSignal<String>| s.get().trim().parse::<i32>().ok();
-                parse(min).zip(parse(max)).filter(|(lo, hi)| *lo >= 1 && hi >= lo)
+                parse(min).zip(parse(max)).filter(|(lo, hi)| *lo >= floor && *hi >= 1 && hi >= lo)
             };
+            let held = move || hold_on.get().then(|| hold.get().trim().parse::<i32>().ok().filter(|n| *n >= 0));
             let current_size = object_row(store, &name, "Requested").unwrap_or_default();
             let grows = {
                 let current = current_size.clone();
@@ -504,6 +578,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
             let range_now = {
                 let name = name.clone();
                 move || {
+                    if keda {
+                        return keda_range(store, &name);
+                    }
                     let get = |k: &str| object_row(store, &name, k).and_then(|v| v.parse::<i32>().ok());
                     get("Min replicas").zip(get("Max replicas"))
                 }
@@ -519,6 +596,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         Op::Range => range().is_some_and(|r| Some(r) != range_now()),
                         Op::Expand => grows(),
                         Op::Rollback => rollback_to.with(|r| r.parse::<i64>().is_ok()),
+                        Op::Pause => held() != Some(None),
                         _ => true,
                     };
                     !busy.get() && typed_ok && scale_ok
@@ -530,6 +608,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     let target = target.clone();
                     let replicas = replicas();
                     let range = range();
+                    let held = held().flatten();
                     let size = size.get_untracked().trim().to_owned();
                     let revision = rollback_to.get_untracked().parse::<i64>().ok();
                     let wait = wait.get_untracked();
@@ -537,12 +616,18 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
+                        let paused = match target.op {
+                            Op::Pause => Some(true),
+                            Op::Unpause => Some(false),
+                            _ => None,
+                        };
                         let (command, replicas, suspend) = match target.op {
                             Op::Restart => ("restart_workload", None, None),
                             Op::Scale => ("scale_workload", replicas, None),
                             Op::Run => ("run_cron_job", None, None),
                             Op::Suspend => ("suspend_workload", None, Some(true)),
                             Op::Resume => ("suspend_workload", None, Some(false)),
+                            Op::Range if is_keda_scaler(&target.kind) => ("set_scaling_range", None, None),
                             Op::Range => ("set_hpa_range", None, None),
                             Op::Save => ("save_config_data", None, None),
                             Op::Expand => ("expand_claim", None, None),
@@ -550,12 +635,15 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             Op::Rollback => ("helm_rollback", None, None),
                             Op::Uninstall => ("helm_uninstall", None, None),
                             Op::ForceSync => ("force_sync", None, None),
+                            Op::Pause => ("pause_scaling", held, None),
+                            Op::Unpause => ("pause_scaling", None, None),
                         };
                         let args = Change {
                             context: &target.context.name,
                             target: Target { kind: &target.kind, namespace: &target.namespace, name: &target.name },
                             replicas,
                             suspend,
+                            paused,
                             min: range.map(|r| r.0),
                             max: range.map(|r| r.1),
                             resource_version: target.save.as_ref().map(|s| s.resource_version.as_str()),
@@ -622,20 +710,68 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             <input
                                 class="confirm-input replicas-input"
                                 type="number"
-                                min="1"
+                                min=floor
                                 prop:value=move || value.get()
                                 on:input=move |ev| value.set(event_target_value(&ev))
                             />
                         </label>
                     };
+                    let jobs = kind.kind == "ScaledJob";
+                    let paused = object_row(store, &name, "Paused").is_some();
+                    let helm = if keda { helm_release(store, &name) } else { None };
+                    let rule = if keda { "Min can't be below 0, max must be at least 1 and at least min." } else { "Min must be at least 1, and max at least min." };
                     view! {
-                        <p>"Change the replica range of "{what}"."</p>
+                        <p>{if jobs { "Change how many Jobs at once " } else { "Change the replica range of " }}{what}"."</p>
                         {input("Min ", min)}
                         {input("Max ", max)}
-                        {move || range().is_none().then(|| view! { <p class="warn-text">"Min must be at least 1, and max at least min."</p> })}
+                        {move || range().is_none().then(|| view! { <p class="warn-text">{rule}</p> })}
+                        {move || (keda && !jobs && range().is_some_and(|(lo, _)| lo == 0)).then(|| view! {
+                            <p class="muted">"With min 0, KEDA scales it to zero when no trigger is active, once the cooldown has passed."</p>
+                        })}
+                        {(keda && paused).then(|| view! { <p class="warn-text">"It's paused: the new range applies once it's resumed."</p> })}
+                        {helm.map(|r| {
+                            let release = if r.is_empty() { String::new() } else { format!(" (release {r})") };
+                            view! { <p class="warn-text">{format!("Managed by Helm{release}: the next helm upgrade puts the chart's min and max back. Change them in its values too.")}</p> }
+                        })}
                         {owner.map(|o| view! {
                             <p class="warn-text">{format!("It's controlled by {o}, which sets the range itself: change it there, or this edit is undone.")}</p>
                         })}
+                    }
+                    .into_any()
+                }
+                Op::Pause | Op::Unpause => {
+                    let pause = op == Op::Pause;
+                    let object = kind.kind == "ScaledObject";
+                    let now = replicas_now(store, &name);
+                    view! {
+                        <p>{what}{if pause { " will be paused." } else { " will be resumed." }}</p>
+                        <p>{pause_note(&kind, pause)}</p>
+                        {(pause && object).then(|| view! {
+                            <label class="check-row">
+                                <input type="checkbox" prop:checked=move || hold_on.get() on:change=move |ev| hold_on.set(event_target_checked(&ev)) />
+                                " Scale it to a replica count first"
+                            </label>
+                            {move || hold_on.get().then(|| view! {
+                                <label class="replicas">
+                                    "Replicas "
+                                    <input
+                                        class="confirm-input replicas-input"
+                                        type="number"
+                                        min="0"
+                                        prop:value=move || hold.get()
+                                        on:input=move |ev| hold.set(event_target_value(&ev))
+                                    />
+                                </label>
+                                {move || (held() == Some(None)).then(|| view! { <p class="warn-text">"Enter 0 or more replicas."</p> })}
+                            })}
+                            <p class="muted">{move || match (held().flatten(), now) {
+                                (Some(n), _) => format!("Sets autoscaling.keda.sh/paused-replicas to {n}."),
+                                (None, Some(n)) => format!("Sets autoscaling.keda.sh/paused; it stays at {n} replicas."),
+                                (None, None) => "Sets autoscaling.keda.sh/paused; it stays at the replicas it has.".to_owned(),
+                            }}</p>
+                        })}
+                        {(pause && !object).then(|| view! { <p class="muted">"Sets autoscaling.keda.sh/paused."</p> })}
+                        {(!pause).then(|| view! { <p class="muted">"Removes the autoscaling.keda.sh/paused and paused-replicas annotations."</p> })}
                     }
                     .into_any()
                 }
@@ -826,7 +962,11 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 Op::Run => (format!("Run {} now?", kind.kind), "Starting…"),
                 Op::Suspend => (format!("Suspend {}?", kind.kind), "Suspending…"),
                 Op::Resume => (format!("Resume {}?", kind.kind), "Resuming…"),
+                Op::Range if kind.kind == "ScaledJob" => ("Edit Jobs at once?".to_owned(), "Saving…"),
+                Op::Range if keda => ("Edit replica range?".to_owned(), "Saving…"),
                 Op::Range => ("Edit HPA range?".to_owned(), "Saving…"),
+                Op::Pause => (format!("Pause {}?", kind.kind), "Pausing…"),
+                Op::Unpause => (format!("Resume {}?", kind.kind), "Resuming…"),
                 Op::Expand => ("Expand claim?".to_owned(), "Expanding…"),
                 Op::Reclaim => ("Change reclaim policy?".to_owned(), "Saving…"),
                 Op::Rollback => ("Roll back Helm release?".to_owned(), "Rolling back…"),
@@ -847,6 +987,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     format!("Set {new_policy}")
                 } else if op == Op::Expand {
                     size.with(|s| if s.trim().is_empty() { "Expand".to_owned() } else { format!("Expand to {}", s.trim()) })
+                } else if op == Op::Pause {
+                    held().flatten().map_or_else(|| "Pause".to_owned(), |n| format!("Pause at {n}"))
                 } else if op == Op::Range {
                     range().map_or_else(|| "Save".to_owned(), |(lo, hi)| format!("Set {lo}–{hi}"))
                 } else {

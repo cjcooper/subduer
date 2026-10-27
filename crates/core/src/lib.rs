@@ -17,6 +17,7 @@ pub mod exec;
 pub mod external_secrets;
 pub mod forward;
 pub mod helm;
+pub mod keda;
 pub mod history;
 pub mod logs;
 pub mod namespace;

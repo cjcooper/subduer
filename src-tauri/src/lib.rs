@@ -352,6 +352,8 @@ pub fn run() {
             commands::expand_claim,
             commands::set_reclaim_policy,
             commands::force_sync,
+            commands::pause_scaling,
+            commands::set_scaling_range,
             commands::close_discarding,
             trace::trace_targets,
             trace::choose_trace_file,

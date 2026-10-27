@@ -697,10 +697,10 @@ pub struct DataChange {
 /// A Secret's values for editing; `None` for binary values.
 pub type SecretValues = Vec<(String, Option<String>)>;
 
-/// Config, Network, Storage and Access Control kinds, Namespaces, Nodes and
-/// External Secrets kinds with an [`ObjectDetails`] Details tab.
+/// Config, Network, Storage and Access Control kinds, Namespaces, Nodes,
+/// External Secrets and KEDA kinds with an [`ObjectDetails`] Details tab.
 pub fn has_object_details(kind: &KindRef) -> bool {
-    is_external_secrets(kind) || matches!(
+    is_external_secrets(kind) || is_keda(kind) || matches!(
         kind.key().as_str(),
         "core/ConfigMap"
             | "core/Secret"
@@ -743,6 +743,17 @@ pub fn has_object_details(kind: &KindRef) -> bool {
 /// generators (`generators.external-secrets.io`).
 pub fn is_external_secrets(kind: &KindRef) -> bool {
     matches!(kind.group.as_str(), "external-secrets.io" | "generators.external-secrets.io")
+}
+
+/// KEDA kinds: autoscaling (`keda.sh`) and CloudEvents (`eventing.keda.sh`).
+pub fn is_keda(kind: &KindRef) -> bool {
+    matches!(kind.group.as_str(), "keda.sh" | "eventing.keda.sh")
+}
+
+/// ScaledObjects and ScaledJobs: they can be paused, and have a replica
+/// range.
+pub fn is_keda_scaler(kind: &KindRef) -> bool {
+    matches!(kind.key().as_str(), "keda.sh/ScaledObject" | "keda.sh/ScaledJob")
 }
 
 /// ExternalSecrets and ClusterExternalSecrets: Force sync annotates them with

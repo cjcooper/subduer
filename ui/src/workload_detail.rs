@@ -229,11 +229,16 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
 
 /// Most conditions are good when true; these report a problem when true.
 pub(crate) fn healthy(c: &Condition) -> bool {
+    // KEDA's Active (a trigger has work) and Paused are fine either way.
+    if matches!(c.type_.as_str(), "Active" | "Paused") && c.status != "Unknown" {
+        return true;
+    }
     // A Namespace's conditions all describe a deletion that's stuck; a Node's
-    // pressure conditions are problems too.
+    // pressure conditions are problems too, and so is KEDA's Fallback.
     let bad_when_true = matches!(
         c.type_.as_str(),
         "Failed" | "FailureTarget" | "ReplicaFailure" | "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable"
+            | "Fallback"
     ) || c.type_.starts_with("Namespace");
     (c.status == "True") != bad_when_true
 }

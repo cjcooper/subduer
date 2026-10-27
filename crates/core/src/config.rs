@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::cluster::dynamic_api;
 use crate::types::{
     DataEntry, DataSet, InfoRow, InfoSection, InfoTable, InfoTableRow, KindRef, ObjectDetails, ObjectLink,
-    has_object_details, is_external_secrets,
+    has_object_details, is_external_secrets, is_keda,
 };
 use crate::workload::{conditions, selector_string};
 use crate::{Error, Result};
@@ -53,6 +53,9 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
     }
     if is_external_secrets(kind) {
         crate::external_secrets::related(client, kind, ns, name, &v, &mut d).await?;
+    }
+    if is_keda(kind) {
+        crate::keda::related(client, kind, ns, name, &v, &mut d).await?;
     }
     if let Some(ns) = namespace {
         let fields = format!("involvedObject.kind={},involvedObject.name={name}", kind.kind);
@@ -111,6 +114,7 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
             crate::namespace::describe(key, &mut d, v);
             crate::node::describe(key, &mut d, v);
             crate::external_secrets::describe(key, &mut d, v);
+            crate::keda::describe(key, &mut d, v);
         }
     }
     // Owner rows last, like workloads.
@@ -121,7 +125,10 @@ pub(crate) fn describe(key: &str, v: &Value, now: jiff::Timestamp) -> ObjectDeta
         .find(|o| o["controller"] == true)
     {
         let (kind, name) = (str_at(owner, "kind").unwrap_or_default(), str_at(owner, "name").unwrap_or_default());
-        d.info.push(InfoRow::new("Controlled by", format!("{kind}/{name}")));
+        let row = InfoRow::new("Controlled by", format!("{kind}/{name}"));
+        // A KEDA HPA links back to its ScaledObject.
+        let keda = str_at(owner, "apiVersion").is_some_and(|a| a.starts_with("keda.sh/"));
+        d.info.push(if keda { row.link(ObjectLink { kind: format!("keda.sh/{kind}"), namespace: d.namespace.clone(), name }) } else { row });
     }
     d
 }
@@ -427,7 +434,7 @@ fn hpa(d: &mut ObjectDetails, v: &Value) {
 }
 
 /// The metric's spec or status body for its type, e.g. `m.resource`.
-fn metric_body<'a>(m: &'a Value, type_: &str) -> &'a Value {
+pub(crate) fn metric_body<'a>(m: &'a Value, type_: &str) -> &'a Value {
     match type_ {
         "Resource" => &m["resource"],
         "ContainerResource" => &m["containerResource"],
@@ -439,7 +446,7 @@ fn metric_body<'a>(m: &'a Value, type_: &str) -> &'a Value {
 }
 
 /// (label, identity for matching status to spec, target text).
-fn metric(m: &Value, type_: &str) -> (String, String, String) {
+pub(crate) fn metric(m: &Value, type_: &str) -> (String, String, String) {
     let body = metric_body(m, type_);
     let name = match type_ {
         "Resource" => str_at(body, "name").unwrap_or_default(),
@@ -471,7 +478,7 @@ fn metric(m: &Value, type_: &str) -> (String, String, String) {
     (label, name, target)
 }
 
-fn metric_value(current: &Value) -> String {
+pub(crate) fn metric_value(current: &Value) -> String {
     match (int_at(current, "averageUtilization"), str_at(current, "averageValue"), str_at(current, "value")) {
         (Some(u), Some(avg), _) => format!("{u}% ({avg})"),
         (Some(u), None, _) => format!("{u}%"),

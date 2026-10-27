@@ -4,6 +4,8 @@
 //! existing value is read or sent). HPA: checks setting its current range.
 //! PVC: checks growing it by 1Gi. PV: checks setting its current reclaim policy.
 //! ExternalSecret/ClusterExternalSecret (`external-secrets.io/…`): checks Force sync.
+//! ScaledObject/ScaledJob (`keda.sh/…`): checks pausing (and for a ScaledObject,
+//! pausing at its current replicas), resuming and setting its current range.
 //! Then checks that the locked gate refuses the real call.
 
 use subduer_core::safety::SafetyGate;
@@ -50,6 +52,30 @@ async fn main() -> subduer_core::Result<()> {
         }
         let gated = subduer_core::external_secrets::force_sync(&client, &gate, context, kind, ns, name, false).await;
         println!("without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        return Ok(());
+    }
+    if subduer_core::types::is_keda_scaler(kind) {
+        use subduer_core::keda;
+        let range = row("Range").or_else(|| row("Jobs at once")).unwrap_or_default();
+        let mut parts = range.split_whitespace();
+        let lo: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let hi: i32 = parts.nth(1).and_then(|n| n.parse().ok()).unwrap_or(1);
+        let now = row("Replicas").and_then(|r| r.split_whitespace().next()?.parse().ok());
+        let ns = namespace.as_str();
+        let report = |what: &str, r: subduer_core::Result<()>| match r {
+            Ok(()) => println!("{what} dry run OK"),
+            Err(e) => println!("{what} dry run refused: {}", e.user_message()),
+        };
+        report("pause", keda::set_paused(&client, &gate, context, kind, ns, name, true, None, true).await);
+        if kind.kind == "ScaledObject" {
+            report(&format!("pause at {now:?}"), keda::set_paused(&client, &gate, context, kind, ns, name, true, now.or(Some(1)), true).await);
+        }
+        report("resume", keda::set_paused(&client, &gate, context, kind, ns, name, false, None, true).await);
+        report(&format!("range {lo}-{hi}"), keda::set_replica_range(&client, &gate, context, kind, ns, name, lo, hi, true).await);
+        let gated = keda::set_paused(&client, &gate, context, kind, ns, name, true, None, false).await;
+        println!("pause without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
+        let gated = keda::set_replica_range(&client, &gate, context, kind, ns, name, lo, hi, false).await;
+        println!("range without unlocking: {}", gated.err().map_or("NOT refused (bug)".into(), |e| e.user_message()));
         return Ok(());
     }
     if key == "core/PersistentVolume" {

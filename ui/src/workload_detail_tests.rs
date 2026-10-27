@@ -56,9 +56,13 @@ fn healthy_flips_for_problem_conditions() {
     assert!(healthy(&condition("Available", "True")));
     assert!(!healthy(&condition("Available", "False")));
     assert!(!healthy(&condition("Progressing", "Unknown")));
-    for bad in ["Failed", "FailureTarget", "ReplicaFailure", "NamespaceDeletionContentFailure", "MemoryPressure", "DiskPressure"] {
+    for bad in ["Failed", "FailureTarget", "ReplicaFailure", "NamespaceDeletionContentFailure", "MemoryPressure", "DiskPressure", "Fallback"] {
         assert!(!healthy(&condition(bad, "True")), "{bad} true is a problem");
         assert!(healthy(&condition(bad, "False")), "{bad} false is fine");
+    }
+    for either in ["Active", "Paused"] {
+        assert!(healthy(&condition(either, "True")) && healthy(&condition(either, "False")), "{either} is fine either way");
+        assert!(!healthy(&condition(either, "Unknown")));
     }
 }
 
