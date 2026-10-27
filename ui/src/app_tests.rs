@@ -13,7 +13,7 @@ pub(crate) fn kind(group: &str, kind: &str) -> KindRef {
 }
 
 pub(crate) fn context(name: &str, unlocked: bool) -> ContextInfo {
-    ContextInfo { name: name.into(), cluster: None, namespace: None, prod_like: false, unlocked }
+    ContextInfo { name: name.into(), cluster: None, namespace: None, prod_like: false, unlocked, provider: None }
 }
 
 pub(crate) fn row(namespace: Option<&str>, name: &str) -> ResourceRow {

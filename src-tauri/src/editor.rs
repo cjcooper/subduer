@@ -36,12 +36,14 @@ impl EditWindows {
 }
 
 /// Whether a context looks like production, by its name or its cluster's.
-fn prod_like(context: &str) -> bool {
+/// Or as marked in File › Manage Clusters….
+fn prod_like(state: &AppState, context: &str) -> bool {
+    let marks = state.prod.lock().unwrap();
     let from_kubeconfig = subduer_core::contexts::load_kubeconfig().ok().and_then(|k| {
         let gate = subduer_core::safety::SafetyGate::default();
-        subduer_core::contexts::list_contexts(&k, &gate).contexts.into_iter().find(|c| c.name == context)
+        subduer_core::contexts::list_contexts(&k, &gate, &marks).contexts.into_iter().find(|c| c.name == context)
     });
-    from_kubeconfig.map_or_else(|| subduer_core::safety::is_prod_like(context), |c| c.prod_like)
+    from_kubeconfig.map_or_else(|| marks.is_prod(context, None), |c| c.prod_like)
 }
 
 /// Opens (or focuses, if already open) an edit window for one object on the
@@ -122,7 +124,7 @@ pub async fn editor_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_,
         .await
         .map_err(|e| e.user_message())?;
     Ok(EditSession {
-        prod_like: prod_like(&context),
+        prod_like: prod_like(&state, &context),
         unlocked: win.gate.is_unlocked(&context),
         title: target.title(&context),
         context,

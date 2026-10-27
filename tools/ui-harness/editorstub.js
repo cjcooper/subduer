@@ -58,7 +58,8 @@
     const status = document.querySelector('.editor-status')?.textContent.trim() || '';
     const highlighted = !!document.querySelector('.ace_editor .ace_meta, .ace_editor .ace_keyword, .ace_editor .ace_variable');
     const errors = (editor()?.session.getAnnotations() || []).filter((x) => x.type === 'error').length;
-    document.title = `calls=${calls.join(',')} dirty=${dirty} modal=${modal} highlighted=${highlighted} errors=${errors} status=${status}`;
+    const chip = document.querySelector('.editor-title .prod-chip');
+    document.title = `prod-chip=${chip ? chip.textContent.replace('Looks like production', '') + (chip.querySelector('.prod-icon') ? '+icon' : '') : 'none'} calls=${calls.join(',')} dirty=${dirty} modal=${modal} highlighted=${highlighted} errors=${errors} status=${status}`;
   };
   setInterval(report, 250);
 })();

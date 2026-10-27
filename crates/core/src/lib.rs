@@ -1,8 +1,11 @@
 //! Cluster access for k8s-subduer, independent of any UI.
 
 pub mod actions;
+pub mod add_cluster;
+pub mod manage_clusters;
 pub mod capture;
 pub mod catalog;
+pub mod cloud;
 pub mod cluster;
 pub mod config;
 pub mod container_spec;

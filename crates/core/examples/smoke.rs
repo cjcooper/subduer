@@ -12,7 +12,7 @@ use subduer_core::{cluster, contexts, watch};
 async fn main() -> subduer_core::Result<()> {
     let context = std::env::args().nth(1).unwrap_or_else(|| "docker-desktop".into());
     let kubeconfig = contexts::load_kubeconfig()?;
-    for c in contexts::list_contexts(&kubeconfig, &SafetyGate::default()).contexts {
+    for c in contexts::list_contexts(&kubeconfig, &SafetyGate::default(), &subduer_core::safety::ProdMarks::default()).contexts {
         println!("context {:<20} prod_like={}", c.name, c.prod_like);
     }
 

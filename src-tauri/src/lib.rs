@@ -1,5 +1,6 @@
 mod about;
 mod accent;
+mod add_cluster;
 mod app_icon;
 mod capture;
 mod commands;
@@ -7,6 +8,7 @@ mod desktop_entry;
 mod editor;
 mod exec;
 mod forward;
+mod kubeconfig_watch;
 mod logs;
 mod menu;
 mod shell_env;
@@ -22,7 +24,7 @@ use std::sync::Arc;
 
 use subduer_core::history::HistoryStore;
 use subduer_core::kube::Client;
-use subduer_core::safety::SafetyGate;
+use subduer_core::safety::{ProdMarks, SafetyGate};
 use tauri::ipc::{CommandArg, CommandItem, InvokeError};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use tauri::async_runtime::JoinHandle;
@@ -43,6 +45,9 @@ pub struct WindowState {
     /// "Allow changes", per context, for this window only.
     pub gate: SafetyGate,
     pub session: tokio::sync::RwLock<Option<Session>>,
+    /// The context last picked here, set as its connect starts: the window
+    /// is on it even while connecting, or after it failed or dropped.
+    pub chosen: Mutex<Option<String>>,
     /// The single live resource watch feeding the table.
     pub watch: Mutex<Option<JoinHandle<()>>>,
     pub next_watch_id: AtomicU64,
@@ -87,6 +92,8 @@ pub struct AppState {
     /// Settings › Transparency is off: main windows open without the
     /// system material (`vibrancy`).
     pub opaque: AtomicBool,
+    /// Contexts marked as production, or as not (File › Manage Clusters…).
+    pub prod: Mutex<ProdMarks>,
 }
 
 /// The first main window, from `tauri.conf.json`; later ones are `main-2`, ….
@@ -133,6 +140,15 @@ impl AppState {
 
     fn forget(&self, child: &str) {
         self.owners.lock().unwrap().remove(child);
+    }
+
+    /// The contexts main windows other than `label` are on.
+    pub(crate) fn in_use_elsewhere(&self, label: &str) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.main_windows().into_iter().filter(|w| w.label != label).filter_map(|w| w.chosen.lock().unwrap().clone()).collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     pub(crate) fn main_windows(&self) -> Vec<Win> {
@@ -236,6 +252,8 @@ fn watch_main_window<R: Runtime>(app: &AppHandle<R>, main: &WebviewWindow<R>) {
                     state.forwards.stop_all();
                     trace::stop_on_exit(&state.traces);
                 }
+                // Its context is free to remove now.
+                add_cluster::in_use_changed(&handle);
             }
             _ => {}
         }
@@ -264,8 +282,12 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             menu::install(app.handle())?;
+            if let Ok(dir) = app.path().app_config_dir() {
+                *app.state::<AppState>().prod.lock().unwrap() = ProdMarks::load(&dir.join("production.json"));
+            }
             // Logs and shell windows belong to the main window; they close with it.
             open_main_window(app.handle(), MAIN_LABEL)?;
+            tauri::async_runtime::spawn(kubeconfig_watch::run(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -348,6 +370,17 @@ pub fn run() {
             trace::export_trace_report,
             commands::rightsize_preview,
             commands::rightsize_apply,
+            add_cluster::kubeconfig_target,
+            add_cluster::add_cluster,
+            add_cluster::cloud_accounts,
+            add_cluster::cloud_clusters,
+            add_cluster::add_cloud_cluster,
+            add_cluster::choose_cert_file,
+            add_cluster::managed_contexts,
+            add_cluster::remove_context,
+            add_cluster::reorder_contexts,
+            add_cluster::contexts_in_use_elsewhere,
+            add_cluster::set_production,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

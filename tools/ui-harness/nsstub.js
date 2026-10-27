@@ -61,5 +61,5 @@
   if (params.get('go')) setTimeout(() => document.querySelector('.modal-actions .primary')?.click(), 2500);
   if (params.get('link')) setTimeout(() => [...document.querySelectorAll('.itable tbody tr.clickable')].find((r) => r.textContent.startsWith('Deployments'))?.click(), 2300);
   if (params.get('filter')) setTimeout(() => btn('.detail-actions button', 'Filter')?.click(), 2300);
-  if (params.get('filter')) setTimeout(() => { document.title = 'ns-menu=' + document.querySelectorAll('.topbar select')[1]?.value; }, 2800);
+  if (params.get('filter')) setTimeout(() => { document.title = 'ns-menu=' + document.querySelector('.topbar select')?.value; }, 2800);
 })();

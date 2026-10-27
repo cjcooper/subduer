@@ -91,6 +91,7 @@ pub fn Overview(store: Store) -> impl IntoView {
     };
     view! {
         <div class="resource-header">
+            {move || store.current_context().map(|c| view! { <crate::icons::ProviderLogo provider=c.provider /> })}
             <h1>"Cluster"</h1>
             <span class="muted">{subtitle}</span>
             <span class="spacer"></span>

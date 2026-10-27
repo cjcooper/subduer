@@ -15,6 +15,9 @@ pub struct ContextInfo {
     pub prod_like: bool,
     /// Mutations are allowed against this context.
     pub unlocked: bool,
+    /// The cloud it looks to be in (see [`ManagedContext::provider`]).
+    #[serde(default)]
+    pub provider: Option<CloudProvider>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1638,6 +1641,199 @@ pub struct TraceSummary {
     /// from before they were counted.
     #[serde(default)]
     pub pulled_bytes: u64,
+}
+
+/// File › Add Cluster…: a cluster entered by hand, written to the kubeconfig
+/// as `kubectl config set-cluster`, `set-credentials` and `set-context` would.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewCluster {
+    /// The context's name; its cluster and user entries are named after it.
+    pub name: String,
+    /// The API server's URL, e.g. `https://10.0.0.1:6443`.
+    pub server: String,
+    /// The CA certificate: PEM text (kept in the kubeconfig) or a file's
+    /// path (the kubeconfig points to it). Empty for the system's CAs.
+    pub certificate_authority: String,
+    pub insecure_skip_tls_verify: bool,
+    /// Empty for none.
+    pub proxy_url: String,
+    pub auth: ClusterAuth,
+    /// The context's default namespace; empty for none.
+    pub namespace: String,
+    /// Becomes kubectl's current context.
+    pub make_current: bool,
+}
+
+/// How a hand-entered cluster's user signs in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClusterAuth {
+    None,
+    Token { token: String },
+    /// PEM text or file paths, like the CA.
+    ClientCertificate { certificate: String, key: String },
+    /// A credential plugin (e.g. `kubelogin`), as `users[].user.exec`.
+    Exec { command: String, args: Vec<String> },
+}
+
+impl NewCluster {
+    /// What's missing or wrong, for people; `None` when it can be written.
+    /// Name clashes and unreadable files are checked when it's written.
+    pub fn problem(&self) -> Option<&'static str> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Some("Give the context a name.");
+        }
+        if name.chars().any(char::is_control) {
+            return Some("The name can't contain control characters.");
+        }
+        let server = self.server.trim();
+        if server.is_empty() {
+            return Some("Enter the API server's URL.");
+        }
+        let Some(host) = server.strip_prefix("https://").or_else(|| server.strip_prefix("http://")) else {
+            return Some("The server's URL starts with https:// (or http://).");
+        };
+        if host.is_empty() || host.starts_with('/') || host.contains(char::is_whitespace) {
+            return Some("The server's URL needs a host, e.g. https://10.0.0.1:6443.");
+        }
+        if self.insecure_skip_tls_verify && !self.certificate_authority.trim().is_empty() {
+            return Some("Use a CA certificate or skip TLS verification, not both.");
+        }
+        let proxy = self.proxy_url.trim();
+        if !proxy.is_empty() && !["http://", "https://", "socks5://"].iter().any(|p| proxy.starts_with(p)) {
+            return Some("The proxy URL starts with http://, https:// or socks5://.");
+        }
+        match &self.auth {
+            ClusterAuth::None => None,
+            ClusterAuth::Token { token } if token.trim().is_empty() => Some("Enter the token."),
+            ClusterAuth::ClientCertificate { certificate, key } if certificate.trim().is_empty() || key.trim().is_empty() => {
+                Some("Enter the client certificate and its key.")
+            }
+            ClusterAuth::Exec { command, .. } if command.trim().is_empty() => Some("Enter the plugin's command."),
+            _ => None,
+        }
+    }
+}
+
+/// A cloud whose CLI writes kubeconfig entries for its clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudProvider {
+    /// Google Kubernetes Engine, through `gcloud`.
+    Gke,
+    /// Amazon EKS, through `aws`.
+    Eks,
+    /// Azure Kubernetes Service, through `az`.
+    Aks,
+}
+
+/// Where a provider's clusters are listed from: a Google Cloud project, an
+/// AWS profile or an Azure subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudAccount {
+    pub id: String,
+    /// For people, e.g. the project's or subscription's display name.
+    pub label: String,
+    /// AWS: the profile's region, if it has one.
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudAccounts {
+    pub accounts: Vec<CloudAccount>,
+    /// The CLI's own default (active project, default subscription, AWS_PROFILE).
+    pub default: Option<String>,
+    /// AWS: the default credentials' region, if set.
+    pub region: Option<String>,
+}
+
+/// A cluster a provider's CLI listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudCluster {
+    pub name: String,
+    /// GKE: zone or region; EKS and AKS: region.
+    pub location: String,
+    /// AKS: the resource group; empty elsewhere.
+    pub group: String,
+    /// Kubernetes version, when listed.
+    pub version: String,
+    /// e.g. `RUNNING`, `Succeeded`; empty when not listed.
+    pub status: String,
+    /// Its API server as the CLI reports it (a URL or a bare host); empty if unknown.
+    #[serde(default)]
+    pub server: String,
+    /// The name the CLI gives its kubeconfig cluster entry (GKE:
+    /// `gke_<project>_<location>_<name>`; EKS: its ARN); empty if unknown.
+    #[serde(default)]
+    pub entry: String,
+}
+
+/// A cluster just added to the kubeconfig.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedCluster {
+    pub context: String,
+    /// What the provider's CLI printed (notes about auth plugins, say).
+    pub output: String,
+}
+
+/// A context as File › Manage Clusters… lists it: where it lives and what
+/// it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedContext {
+    pub name: String,
+    /// Its cluster and user entries' names ("" if none).
+    pub cluster: String,
+    pub user: String,
+    /// The cluster's API server ("" if the cluster entry is missing).
+    pub server: String,
+    /// The cloud it looks to be in, from the server's host or the user's
+    /// exec plugin; `None` for any other Kubernetes.
+    pub provider: Option<CloudProvider>,
+    /// The kubeconfig file it's in. A context only moves among the others in its file.
+    pub file: String,
+}
+
+/// Every context in the merged kubeconfig, in the order kubectl reads them
+/// (file by file, each in its own order); a name in two files counts once,
+/// from the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedContexts {
+    pub contexts: Vec<ManagedContext>,
+    /// The kubeconfig files, in `$KUBECONFIG` order.
+    pub files: Vec<String>,
+    /// The kubeconfig's `current-context`.
+    pub current: Option<String>,
+}
+
+/// What removing a context took out of its kubeconfig file. Its cluster and
+/// user go too, unless another context still uses them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedContext {
+    pub context: String,
+    pub cluster: Option<String>,
+    pub user: Option<String>,
+}
+
+pub mod cluster_events {
+    /// To every main window after the kubeconfig's contexts were added, removed or reordered.
+    pub const CONTEXTS_CHANGED: &str = "contexts-changed";
+    /// To each main window when the contexts the other main windows are on
+    /// change (payload: their names), so it won't remove one of them.
+    pub const IN_USE_ELSEWHERE: &str = "contexts-in-use-elsewhere";
+    /// To a main window whose context was removed from the kubeconfig
+    /// outside the app (payload: [`super::ContextRemoved`]).
+    pub const CONTEXT_REMOVED: &str = "context-removed";
+    /// To the one main window left open when the kubeconfig has no contexts.
+    pub const NO_CONTEXTS: &str = "no-contexts";
+}
+
+/// A window's context is gone from the kubeconfig: it moves to `switch_to`
+/// (kubectl's current context, else the first).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRemoved {
+    pub removed: String,
+    pub switch_to: String,
 }
 
 #[cfg(test)]

@@ -19,9 +19,9 @@ pub(crate) fn err(e: impl std::fmt::Display) -> String {
 
 /// Re-reads the kubeconfig every time so external edits show up.
 #[tauri::command]
-pub fn list_contexts(state: Win) -> CmdResult<ContextList> {
+pub fn list_contexts(app_state: tauri::State<'_, crate::AppState>, state: Win) -> CmdResult<ContextList> {
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
-    Ok(contexts::list_contexts(&kubeconfig, &state.gate))
+    Ok(contexts::list_contexts(&kubeconfig, &state.gate, &app_state.prod.lock().unwrap()))
 }
 
 /// How long discovering a cluster's kinds and namespaces may take once it
@@ -37,6 +37,10 @@ pub(crate) const SUPERSEDED: &str = "superseded by a newer connection";
 pub async fn connect<R: Runtime>(app: AppHandle<R>, state: Win, context: String) -> CmdResult<ClusterInfo> {
     state.stop_watch();
     let attempt = state.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+    let changed = state.chosen.lock().unwrap().replace(context.clone()).as_ref() != Some(&context);
+    if changed {
+        crate::add_cluster::in_use_changed(&app);
+    }
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
     let client = contexts::client_for(&kubeconfig, &context).await.map_err(err)?;
     open_session(&app, &state, context, client, attempt).await

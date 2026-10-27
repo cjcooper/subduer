@@ -1,4 +1,7 @@
 mod about;
+mod add_cluster;
+mod clusters;
+mod context_picker;
 mod app;
 mod browser;
 mod capture;

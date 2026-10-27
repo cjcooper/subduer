@@ -137,7 +137,8 @@
   }
   const leave = params.get('leave');
   const fire = (n, payload) => (listeners[n] || []).forEach((cb) => cb({ payload }));
-  const pick = (sel, v) => { const el = document.querySelectorAll('.topbar select')[sel]; if (!el) return; el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+  const pick = (v) => { const el = document.querySelector('.topbar select'); if (!el) return; el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+  const pickContext = (v) => { document.querySelector('.context-button')?.click(); [...document.querySelectorAll('.context-option')].find((o) => o.querySelector('.context-name')?.textContent === v)?.click(); };
   const leaves = {
     row: () => [...document.querySelectorAll('tbody tr')].find((r) => r.textContent.includes('other'))?.click(),
     close: () => document.querySelector('.detail .close')?.click(),
@@ -145,8 +146,8 @@
     kind: () => btn('button.kind', 'Lease')?.click(),
     refresh: () => btn('.tabs button', 'Refresh')?.click(),
     link: () => document.querySelector('.itable tbody tr.clickable')?.click(),
-    ns: () => pick(1, 'acme'),
-    context: () => pick(0, ctxName),
+    ns: () => pick('acme'),
+    context: () => pickContext(ctxName),
     cancel: () => btn('.dsection-actions button', 'Cancel')?.click(),
     window: () => fire('unsaved-close', false),
     quit: () => fire('unsaved-close', true),
@@ -159,7 +160,7 @@
     const prompt = !!document.querySelector('.modal h2')?.textContent.includes('Discard');
     const editing = !!document.querySelector('.data-value-input');
     const tab = document.querySelector('.tabs .tab.active')?.textContent || '-';
-    const ns = document.querySelectorAll('.topbar select')[1]?.value;
+    const ns = document.querySelector('.topbar select')?.value;
     document.title = `unsaved=${unsaved} prompt=${prompt} editing=${editing} selected=${sel} tab=${tab} ns=${ns || 'all'} closed=${closed}`;
   }, 3800);
 })();

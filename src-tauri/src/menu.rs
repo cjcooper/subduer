@@ -1,7 +1,8 @@
 //! The app menu: Tauri's default, with an About item that opens our own About
 //! window (the app, its license and every third-party license; the system's
 //! About box can't hold them, and on Windows it's a plain message box), a
-//! Settings… item (⌘, / Ctrl+,), File › New Window (⌘N / Ctrl+N), a Trace…
+//! Settings… item (⌘, / Ctrl+,), File › New Window (⌘N / Ctrl+N), File ›
+//! Manage Clusters… (the only place it is), a Trace…
 //! item under Window, and our own Quit item on every system (⌘Q, Ctrl+Q on
 //! Linux, Exit / Alt+F4 on Windows), so quitting can be held.
 
@@ -13,11 +14,14 @@ const SETTINGS_ID: &str = "settings";
 const QUIT_ID: &str = "quit";
 const TRACE_ID: &str = "trace";
 const NEW_WINDOW_ID: &str = "new-window";
+const MANAGE_CLUSTERS_ID: &str = "manage-clusters";
 const ABOUT_ID: &str = "about";
 /// Sent to the focused main window to open its Settings dialog.
 pub const OPEN_SETTINGS: &str = "open-settings";
 /// Sent to the focused main window to open the trace dialog (start, or its running one).
 pub const OPEN_TRACE: &str = "open-trace";
+/// Sent to the focused main window to open its Manage Clusters dialog.
+pub const OPEN_MANAGE_CLUSTERS: &str = "open-manage-clusters";
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
@@ -61,15 +65,17 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         sub.append(&PredefinedMenuItem::separator(app)?)?;
         sub.append(&trace)?;
     }
-    // New Window: first in File.
+    // New Window, then Manage Clusters…: first in File.
     let file_menu = menu.items()?.into_iter().find_map(|item| match item {
         MenuItemKind::Submenu(sub) if sub.text().is_ok_and(|t| t == "File") => Some(sub),
         _ => None,
     });
     if let Some(file) = file_menu {
         let new_window = MenuItem::with_id(app, NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+N"))?;
+        let manage_clusters = MenuItem::with_id(app, MANAGE_CLUSTERS_ID, "Manage Clusters…", true, None::<&str>)?;
         file.insert(&new_window, 0)?;
-        file.insert(&PredefinedMenuItem::separator(app)?, 1)?;
+        file.insert(&manage_clusters, 1)?;
+        file.insert(&PredefinedMenuItem::separator(app)?, 2)?;
     }
     app.on_menu_event(|app, event| {
         if event.id() == ABOUT_ID {
@@ -84,7 +90,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             // Goes through `RunEvent::ExitRequested`, which holds for unsaved
             // edits and a running trace.
             app.exit(0);
-        } else if let Some(name) = [(SETTINGS_ID, OPEN_SETTINGS), (TRACE_ID, OPEN_TRACE)]
+        } else if let Some(name) = [(SETTINGS_ID, OPEN_SETTINGS), (TRACE_ID, OPEN_TRACE), (MANAGE_CLUSTERS_ID, OPEN_MANAGE_CLUSTERS)]
             .iter()
             .find(|(id, _)| event.id() == *id)
             .map(|(_, name)| *name)

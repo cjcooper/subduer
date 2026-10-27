@@ -221,3 +221,48 @@ fn details_payloads_round_trip() {
     let old: WorkloadDetails = serde_json::from_value(v).unwrap();
     assert!(old.jobs.is_empty() && old.suspended.is_none());
 }
+
+fn new_cluster() -> NewCluster {
+    NewCluster {
+        name: "lab".into(),
+        server: "https://10.0.0.1:6443".into(),
+        certificate_authority: String::new(),
+        insecure_skip_tls_verify: false,
+        proxy_url: String::new(),
+        auth: ClusterAuth::Token { token: "t".into() },
+        namespace: String::new(),
+        make_current: false,
+    }
+}
+
+#[test]
+fn new_cluster_problems() {
+    assert_eq!(new_cluster().problem(), None);
+    let with = |f: fn(&mut NewCluster)| {
+        let mut c = new_cluster();
+        f(&mut c);
+        c.problem()
+    };
+    assert!(with(|c| c.name = "  ".into()).is_some_and(|p| p.contains("name")));
+    assert!(with(|c| c.server = "10.0.0.1:6443".into()).is_some_and(|p| p.contains("https://")));
+    assert!(with(|c| c.server = "https://".into()).is_some_and(|p| p.contains("host")));
+    assert_eq!(with(|c| c.server = "http://localhost:8080".into()), None);
+    assert!(with(|c| {
+        c.insecure_skip_tls_verify = true;
+        c.certificate_authority = "/ca.crt".into();
+    })
+    .is_some_and(|p| p.contains("not both")));
+    assert!(with(|c| c.proxy_url = "localhost:3128".into()).is_some());
+    assert_eq!(with(|c| c.proxy_url = "socks5://localhost:1080".into()), None);
+    assert!(with(|c| c.auth = ClusterAuth::Token { token: " ".into() }).is_some());
+    assert!(with(|c| c.auth = ClusterAuth::ClientCertificate { certificate: "/a".into(), key: String::new() }).is_some());
+    assert!(with(|c| c.auth = ClusterAuth::Exec { command: String::new(), args: vec![] }).is_some());
+    assert_eq!(with(|c| c.auth = ClusterAuth::None), None);
+}
+
+#[test]
+fn cloud_provider_wire_names() {
+    assert_eq!(serde_json::to_string(&CloudProvider::Gke).unwrap(), "\"gke\"");
+    let auth: ClusterAuth = serde_json::from_str(r#"{"kind":"client_certificate","certificate":"a","key":"b"}"#).unwrap();
+    assert_eq!(auth, ClusterAuth::ClientCertificate { certificate: "a".into(), key: "b".into() });
+}

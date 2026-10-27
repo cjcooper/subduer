@@ -118,8 +118,8 @@
   if (params.get('quit') || params.get('close')) step(() => emit('unsaved-close', !!params.get('quit')));
   if (params.get('switch')) {
     step(() => {
-      const select = document.querySelector('.topbar select');
-      if (select) { select.value = 'acme-prd'; select.dispatchEvent(new Event('change', { bubbles: true })); }
+      document.querySelector('.context-button')?.click();
+      [...document.querySelectorAll('.context-option')].find((o) => o.querySelector('.context-name')?.textContent === 'acme-prd')?.click();
     });
   }
   if (params.get('confirm')) step(() => document.querySelector('.modal .danger')?.click());

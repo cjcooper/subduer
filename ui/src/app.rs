@@ -21,6 +21,9 @@ pub(crate) enum DetailTab {
 /// Backend event: the Settings… menu item was chosen.
 const OPEN_SETTINGS: &str = "open-settings";
 
+/// Backend event: File › Manage Clusters… was chosen.
+const OPEN_MANAGE_CLUSTERS: &str = "open-manage-clusters";
+
 /// Backend event: closing the window or quitting was held for unsaved edits.
 const UNSAVED_CLOSE: &str = "unsaved-close";
 
@@ -56,6 +59,11 @@ pub(crate) struct Store {
     /// `overview::MAX_FAILURES`.
     pub(crate) overview_failures: RwSignal<u32>,
     pub(crate) error: RwSignal<Option<String>>,
+    /// Something the app did on its own that the user should know about
+    /// (a context removed outside it, say); dismissed with a click.
+    pub(crate) notice: RwSignal<Option<String>>,
+    /// The kubeconfig has no contexts: the page says so and Add Cluster opens.
+    pub(crate) no_clusters: RwSignal<bool>,
     pub(crate) kind: RwSignal<Option<KindRef>>,
     /// `None` = all namespaces. Kept when switching kinds.
     pub(crate) namespace: RwSignal<Option<String>>,
@@ -123,6 +131,13 @@ pub(crate) struct Store {
     pub(crate) pending_new_namespace: RwSignal<bool>,
     /// The Settings dialog is open, and the Appearance setting.
     pub(crate) settings_open: RwSignal<bool>,
+    /// The Manage Clusters dialog is open (File › Manage Clusters…), and its
+    /// Add Cluster dialog on top of it.
+    pub(crate) clusters_open: RwSignal<bool>,
+    pub(crate) add_cluster_open: RwSignal<bool>,
+    /// The contexts other main windows are on (the backend says), which
+    /// can't be removed.
+    pub(crate) in_use_elsewhere: RwSignal<Vec<String>>,
     pub(crate) theme: RwSignal<crate::prefs::Theme>,
     /// Settings › Transparency, and whether the system has a material for it
     /// (the backend says; until then, no).
@@ -241,6 +256,11 @@ impl Store {
             object: RwSignal::new(None),
             editing: RwSignal::new(false),
             settings_open: RwSignal::new(false),
+            clusters_open: RwSignal::new(false),
+            in_use_elsewhere: RwSignal::new(vec![]),
+            notice: RwSignal::new(None),
+            no_clusters: RwSignal::new(false),
+            add_cluster_open: RwSignal::new(false),
             new_namespace: RwSignal::new(false),
             pending_new_namespace: RwSignal::new(false),
             theme: RwSignal::new(theme),
@@ -297,8 +317,16 @@ impl Store {
         self.overview_open.get() || self.node_page()
     }
 
-    async fn refresh_contexts(self) {
+    pub(crate) async fn refresh_contexts(self) {
         match invoke::<_, ContextList>("list_contexts", &NoArgs {}).await {
+            // A context appeared while there were none (added here, or with
+            // kubectl): connect to kubectl's current one, else the first.
+            Ok(list) if self.no_clusters.get_untracked() && !list.contexts.is_empty() => {
+                self.no_clusters.set(false);
+                let ctx = list.current.clone().filter(|c| list.contexts.iter().any(|x| x.name == *c)).unwrap_or_else(|| list.contexts[0].name.clone());
+                self.contexts.set(list.contexts);
+                spawn_local(self.connect(ctx));
+            }
             Ok(list) => {
                 if self.context.get_untracked().is_none() {
                     self.context.set(list.current.clone());
@@ -309,7 +337,7 @@ impl Store {
         }
     }
 
-    async fn connect(self, context: String) {
+    pub(crate) async fn connect(self, context: String) {
         #[derive(Serialize)]
         struct Args<'a> {
             context: &'a str,
@@ -402,6 +430,25 @@ impl Store {
         });
     }
 
+    /// The kubeconfig has no contexts left (the backend closed the other
+    /// windows): forget this one's cluster and offer Add Cluster.
+    pub(crate) fn no_contexts(self) {
+        self.generation.update(|g| *g += 1);
+        self.connecting.set(false);
+        self.disconnected.set(None);
+        self.cluster.set(None);
+        self.table.set(None);
+        self.overview.set(None);
+        self.overview_error.set(None);
+        self.selected.set(None);
+        self.namespace.set(None);
+        self.context.set(None);
+        self.contexts.set(vec![]);
+        self.no_clusters.set(true);
+        self.clusters_open.set(false);
+        self.add_cluster_open.set(true);
+    }
+
     /// Stops the watch and refreshes. The selection and detail panel stay,
     /// so unsaved edits there aren't dropped; Connect asks about them.
     fn lose(self, reason: String) {
@@ -443,6 +490,32 @@ pub fn App() -> impl IntoView {
         .await;
         listen::<Vec<ForwardInfo>>(subduer_types::forward_events::CHANGED, move |list| store.forwards.set(list)).await;
         listen::<()>(OPEN_SETTINGS, move |()| store.settings_open.set(true)).await;
+        listen::<()>(OPEN_MANAGE_CLUSTERS, move |()| store.clusters_open.set(true)).await;
+        listen::<Vec<String>>(subduer_types::cluster_events::IN_USE_ELSEWHERE, move |names| store.in_use_elsewhere.set(names)).await;
+        // This window's context was deleted outside the app (kubectl, an editor):
+        // move to the one the backend picked, as if chosen from the menu.
+        listen::<subduer_types::ContextRemoved>(subduer_types::cluster_events::CONTEXT_REMOVED, move |moved| {
+            store.notice.set(Some(format!(
+                "“{}” was removed from your kubeconfig, so this window moved to “{}”.",
+                moved.removed, moved.switch_to
+            )));
+            spawn_local(async move {
+                store.refresh_contexts().await;
+                let to = moved.switch_to;
+                crate::trace::before_switch(store, to.clone(), move || guard(store, move || spawn_local(store.connect(to))));
+            });
+        })
+        .await;
+        listen::<()>(subduer_types::cluster_events::NO_CONTEXTS, move |()| {
+            store.notice.set(Some("Your kubeconfig has no contexts left. Add a cluster to carry on.".into()));
+            store.no_contexts();
+        })
+        .await;
+        // A window added, removed or reordered the kubeconfig's contexts.
+        listen::<()>(subduer_types::cluster_events::CONTEXTS_CHANGED, move |()| {
+            spawn_local(async move { store.refresh_contexts().await });
+        })
+        .await;
         // An edit window saved: refresh what's shown of that object, and the
         // contexts (the edit window may have allowed changes).
         listen::<subduer_types::EditTarget>(subduer_types::edit_events::SAVED, move |target| {
@@ -476,8 +549,14 @@ pub fn App() -> impl IntoView {
         .await;
         crate::trace::listen_events(store).await;
         crate::forward::load(store);
+        if let Ok(names) = invoke::<_, Vec<String>>("contexts_in_use_elsewhere", &NoArgs {}).await {
+            store.in_use_elsewhere.set(names);
+        }
         store.refresh_contexts().await;
-        if let Some(ctx) = store.context.get_untracked() {
+        if store.contexts.with_untracked(Vec::is_empty) {
+            store.no_clusters.set(true);
+            store.add_cluster_open.set(true);
+        } else if let Some(ctx) = store.context.get_untracked() {
             store.connect(ctx).await;
         }
     });
@@ -593,6 +672,8 @@ pub fn App() -> impl IntoView {
                         view! { <crate::trace_review::TracesPage store=store /> }.into_any()
                     } else if store.forwards_open.get() {
                         view! { <crate::forward::ForwardsPage store=store /> }.into_any()
+                    } else if store.no_clusters.get() {
+                        view! { <NoClusters /> }.into_any()
                     } else if store.disconnected.with(Option::is_some) {
                         view! { <Disconnected store=store /> }.into_any()
                     } else if store.overview_open.get() {
@@ -608,6 +689,8 @@ pub fn App() -> impl IntoView {
             <crate::workload::WorkloadDialog store=store />
             <DiscardDialog store=store />
             <SettingsDialog store=store />
+            <crate::clusters::ManageClustersDialog store=store />
+            <crate::add_cluster::AddClusterDialog store=store />
             <crate::namespace::NewNamespaceDialog store=store />
             <crate::forward::ForwardDialog store=store />
             <crate::upload::UploadDialog store=store />
@@ -618,9 +701,25 @@ pub fn App() -> impl IntoView {
             <crate::trace::TraceSwitchDialog store=store />
             <crate::rightsize::ApplyDialog store=store />
             <crate::capture::CaptureDialog store=store />
+            {move || store.notice.get().map(|n| view! {
+                <div class="notice-bar" role="status" on:click=move |_| store.notice.set(None)>{n}<span class="dismiss">"×"</span></div>
+            })}
             {move || store.error.get().map(|e| view! {
                 <div class="error-bar" on:click=move |_| store.error.set(None)>{e}<span class="dismiss">"×"</span></div>
             })}
+        </div>
+    }
+}
+
+/// Shown instead of the page when the kubeconfig has no contexts.
+#[component]
+fn NoClusters() -> impl IntoView {
+    view! {
+        <div class="disconnected">
+            <h1>"No clusters"</h1>
+            <p class="muted">
+                "Your kubeconfig has no contexts. Add one with File › Manage Clusters…, or with kubectl or your cloud's CLI: it shows up here as soon as it's added."
+            </p>
         </div>
     }
 }
@@ -652,18 +751,6 @@ fn Disconnected(store: Store) -> impl IntoView {
 fn TopBar(store: Store) -> impl IntoView {
     // A change held by the discard prompt shows the old choice until the
     // user discards.
-    let on_context = move |ev: leptos::ev::Event| {
-        let select = event_target::<web_sys::HtmlSelectElement>(&ev);
-        let ctx = select.value();
-        select.set_value(&store.context.get_untracked().unwrap_or_default());
-        // A trace of the current context stops first; then unsaved edits ask.
-        crate::trace::before_switch(store, ctx.clone(), move || {
-            guard(store, move || {
-                select.set_value(&ctx);
-                spawn_local(store.connect(ctx));
-            });
-        });
-    };
     let on_namespace = move |ev: leptos::ev::Event| {
         let select = event_target::<web_sys::HtmlSelectElement>(&ev);
         let ns = select.value();
@@ -677,23 +764,10 @@ fn TopBar(store: Store) -> impl IntoView {
     view! {
         <header class="topbar">
             <span class="brand">"k8s-subduer"</span>
-            <label class="field">
-                "Context"
-                // Stays enabled while connecting, so a context that doesn't
-                // answer can be left without waiting for it to time out.
-                <select on:change=on_context>
-                    <For
-                        each=move || store.contexts.get()
-                        key=|c| c.name.clone()
-                        children=move |c| {
-                            let name = c.name.clone();
-                            let selected = move || store.context.get().as_deref() == Some(name.as_str());
-                            let label = if c.prod_like { format!("{} ⚠", c.name) } else { c.name.clone() };
-                            view! { <option value=c.name.clone() selected=selected>{label}</option> }
-                        }
-                    />
-                </select>
-            </label>
+            <div class="field">
+                <span id="context-label">"Context"</span>
+                <crate::context_picker::ContextPicker store=store />
+            </div>
             // The Cluster and Node pages are cluster-wide, so the namespace means nothing there.
             <Show when=move || !store.needs_overview()>
                 <label class="field">

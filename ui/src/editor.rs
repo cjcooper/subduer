@@ -554,7 +554,7 @@ pub fn EditorApp(label: String) -> impl IntoView {
                 <div class="editor-title">
                     <span class="logs-heading" title=heading>{heading}</span>
                     {move || session.get().and_then(Result::ok).map(|s| view! {
-                        <span class="chip" class:prod-chip=s.prod_like>{if s.prod_like { format!("{} ⚠", s.context) } else { s.context.clone() }}</span>
+                        <span class="chip icon-chip" class:prod-chip=s.prod_like>{s.context.clone()}{s.prod_like.then(|| view! { <crate::icons::ProdIcon /> })}</span>
                         {(!s.unlocked).then(|| view! { <span class="chip icon-chip"><crate::icons::LockIcon />"read-only"</span> })}
                     })}
                 </div>

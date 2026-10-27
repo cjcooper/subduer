@@ -1,4 +1,6 @@
 use super::*;
+use crate::safety::ProdMarks;
+use crate::types::CloudProvider;
 
 const KUBECONFIG: &str = r#"
 apiVersion: v1
@@ -44,7 +46,7 @@ fn kubeconfig() -> Kubeconfig {
 fn lists_contexts_with_prod_and_unlock_flags() {
     let gate = SafetyGate::default();
     gate.set_unlocked("acme-prd", true);
-    let list = list_contexts(&kubeconfig(), &gate);
+    let list = list_contexts(&kubeconfig(), &gate, &ProdMarks::default());
     assert_eq!(list.current.as_deref(), Some("acme-uat"));
     let names: Vec<&str> = list.contexts.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["acme-uat", "acme-prd", "ops", "dangling", "bare"]);
@@ -69,8 +71,37 @@ fn lists_contexts_with_prod_and_unlock_flags() {
 }
 
 #[test]
+fn says_which_cloud_each_context_is_in() {
+    let config = Kubeconfig::from_yaml(
+        "
+clusters:
+- name: eks
+  cluster: {server: 'https://ABC.gr7.eu-west-1.eks.amazonaws.com'}
+- name: lab
+  cluster: {server: 'https://10.0.0.1:6443'}
+users:
+- name: azure
+  user:
+    exec: {command: kubelogin, apiVersion: client.authentication.k8s.io/v1beta1}
+contexts:
+- name: shop
+  context: {cluster: eks}
+- name: aks
+  context: {cluster: lab, user: azure}
+- name: lab
+  context: {cluster: lab}
+",
+    )
+    .unwrap();
+    let list = list_contexts(&config, &SafetyGate::default(), &ProdMarks::default());
+    let providers: Vec<_> = list.contexts.iter().map(|c| c.provider).collect();
+    assert_eq!(providers, [Some(CloudProvider::Eks), Some(CloudProvider::Aks), None]);
+    assert_eq!(list_contexts(&kubeconfig(), &SafetyGate::default(), &ProdMarks::default()).contexts[0].provider, None);
+}
+
+#[test]
 fn empty_kubeconfig_lists_nothing() {
-    let list = list_contexts(&Kubeconfig::default(), &SafetyGate::default());
+    let list = list_contexts(&Kubeconfig::default(), &SafetyGate::default(), &ProdMarks::default());
     assert!(list.contexts.is_empty());
     assert_eq!(list.current, None);
 }

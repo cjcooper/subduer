@@ -487,7 +487,7 @@ fn contexts_come_from_the_kubeconfig() {
     unsafe { std::env::set_var("KUBECONFIG", &path) };
     let app = app();
     commands::set_unlocked(w(&app), "acme-uat".into(), true);
-    let list = commands::list_contexts(w(&app)).unwrap();
+    let list = commands::list_contexts(app.state(), w(&app)).unwrap();
     assert_eq!(list.current.as_deref(), Some("acme-uat"));
     let uat = list.contexts.iter().find(|c| c.name == "acme-uat").unwrap();
     let prd = list.contexts.iter().find(|c| c.name == "acme-prd").unwrap();
@@ -799,4 +799,29 @@ fn about_carries_every_license() {
     }
     // Our own crates aren't third-party.
     assert!(!info.notices.contains("\n  subduer-"));
+}
+
+#[test]
+fn knows_which_contexts_other_windows_are_on() {
+    let app = app();
+    let state = app.state::<AppState>();
+    *w(&app).chosen.lock().unwrap() = Some("acme-uat".into());
+    *state.add_window("main-2").chosen.lock().unwrap() = Some("acme-prd".into());
+    state.add_window("main-3");
+    assert_eq!(state.in_use_elsewhere(MAIN_LABEL), ["acme-prd"]);
+    assert_eq!(state.in_use_elsewhere("main-3"), ["acme-prd", "acme-uat"]);
+    assert_eq!(crate::add_cluster::contexts_in_use_elsewhere(app.state(), w(&app)), ["acme-prd"]);
+}
+
+#[tokio::test]
+async fn wont_remove_a_context_a_window_is_on() {
+    let app = app();
+    // Picked in another window, still connecting: no session yet.
+    *app.state::<AppState>().add_window("main-2").chosen.lock().unwrap() = Some("acme-prd".into());
+    let err = crate::add_cluster::remove_context(app.handle().clone(), "acme-prd".into()).await.unwrap_err();
+    assert!(err.contains("Switch it to another context first"), "{err}");
+    // Connected in this one.
+    *w(&app).session.write().await = Some(Session { context: CTX.into(), client: MockApi::new().client(), history: Default::default() });
+    let err = crate::add_cluster::remove_context(app.handle().clone(), CTX.into()).await.unwrap_err();
+    assert!(err.contains(CTX), "{err}");
 }
