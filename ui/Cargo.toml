@@ -1,6 +1,6 @@
 [package]
 name = "subduer-ui"
-description = "Leptos (WASM) frontend for k8s-subduer"
+description = "Leptos (WASM) frontend for Subduer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

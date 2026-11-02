@@ -1,4 +1,4 @@
-# k8s-subduer
+# Subduer
 
 Desktop app for browsing and controlling Kubernetes clusters, on macOS, Linux and Windows.
 Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.

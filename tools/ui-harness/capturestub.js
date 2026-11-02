@@ -23,7 +23,7 @@
   const session = {
     context: 'acme-uat', namespace: 'apps', pod: 'acme-limited', container: 'subduer-capture-1791804344', image: 'ecr.example/netshoot:latest',
     filter: { traffic: 'All', handshakes_only: true }, expression: 'tcp and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16', secs: 300,
-    path: '/Users/me/Library/Application Support/k8s-subduer/captures/apps-acme-limited-2026-10-12-120000.pcap',
+    path: '/Users/me/Library/Application Support/com.it-problems.k8s-subduer/captures/apps-acme-limited-2026-10-12-120000.pcap',
     pod_ips: ['10.0.1.9'], event: 'capture-1', update: update('Starting'),
   };
   const emit = (u) => (listeners[session.event] || []).forEach((cb) => cb({ payload: u }));

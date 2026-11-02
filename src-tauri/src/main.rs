@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    k8s_subduer_lib::run()
+    subduer_lib::run()
 }
