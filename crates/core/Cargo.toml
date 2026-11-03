@@ -1,6 +1,6 @@
 [package]
 name = "subduer-core"
-description = "Kubernetes access for k8s-subduer: contexts, discovery, watches, actions, safety gate"
+description = "Kubernetes access for Subduer: contexts, discovery, watches, actions, safety gate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

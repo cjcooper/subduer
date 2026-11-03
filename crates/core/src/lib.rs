@@ -1,4 +1,4 @@
-//! Cluster access for k8s-subduer, independent of any UI.
+//! Cluster access for Subduer, independent of any UI.
 
 pub mod actions;
 pub mod add_cluster;

@@ -2,8 +2,8 @@
 //!
 //! Linux desktops find a window's icon through its desktop entry. On Wayland
 //! (KDE Plasma, GNOME) the window carries no icon, only an app id: GTK uses
-//! the binary name, `k8s-subduer`, and the compositor looks up
-//! `k8s-subduer.desktop` for the icon. The .deb and .rpm install that entry; a
+//! the binary name, `subduer`, and the compositor looks up
+//! `subduer.desktop` for the icon. The .deb and .rpm install that entry; a
 //! bare binary, an AppImage or `cargo tauri dev` don't, so those windows get a
 //! generic icon. For those runs this writes a user entry and icon under
 //! `$XDG_DATA_HOME`, marked so later runs can update or remove them.
@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// The Wayland app id and X11 `WM_CLASS` GTK gives the window: the binary name.
-pub const APP_ID: &str = "k8s-subduer";
+pub const APP_ID: &str = "subduer";
 const MARKER: &str = "X-Subduer-Generated=true";
 const ICON: &[u8] = include_bytes!("../icons/256x256.png");
 
@@ -97,7 +97,7 @@ fn render(exec: &Path, appimage: bool) -> String {
     let mut text = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=k8s-subduer\n\
+         Name=Subduer\n\
          Comment=Browse and control Kubernetes clusters\n\
          Exec={exec}\n\
          Icon={APP_ID}\n\
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn exec_paths_are_quoted_and_escaped() {
-        assert_eq!(exec_arg("/opt/k8s-subduer"), r#""/opt/k8s-subduer""#);
+        assert_eq!(exec_arg("/opt/subduer"), r#""/opt/subduer""#);
         assert_eq!(exec_arg("/home/a b/100%/x$y"), r#""/home/a b/100%%/x\\$y""#);
         assert_eq!(exec_arg(r#"/q"\"#), r#""/q\\"\\\\""#);
     }
@@ -155,11 +155,11 @@ mod tests {
     fn writes_entry_and_icon_when_nothing_is_installed() {
         let dir = scratch("fresh");
         let home = dir.join("home");
-        sync(&home, &[dir.join("usr")], Path::new("/tmp/k8s-subduer"), false).unwrap();
+        sync(&home, &[dir.join("usr")], Path::new("/tmp/subduer"), false).unwrap();
         let text = fs::read_to_string(entry_path(&home)).unwrap();
-        assert!(text.contains("Exec=\"/tmp/k8s-subduer\"\n"));
-        assert!(text.contains("Icon=k8s-subduer\n"));
-        assert!(text.contains("StartupWMClass=k8s-subduer\n"));
+        assert!(text.contains("Exec=\"/tmp/subduer\"\n"));
+        assert!(text.contains("Icon=subduer\n"));
+        assert!(text.contains("StartupWMClass=subduer\n"));
         assert!(text.contains("NoDisplay=true\n"));
         assert_eq!(fs::read(icon_path(&home)).unwrap(), ICON);
     }
@@ -179,10 +179,10 @@ mod tests {
     fn installed_package_replaces_generated_entry() {
         let dir = scratch("installed");
         let (home, usr) = (dir.join("home"), dir.join("usr"));
-        sync(&home, std::slice::from_ref(&usr), Path::new("/tmp/k8s-subduer"), false).unwrap();
+        sync(&home, std::slice::from_ref(&usr), Path::new("/tmp/subduer"), false).unwrap();
         fs::create_dir_all(usr.join("applications")).unwrap();
         fs::write(entry_path(&usr), "[Desktop Entry]\n").unwrap();
-        sync(&home, &[usr], Path::new("/usr/bin/k8s-subduer"), false).unwrap();
+        sync(&home, &[usr], Path::new("/usr/bin/subduer"), false).unwrap();
         assert!(!entry_path(&home).exists());
         assert!(!icon_path(&home).exists());
     }
@@ -193,7 +193,7 @@ mod tests {
         let home = dir.join("home");
         fs::create_dir_all(home.join("applications")).unwrap();
         fs::write(entry_path(&home), "[Desktop Entry]\nName=Mine\n").unwrap();
-        sync(&home, &[], Path::new("/tmp/k8s-subduer"), false).unwrap();
+        sync(&home, &[], Path::new("/tmp/subduer"), false).unwrap();
         assert_eq!(fs::read_to_string(entry_path(&home)).unwrap(), "[Desktop Entry]\nName=Mine\n");
     }
 }

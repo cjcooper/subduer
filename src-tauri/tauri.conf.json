@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "k8s-subduer",
+  "productName": "Subduer",
   "version": "0.1.0",
   "identifier": "com.it-problems.k8s-subduer",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "k8s-subduer",
+        "title": "Subduer",
         "create": false,
         "width": 1400,
         "height": 900,

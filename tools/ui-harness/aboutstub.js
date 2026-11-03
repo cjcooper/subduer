@@ -7,8 +7,8 @@
   try { localStorage.clear(); if (params.get('theme')) localStorage.setItem('appearance.theme', params.get('theme')); } catch (e) {}
   const rule = '='.repeat(80);
   const notices = [
-    'Third-party notices for k8s-subduer', '',
-    'k8s-subduer includes the software listed below. Each license is reproduced', 'with the crates it covers.', '',
+    'Third-party notices for Subduer', '',
+    'Subduer includes the software listed below. Each license is reproduced', 'with the crates it covers.', '',
     '  2 crate(s) under MIT License', '  1 crate(s) under Apache License 2.0', '',
     rule, 'MIT License', '', 'Used by:', '  serde 1.0.228 (https://github.com/serde-rs/serde)', '  tokio 1.48.0 (https://github.com/tokio-rs/tokio)', '',
     'Permission is hereby granted, free of charge, to any person obtaining a copy', 'of this software.', '',
@@ -20,7 +20,7 @@
     core: { invoke: async (cmd) => {
       if (cmd === 'about_info') {
         return {
-          name: 'k8s-subduer', version: '0.1.0', maker: 'it-problems', copyright: 'Copyright © 2026 it-problems',
+          name: 'Subduer', version: '0.1.0', maker: 'it-problems', copyright: 'Copyright © 2026 it-problems',
           license: 'MIT License\n\nCopyright (c) 2026 it-problems\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software.\n',
           notices,
         };

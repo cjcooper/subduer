@@ -356,7 +356,7 @@ fn render(
         }
         html.push_str("</section>");
     }
-    let _ = write!(html, "<footer class=\"muted small\">Made by k8s-subduer from {}. Times are {}.</footer></main><script>{JS}</script></body></html>", esc(file), esc(tz.iana_name().unwrap_or("local time")));
+    let _ = write!(html, "<footer class=\"muted small\">Made by Subduer from {}. Times are {}.</footer></main><script>{JS}</script></body></html>", esc(file), esc(tz.iana_name().unwrap_or("local time")));
     html
 }
 

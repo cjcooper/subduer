@@ -43,7 +43,7 @@ async fn main() -> subduer_core::Result<()> {
         file_name: "subduer check.txt".into(),
         overwrite,
     };
-    let data = b"hello from k8s-subduer\n";
+    let data = b"hello from Subduer\n";
     for (label, path, overwrite) in [
         ("dir with slash", "/tmp/", false),
         ("dir without slash (exists)", "/tmp", false),

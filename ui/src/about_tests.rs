@@ -1,8 +1,8 @@
 use super::*;
 
-const SAMPLE: &str = "Third-party notices for k8s-subduer
+const SAMPLE: &str = "Third-party notices for Subduer
 
-k8s-subduer includes the software listed below. Each license is reproduced
+Subduer includes the software listed below. Each license is reproduced
 with the crates it covers.
 
   2 crate(s) under MIT License

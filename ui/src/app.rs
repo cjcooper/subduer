@@ -763,7 +763,7 @@ fn TopBar(store: Store) -> impl IntoView {
 
     view! {
         <header class="topbar">
-            <span class="brand">"k8s-subduer"</span>
+            <span class="brand">"Subduer"</span>
             <div class="field">
                 <span id="context-label">"Context"</span>
                 <crate::context_picker::ContextPicker store=store />
