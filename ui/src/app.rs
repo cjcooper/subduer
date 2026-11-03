@@ -1007,7 +1007,6 @@ fn Sidebar(store: Store) -> impl IntoView {
                             c.insert(category);
                         }
                     });
-                    let count = kinds.len();
                     let is_dragging = move || store.dragging.get() == Some(category);
                     let is_target = move || {
                         store.drop_target.get() == Some(category) && store.dragging.get() != Some(category)
@@ -1049,7 +1048,6 @@ fn Sidebar(store: Store) -> impl IntoView {
                                 <crate::icons::Chevron open=Signal::derive(open) />
                                 <crate::icons::CategoryIcon category=category />
                                 <span class="kind-label">{category.label()}</span>
-                                <span class="section-count">{count}</span>
                             </button>
                             <Show when=open>
                                 {kind_list(store, category, kinds.clone())}

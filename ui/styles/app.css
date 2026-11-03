@@ -229,9 +229,7 @@ button, input, select { font: inherit; color: inherit; }
 .kind-section-title:hover .chevron, .dsection-title:hover .chevron { opacity: 1; }
 .nav-icon { flex-shrink: 0; width: 16px; height: 16px; opacity: 0.85; }
 .kind-section-title .nav-icon { width: 18px; height: 18px; }
-.kind-section-title .section-count { font-size: 12px; letter-spacing: 0; }
 .kind-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.section-count { margin-left: auto; font-weight: 400; }
 .kind-group-title {
   display: flex; align-items: center; gap: 6px;
   margin: 8px 10px 2px 28px; font-size: 11px; color: var(--muted);
