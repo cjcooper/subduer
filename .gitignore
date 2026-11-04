@@ -24,3 +24,7 @@ src-tauri/gen/schemas
 *~
 \#*\#
 .\#*
+
+# App Store Connect API keys (notarization)
+/private_keys/
+*.p8

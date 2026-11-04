@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Subduer",
-  "version": "0.1.0",
   "identifier": "com.it-problems.k8s-subduer",
   "build": {
     "beforeDevCommand": "trunk serve",

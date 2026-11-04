@@ -86,6 +86,7 @@ Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 w
 ```sh
 cargo tauri dev                       # run the app (Trunk serves the UI on :1420)
 cargo tauri build                     # this system's bundles in target/release/bundle (see "Building on each system")
+tools/build-signed.sh                 # signed + notarized macOS release: bumps version, commits, tags
 cargo test                            # backend tests: core, types and the Tauri commands (~400)
 cargo test -p subduer-ui              # UI logic tests on the host (~120)
 python3 tools/ui-harness/run_e2e.py   # the real UI in headless Chrome, 214 scenarios (~3 min)
@@ -124,7 +125,7 @@ Bugs the tests found (fixed): workload usage included pods the workload doesn't 
 
 | System | Bundles (in `target/release/bundle/`) | Notes |
 |---|---|---|
-| macOS | `macos/Subduer.app`, `dmg/*.dmg` | Minimum macOS 11; category Developer Tools. Built and checked here (2026-10-10, Apple Silicon). Unsigned and not notarized. |
+| macOS | `macos/Subduer.app`, `dmg/*.dmg` | Minimum macOS 11; category Developer Tools. Built and checked here (2026-10-10, Apple Silicon). Unsigned and not notarized; `tools/build-signed.sh` makes a signed, notarized release (README → Code signing). |
 | Linux | `deb/*.deb`, `rpm/*.rpm`, `appimage/*.AppImage` | Needs WebKitGTK 4.1 (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch). The AppImage step needs FUSE 2 (on Arch, `fuse2`), or `APPIMAGE_EXTRACT_AND_RUN=1`. On Arch, run the AppImage or the release binary; the `.deb` and `.rpm` are for those distributions. |
 | Windows | `nsis/*-setup.exe`, `msi/*.msi` | Tauri downloads NSIS and WiX itself. Release builds use the windows subsystem, so no console window. |
 
