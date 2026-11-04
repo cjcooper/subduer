@@ -4589,7 +4589,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "subduer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jiff",
  "objc2-app-kit",
@@ -4610,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4635,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4643,7 +4643,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
