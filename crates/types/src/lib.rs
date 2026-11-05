@@ -979,6 +979,10 @@ pub struct LogBatch {
 pub struct AboutInfo {
     pub name: String,
     pub version: String,
+    /// One line on what the app is for.
+    pub description: String,
+    /// Where the source code lives.
+    pub repository: String,
     pub maker: String,
     pub copyright: String,
     pub license: String,

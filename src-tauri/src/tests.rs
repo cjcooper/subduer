@@ -804,6 +804,8 @@ fn about_carries_every_license() {
     let info = crate::about::about_info(app.handle().clone());
     assert!(info.license.starts_with("MIT License"));
     assert_eq!(info.maker, crate::menu::MAKER);
+    assert!(info.description.contains("Kubernetes"));
+    assert!(info.repository.starts_with("https://"));
     // The crates the app is built on, and the vendored JavaScript.
     for name in ["\n  tauri ", "\n  kube ", "\n  leptos ", "Vendored JavaScript: ace", "Vendored JavaScript: xterm"] {
         assert!(info.notices.contains(name), "{name:?} missing from the notices");

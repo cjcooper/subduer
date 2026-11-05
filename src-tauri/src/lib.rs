@@ -339,6 +339,7 @@ pub fn run() {
             accent::system_accent,
             vibrancy::set_transparency,
             about::about_info,
+            about::close_about,
             commands::open_url,
             editor::open_editor,
             editor::editor_start,
