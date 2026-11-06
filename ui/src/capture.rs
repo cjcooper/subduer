@@ -91,7 +91,6 @@ pub(crate) fn CaptureDialog(store: Store) -> impl IntoView {
     let choice = RwSignal::new("all".to_owned());
     let handshakes = RwSignal::new(true);
     let custom = RwSignal::new(String::new());
-    let typed = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     // Each opening starts from the image last used on this context.
@@ -102,7 +101,6 @@ pub(crate) fn CaptureDialog(store: Store) -> impl IntoView {
             // Ports differ from pod to pod.
             choice.set("all".to_owned());
             handshakes.set(true);
-            typed.set(String::new());
             error.set(None);
         }
     });
@@ -115,15 +113,11 @@ pub(crate) fn CaptureDialog(store: Store) -> impl IntoView {
         let (namespace, pod) = store.capture_prompt.get()?;
         let ctx = store.current_context()?;
         let (locked, prod, name) = (!ctx.unlocked, ctx.prod_like, ctx.name.clone());
-        let ready = {
-            let name = name.clone();
-            move || {
-                !busy.get()
-                    && !locked
-                    && !image.with(|i| i.trim().is_empty())
-                    && !(choice.get() == "custom" && custom.with(|c| c.trim().is_empty()))
-                    && (!prod || typed.with(|t| t.trim() == name))
-            }
+        let ready = move || {
+            !busy.get()
+                && !locked
+                && !image.with(|i| i.trim().is_empty())
+                && !(choice.get() == "custom" && custom.with(|c| c.trim().is_empty()))
         };
         let start = {
             let (namespace, pod, context) = (namespace.clone(), pod.clone(), name.clone());
@@ -248,8 +242,7 @@ pub(crate) fn CaptureDialog(store: Store) -> impl IntoView {
                     </div>
                 })}
                 {(prod && !locked).then(|| view! {
-                    <p>{format!("{name} looks like production. Type its name to capture:")}</p>
-                    <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
+                    <p>{format!("{name} looks like production.")}</p>
                 })}
                 {move || error.get().map(|e| view! { <p class="warn-text">{e}</p> })}
                 <div class="modal-actions">

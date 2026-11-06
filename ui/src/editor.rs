@@ -635,8 +635,7 @@ fn EditorModal(
         }
         Modal::Confirm(lines) => {
             let (added, removed) = counts(&lines);
-            let name = s.target.name.clone();
-            let ok = move || !busy.get() && (!prod || typed.get().trim() == name);
+            let ok = move || !busy.get();
             let rows = lines
                 .into_iter()
                 .map(|l| match l {
@@ -654,8 +653,6 @@ fn EditorModal(
                         <div class="diff">{rows}</div>
                         {prod.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
-                            <p>"Type the name to confirm:"</p>
-                            <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
                         })}
                         <div class="modal-actions">
                             <button prop:disabled=move || busy.get() on:click=move |_| close()>"Back to editing"</button>

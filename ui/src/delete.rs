@@ -1,6 +1,7 @@
 //! Deleting the selected object: the header button and the confirmation
 //! dialog. The dialog names the object and context; production-like contexts
-//! and cascading kinds need the object's name typed out.
+//! are flagged (their name was typed when changes were allowed), and cascading
+//! kinds need the object's name typed out.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -108,7 +109,7 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
     move || {
         store.delete_prompt.get().map(|target| {
             let DeleteTarget { context, kind, row } = target.clone();
-            let must_type = context.prod_like || cascades(&kind);
+            let must_type = cascades(&kind);
             let ok = {
                 let name = row.name.clone();
                 move || !busy.get() && (!must_type || typed.get().trim() == name)
