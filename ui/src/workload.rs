@@ -3,7 +3,8 @@
 //! Edit range for HPAs, ScaledObjects and ScaledJobs, Pause/Resume for
 //! ScaledObjects and ScaledJobs, saving a ConfigMap's or Secret's edited
 //! data, and Force sync for ExternalSecrets and ClusterExternalSecrets.
-//! Gated like Delete, and production-like contexts need the object's name
+//! Gated like Delete; production-like contexts are flagged (their name was
+//! typed when changes were allowed), and Uninstall needs the release's name
 //! typed out.
 
 use leptos::prelude::*;
@@ -555,7 +556,6 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     move || {
         store.workload_prompt.get().map(|target| {
             let WorkloadTarget { context, kind, namespace, name, op, save } = target.clone();
-            let prod = context.prod_like;
             let replicas = move || wanted.get().trim().parse::<i32>().ok().filter(|n| *n >= 0);
             // KEDA can scale to zero; an HPA can't.
             let keda = is_keda_scaler(&kind);
@@ -590,7 +590,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 let grows = grows.clone();
                 move || {
                     // Deleting a whole release always needs the name typed.
-                    let typed_ok = !(prod || op == Op::Uninstall) || typed.get().trim() == name;
+                    let typed_ok = op != Op::Uninstall || typed.get().trim() == name;
                     let scale_ok = match op {
                         Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
                         Op::Range => range().is_some_and(|r| Some(r) != range_now()),
@@ -1002,7 +1002,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         {context.prod_like.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
                         })}
-                        {(context.prod_like || op == Op::Uninstall).then(|| view! {
+                        {(op == Op::Uninstall).then(|| view! {
                             <p>"Type the name to confirm:"</p>
                             <input
                                 class="confirm-input"

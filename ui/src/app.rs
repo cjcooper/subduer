@@ -830,6 +830,8 @@ fn LockToggle(store: Store) -> impl IntoView {
 }
 
 /// Confirms unlocking; production-like contexts must have their name typed out.
+/// That's the one typed confirmation they get: once writable, each change asks
+/// only for a plain OK.
 #[component]
 fn UnlockDialog(store: Store) -> impl IntoView {
     let typed = RwSignal::new(String::new());

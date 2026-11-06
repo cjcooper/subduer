@@ -83,7 +83,7 @@ Each system builds only its own bundles. `.github/workflows/build.yml` builds al
 - **Live tables.** Each table is backed by a Kubernetes watch, with snapshots throttled to 250 ms.
 - **Esc closes things.** Esc cancels the open dialog (never its risky action) or, with no dialog open, closes the detail panel. It leaves the panel alone while you type in a field, and asks first if you have unsaved edits.
 - **Light or dark.** Settings… (⌘,) shows previews of Light, Dark and, where the system reports one, Auto; pick one. Every window follows it.
-- **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name. All mutations go through `SafetyGate::ensure_writable`: Delete, Restart, Scale, Run now, Suspend/Resume, Save, Edit range, Expand, Reclaim policy, Rollback, release Delete, New namespace, Shell and Upload ask to unlock first.
+- **Read-only by default.** Every context starts locked. To unlock a production-like context (a name containing `prd`/`prod`/`production`/`live`), you have to type its name; that's the only typed confirmation it asks for. Once it's writable, each change there is confirmed with a plain OK (the dialog is still framed in red). All mutations go through `SafetyGate::ensure_writable`: Delete, Restart, Scale, Run now, Suspend/Resume, Save, Edit range, Expand, Reclaim policy, Rollback, release Delete, New namespace, Shell and Upload ask to unlock first.
 
 ## License
 

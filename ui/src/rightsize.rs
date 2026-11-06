@@ -1,7 +1,7 @@
 //! Applying a review's suggested requests: one change per workload (all its
 //! chosen containers, so it rolls out once), previewed with a server dry run,
-//! then applied through the safety gate. Production-like contexts need their
-//! name typed. Helm-managed workloads warn that the next upgrade resets the
+//! then applied through the safety gate (production-like contexts are flagged,
+//! their name was typed when changes were allowed). Helm-managed workloads warn that the next upgrade resets the
 //! requests, and offer the values to copy into the chart.
 
 use std::collections::{BTreeMap, HashSet};
@@ -72,7 +72,6 @@ pub(crate) fn ApplyDialog(store: Store) -> impl IntoView {
     let chosen = RwSignal::new(HashSet::<usize>::new());
     let outcomes = RwSignal::new(Vec::<Option<Outcome>>::new());
     let applying = RwSignal::new(false);
-    let typed = RwSignal::new(String::new());
     let copied = RwSignal::new(None::<usize>);
 
     // Preview every change when the dialog opens.
@@ -82,7 +81,6 @@ pub(crate) fn ApplyDialog(store: Store) -> impl IntoView {
         previews.set(vec![None; changes.len()]);
         outcomes.set(vec![None; changes.len()]);
         chosen.set(HashSet::new());
-        typed.set(String::new());
         for (i, change) in changes.into_iter().enumerate() {
             let context = context.clone();
             spawn_local(async move {
@@ -117,7 +115,7 @@ pub(crate) fn ApplyDialog(store: Store) -> impl IntoView {
     let ready = move || {
         let n = chosen.with(HashSet::len);
         let ctx = context();
-        n > 0 && !applying.get() && ctx.as_ref().is_some_and(|c| c.unlocked && (!c.prod_like || typed.get().trim() == c.name))
+        n > 0 && !applying.get() && ctx.as_ref().is_some_and(|c| c.unlocked)
     };
     let apply = move |_| {
         let Some(changes) = store.apply_prompt.get_untracked() else { return };
@@ -266,8 +264,7 @@ pub(crate) fn ApplyDialog(store: Store) -> impl IntoView {
                     </div>
                 })}
                 {(prod && !locked).then(|| view! {
-                    <p>{format!("{name} looks like production. Type its name to apply:")}</p>
-                    <input class="confirm-input" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
+                    <p>{format!("{name} looks like production.")}</p>
                 })}
                 <div class="modal-actions">
                     {move || if done() {
