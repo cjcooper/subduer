@@ -3,7 +3,7 @@
 //! compiled in, so every build carries the notices its licenses require.
 
 use subduer_core::types::AboutInfo;
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// The one About window; capabilities grant it by this label.
 pub const LABEL: &str = "about";
@@ -33,9 +33,20 @@ pub fn about_info<R: Runtime>(app: AppHandle<R>) -> AboutInfo {
     AboutInfo {
         name: info.name.clone(),
         version: info.version.to_string(),
+        description: env!("CARGO_PKG_DESCRIPTION").to_owned(),
+        repository: env!("CARGO_PKG_REPOSITORY").to_owned(),
         maker: crate::menu::MAKER.to_owned(),
         copyright: app.config().bundle.copyright.clone().unwrap_or_default(),
         license: LICENSE.to_owned(),
         notices: NOTICES.to_owned(),
     }
+}
+
+/// Closes the About window (Esc). Other windows can't be closed this way.
+#[tauri::command]
+pub fn close_about<R: Runtime>(window: WebviewWindow<R>) -> Result<(), String> {
+    if window.label() != LABEL {
+        return Err(format!("not the About window: {}", window.label()));
+    }
+    window.close().map_err(|e| e.to_string())
 }
