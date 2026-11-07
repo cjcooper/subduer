@@ -6,14 +6,13 @@
 use subduer_core::types::{AddedCluster, CloudAccounts, CloudCluster, CloudProvider, ManagedContexts, NewCluster, RemovedContext, cluster_events};
 use subduer_core::{add_cluster, cloud, manage_clusters};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::sync::oneshot;
 
 use crate::{AppState, Win};
 use crate::commands::CmdResult;
 
 /// Runs file work off the async runtime.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> subduer_core::Result<T> + Send + 'static) -> CmdResult<T> {
-    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?.map_err(|e| e.user_message())
+    tauri::async_runtime::spawn_blocking(f).await.map_err(crate::commands::err)?.map_err(|e| e.user_message())
 }
 
 fn contexts_changed<R: Runtime>(app: &AppHandle<R>) {
@@ -68,12 +67,12 @@ pub async fn add_cluster<R: Runtime>(app: AppHandle<R>, cluster: NewCluster) -> 
 
 #[tauri::command]
 pub async fn cloud_accounts(provider: CloudProvider) -> CmdResult<CloudAccounts> {
-    cloud::accounts(provider).await.map_err(|e| e.user_message())
+    cloud::Clis::system().accounts(provider).await.map_err(|e| e.user_message())
 }
 
 #[tauri::command]
 pub async fn cloud_clusters(provider: CloudProvider, account: String, region: String) -> CmdResult<Vec<CloudCluster>> {
-    cloud::clusters(provider, &account, &region).await.map_err(|e| e.user_message())
+    cloud::Clis::system().clusters(provider, &account, &region).await.map_err(|e| e.user_message())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -85,7 +84,7 @@ pub async fn add_cloud_cluster<R: Runtime>(
     alias: String,
     make_current: bool,
 ) -> CmdResult<AddedCluster> {
-    let added = cloud::add(provider, &account, &cluster, &alias, make_current).await.map_err(|e| e.user_message())?;
+    let added = cloud::Clis::system().add(provider, &account, &cluster, &alias, make_current).await.map_err(|e| e.user_message())?;
     contexts_changed(&app);
     Ok(added)
 }
@@ -109,9 +108,8 @@ pub async fn remove_context<R: Runtime>(app: AppHandle<R>, context: String) -> C
     let name = context.clone();
     let removed = blocking(move || manage_clusters::remove(&add_cluster::kubeconfig_files()?, &name)).await?;
     // Its production mark goes with it, so a new context of that name starts afresh.
-    if let Err(e) = app.state::<AppState>().prod.lock().unwrap().forget(&context) {
-        tracing::warn!(context, error = %e, "couldn't forget the context's production mark");
-    }
+    let forgot = app.state::<AppState>().prod.lock().unwrap().forget(&context);
+    crate::log_err(forgot, &format!("couldn't forget {context}'s production mark"));
     contexts_changed(&app);
     Ok(removed)
 }
@@ -126,16 +124,9 @@ pub async fn reorder_contexts<R: Runtime>(app: AppHandle<R>, order: Vec<String>)
 
 /// The native Open dialog for a certificate or key. `None` if cancelled.
 #[tauri::command]
-pub async fn choose_cert_file<R: Runtime>(app: AppHandle<R>, title: String) -> CmdResult<Option<String>> {
+pub async fn choose_cert_file<R: Runtime>(app: AppHandle<R>, title: String, dialogs: tauri::State<'_, crate::system::Dialogs<R>>) -> CmdResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = oneshot::channel();
-    let mut dialog = app.dialog().file().set_title(title);
-    if let Some(home) = std::env::home_dir() {
-        dialog = dialog.set_directory(home);
-    }
-    dialog.pick_file(move |path| {
-        let _ = tx.send(path);
-    });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    Ok(Some(path.into_path().map_err(|e| e.to_string())?.display().to_string()))
+    let dialog = crate::system::starting_in(app.dialog().file().set_title(title), std::env::home_dir());
+    let path = crate::system::ask(&dialogs, dialog, crate::system::Ask::Open).await?;
+    Ok(path.map(|path| path.display().to_string()))
 }

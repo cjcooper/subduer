@@ -23,8 +23,8 @@ pub async fn run<F>(
     client: Client,
     target: &ExecTarget,
     size: (u16, u16),
-    mut input: UnboundedReceiver<Vec<u8>>,
-    mut resize: UnboundedReceiver<(u16, u16)>,
+    input: UnboundedReceiver<Vec<u8>>,
+    resize: UnboundedReceiver<(u16, u16)>,
     emit: F,
 ) -> Result<Ended>
 where
@@ -33,13 +33,38 @@ where
     let pods: Api<Pod> = Api::namespaced(client, &target.namespace);
     let params = AttachParams::interactive_tty().container(target.container.clone());
     let mut process = pods.exec(&target.pod, ["/bin/sh", "-c", SHELL], &params).await?;
-    let (Some(mut stdin), Some(mut stdout)) = (process.stdin(), process.stdout()) else {
+    let streams = Streams { stdin: process.stdin(), stdout: process.stdout(), sizer: process.terminal_size(), status: process.take_status() };
+    Ok(drive(streams, size, input, resize, emit).await)
+}
+
+/// The shell's ends, as the exec call opened them (any may be missing).
+struct Streams<I, O, S> {
+    stdin: Option<I>,
+    stdout: Option<O>,
+    sizer: Option<futures::channel::mpsc::Sender<TerminalSize>>,
+    status: Option<S>,
+}
+
+/// Runs the session over `streams` until the shell's output ends.
+async fn drive<I, O, S, F>(
+    streams: Streams<I, O, S>,
+    size: (u16, u16),
+    mut input: UnboundedReceiver<Vec<u8>>,
+    mut resize: UnboundedReceiver<(u16, u16)>,
+    emit: F,
+) -> Ended
+where
+    I: tokio::io::AsyncWrite + Unpin,
+    O: tokio::io::AsyncRead + Unpin,
+    S: std::future::Future<Output = Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>>,
+    F: Fn(ExecOutput),
+{
+    let Streams { stdin, stdout, mut sizer, status } = streams;
+    let (Some(mut stdin), Some(mut stdout)) = (stdin, stdout) else {
         let message = "The API server didn't open the terminal streams.".to_owned();
         emit(ExecOutput::Exited(message.clone()));
-        return Ok(Ended::Failed(message));
+        return Ended::Failed(message);
     };
-    let mut sizer = process.terminal_size();
-    let status = process.take_status();
     let to_size = |(width, height): (u16, u16)| TerminalSize { width, height };
     if let Some(s) = sizer.as_mut() {
         let _ = s.send(to_size(size)).await;
@@ -72,7 +97,7 @@ where
     if let Ended::Failed(message) = &outcome {
         emit(ExecOutput::Exited(message.clone()));
     }
-    Ok(outcome)
+    outcome
 }
 
 /// How a session finished.

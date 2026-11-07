@@ -231,3 +231,139 @@ async fn service_connections_pick_a_pod_again_after_a_failure() {
     assert_eq!(api.calls_to("GET", "/api/v1/namespaces/shop/pods/web-new/portforward").len(), 1);
     s.task.abort();
 }
+
+use crate::coverage_tests::ws_fake::{self, Step, forwarding};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// A connected pair of local sockets: (the app's side, the user's side).
+async fn socket_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let user = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+    let (app, _) = listener.accept().await.unwrap();
+    (app, user)
+}
+
+/// Forwards one connection to pod `web` port 8080 over the fake's steps.
+async fn forward_once(steps: Vec<Step>, socket: TcpStream) -> (ws_fake::Fake, std::result::Result<(), String>, ForwardStats) {
+    let fake = ws_fake::start(steps).await;
+    let backend = Mutex::new(Some(("web".to_owned(), 8080)));
+    let stats = Mutex::new(ForwardStats::default());
+    let result = tokio::time::timeout(Duration::from_secs(10), connect(&fake.client, &pod_req(8080), &backend, &stats, socket))
+        .await
+        .expect("forward didn't end");
+    (fake, result, stats.into_inner().unwrap())
+}
+
+#[tokio::test]
+async fn bytes_flow_both_ways_through_the_pod() {
+    let (app, mut user) = socket_pair().await;
+    let mut steps = forwarding(8080);
+    steps.extend([Step::Wait(|s| s.stdin == b"ping"), Step::Out(0, b"pong".to_vec())]);
+    let user_side = async move {
+        user.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        user.read_exact(&mut got).await.unwrap();
+        user.shutdown().await.unwrap();
+        let mut rest = vec![];
+        user.read_to_end(&mut rest).await.unwrap();
+        (got, rest)
+    };
+    let ((fake, result, _), (got, rest)) = tokio::join!(forward_once(steps, app), user_side);
+    assert_eq!(result, Ok(()));
+    assert_eq!((&got, rest.len()), (b"pong", 0));
+    assert_eq!(fake.seen.lock().unwrap().stdin, b"ping");
+    let request = fake.requests.lock().unwrap()[0].clone();
+    assert!(request.starts_with("GET /api/v1/namespaces/shop/pods/web/portforward?") && request.contains("ports=8080"), "{request}");
+}
+
+#[tokio::test]
+async fn the_kubelets_error_is_the_result() {
+    let (app, mut user) = socket_pair().await;
+    let mut steps = forwarding(8080);
+    steps.push(Step::Out(1, b"connect: connection refused".to_vec()));
+    let user_side = async move {
+        user.shutdown().await.unwrap();
+        let mut rest = vec![];
+        let _ = user.read_to_end(&mut rest).await;
+    };
+    let ((_, result, _), ()) = tokio::join!(forward_once(steps, app), user_side);
+    assert_eq!(result, Err("connect: connection refused".to_owned()));
+}
+
+#[tokio::test]
+async fn a_reset_connection_is_a_connection_error() {
+    let (app, user) = socket_pair().await;
+    // Closing with no linger resets the connection instead of ending it.
+    user.set_zero_linger().unwrap();
+    drop(user);
+    let mut steps = forwarding(8080);
+    steps.push(Step::Wait(|s| s.closed));
+    let (_, result, _) = forward_once(steps, app).await;
+    let error = result.unwrap_err();
+    assert!(error.starts_with("connection error: "), "{error}");
+}
+
+#[tokio::test]
+async fn a_failed_port_forward_names_the_problem() {
+    let api = MockApi::new();
+    let (app, _user) = socket_pair().await;
+    let backend = Mutex::new(None);
+    let stats = Mutex::new(ForwardStats::default());
+    // The pod resolves, but the API server refuses the upgrade.
+    api.on("GET", POD, pod("shop", "web", "node-1", json!({})));
+    let err = connect(&api.client(), &pod_req(8080), &backend, &stats, app).await.unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(backend.lock().unwrap().clone(), Some(("web".to_owned(), 8080)));
+    assert_eq!(stats.lock().unwrap().backend.as_deref(), Some("web:8080"));
+}
+
+#[tokio::test]
+async fn served_connections_that_succeed_keep_no_error() {
+    // The fake answers one connection.
+    let mut steps = forwarding(8080);
+    steps.extend([Step::Wait(|s| s.stdin == b"hi"), Step::Out(0, b"there".to_vec())]);
+    let fake = ws_fake::start(steps).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stats = Arc::new(Mutex::new(ForwardStats::default()));
+    let notify: Notify = Arc::new(|| {});
+    let task = tokio::spawn(serve(fake.client.clone(), pod_req(8080), listener, ("web".into(), 8080), stats.clone(), notify));
+    let mut user = TcpStream::connect(addr).await.unwrap();
+    user.write_all(b"hi").await.unwrap();
+    let mut got = [0u8; 5];
+    user.read_exact(&mut got).await.unwrap();
+    user.shutdown().await.unwrap();
+    let _ = user.read_to_end(&mut vec![]).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stats.lock().unwrap().active > 0 || stats.lock().unwrap().total == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(&got, b"there");
+    let s = stats.lock().unwrap();
+    assert_eq!((s.total, s.active, s.last_error.clone()), (1, 0, None));
+    task.abort();
+}
+
+/// Serving ends when the listener fails, e.g. a socket that isn't listening.
+#[cfg(unix)]
+#[tokio::test]
+async fn serving_stops_when_accepting_fails() {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    // Something to read, so the "listener" reports ready and accept is tried.
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender.send_to(b"x", udp.local_addr().unwrap()).unwrap();
+    // SAFETY: the descriptor is taken over from `udp`, which no longer owns it.
+    let not_listening = unsafe { std::net::TcpListener::from_raw_fd(udp.into_raw_fd()) };
+    not_listening.set_nonblocking(true).unwrap();
+    let listener = TcpListener::from_std(not_listening).unwrap();
+    let api = MockApi::new();
+    let stats = Arc::new(Mutex::new(ForwardStats::default()));
+    let served = serve(api.client(), pod_req(8080), listener, ("web".into(), 8080), stats.clone(), Arc::new(|| {}));
+    tokio::time::timeout(Duration::from_secs(5), served).await.expect("serve kept going");
+    assert_eq!(stats.lock().unwrap().backend.as_deref(), Some("web:8080"));
+    assert_eq!(stats.lock().unwrap().total, 0);
+}

@@ -80,6 +80,11 @@ done
 "#;
 
 pub async fn upload(client: Client, target: &UploadTarget, data: &[u8]) -> Result<UploadOutcome> {
+    upload_within(client, target, data, STDIN_GRACE).await
+}
+
+/// [`upload`], ending stdin `grace` after the last byte.
+async fn upload_within(client: Client, target: &UploadTarget, data: &[u8], grace: Duration) -> Result<UploadOutcome> {
     if !target.path.starts_with('/') {
         return Err(Error::Message(format!("The destination must be an absolute path, not {:?}.", target.path)));
     }
@@ -95,18 +100,15 @@ pub async fn upload(client: Client, target: &UploadTarget, data: &[u8]) -> Resul
     let params = AttachParams::default().container(target.container.clone()).stdin(true).stdout(true).stderr(true);
     let args = ["sh", "-c", UPLOAD_SCRIPT, "sh", target.path.as_str(), target.file_name.as_str(), overwrite, size.as_str()];
     let mut process = pods.exec(&target.pod, args, &params).await?;
-    let (Some(mut stdin), Some(mut stdout), Some(mut stderr), Some(status)) =
-        (process.stdin(), process.stdout(), process.stderr(), process.take_status())
-    else {
-        return Err(Error::Message("The API server didn't open the exec streams.".into()));
-    };
+    let (((mut stdin, mut stdout), mut stderr), status) =
+        opened(process.stdin().zip(process.stdout()).zip(process.stderr()).zip(process.take_status()), EXEC_STREAMS)?;
     // Stdin stays open until the container exits by itself, having read every
     // byte; ending it sooner would drop data still in flight.
     let write = async move {
         for chunk in data.chunks(64 * 1024) {
             stdin.write_all(chunk).await?;
         }
-        tokio::time::sleep(STDIN_GRACE).await;
+        tokio::time::sleep(grace).await;
         stdin.shutdown().await
     };
     let read = async { tokio::join!(read_all(&mut stdout), read_all(&mut stderr)) };
@@ -144,10 +146,7 @@ pub async fn browse(client: Client, namespace: &str, pod: &str, container: &str,
     let script = BROWSE_SCRIPT.replace("MAX", &MAX_ENTRIES.to_string());
     let suggest = if suggest { "1" } else { "0" };
     let mut process = pods.exec(pod, ["sh", "-c", script.as_str(), "sh", path, suggest], &params).await?;
-    let (Some(mut stdout), Some(mut stderr), Some(status)) = (process.stdout(), process.stderr(), process.take_status())
-    else {
-        return Err(Error::Message("The API server didn't open the exec streams.".into()));
-    };
+    let ((mut stdout, mut stderr), status) = opened(process.stdout().zip(process.stderr()).zip(process.take_status()), EXEC_STREAMS)?;
     let (out, err) = tokio::join!(read_all(&mut stdout), read_all(&mut stderr));
     match status.await {
         Some(s) if s.status.as_deref() == Some("Success") => Ok(parse_listing(&out)),
@@ -177,6 +176,15 @@ fn parse_listing(out: &str) -> DirListing {
     }
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
     DirListing { path, writable, entries, truncated, suggestions }
+}
+
+/// What's said when an exec call didn't open the streams it asked for.
+pub(crate) const EXEC_STREAMS: &str = "The API server didn't open the exec streams.";
+
+/// The streams an exec call opened, or `missing` as the error. kube opens
+/// every stream asked for, so this is a safeguard.
+pub(crate) fn opened<T>(streams: Option<T>, missing: &str) -> Result<T> {
+    streams.ok_or_else(|| Error::Message(missing.into()))
 }
 
 pub(crate) async fn read_all(r: &mut (impl AsyncReadExt + Unpin)) -> String {

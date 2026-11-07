@@ -164,6 +164,19 @@ async fn bound_claim_with_pods_and_disk_usage() {
 }
 
 #[tokio::test]
+async fn an_unscheduled_user_has_no_node() {
+    let api = MockApi::new();
+    api.on("GET", &format!("{CLASSES}/gp3"), storage_class("gp3", json!({})));
+    let mut waiting = mounting("db-0", "", "data", "Pending");
+    waiting["spec"]["nodeName"] = serde_json::Value::Null;
+    api.on("GET", PODS, list("PodList", vec![waiting]));
+    let v = claim_value("data", json!({"storageClassName": "gp3"}), json!({"phase": "Bound"}));
+    let d = related_details(&api.client(), "core/PersistentVolumeClaim", &v).await.unwrap();
+    let t = section(&d, "mounted-by").table.as_ref().unwrap();
+    assert_eq!((t.rows[0].cells[0].as_str(), t.rows[0].cells[2].as_str()), ("db-0", "—"));
+}
+
+#[tokio::test]
 async fn disk_usage_from_the_second_node_when_the_first_fails() {
     let api = MockApi::new();
     api.on("GET", &format!("{CLASSES}/gp3"), storage_class("gp3", json!({})));

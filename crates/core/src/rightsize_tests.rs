@@ -36,6 +36,16 @@ fn quantities() {
 }
 
 #[tokio::test]
+async fn a_helm_workload_without_its_release_name() {
+    let api = MockApi::new();
+    api.on("GET", WEB, deployment(json!({"metadata": {"labels": {"app.kubernetes.io/managed-by": "Helm"}}})));
+    api.on("PATCH", WEB, deployment(json!({})));
+    let c = change("Deployment", vec![wants("app", Some(15.0), None)]);
+    let p = preview(&api.client(), &c).await.unwrap();
+    assert_eq!(p.helm_release.as_deref(), Some("unknown"));
+}
+
+#[tokio::test]
 async fn preview_plans_one_patch_and_dry_runs_it() {
     let api = MockApi::new();
     api.on("GET", WEB, deployment(json!({"metadata": {

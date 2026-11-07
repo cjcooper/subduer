@@ -210,6 +210,19 @@ async fn related_on_an_empty_namespace_without_metrics() {
 }
 
 #[tokio::test]
+async fn a_failed_pod_flags_the_pods_row() {
+    let api = MockApi::new();
+    let mut failed = pod("shop", "job-1", "node-1", json!({}));
+    failed["status"] = json!({"phase": "Failed"});
+    api.on("GET", "/api/v1/namespaces/shop/pods", list("PodList", vec![failed]));
+    let mut d = empty_details();
+    related(&api.client(), "core/Namespace", "shop", &mut d).await.unwrap();
+    let pods = &section(&d, "ns-contents").table.as_ref().unwrap().rows[0];
+    assert_eq!(pods.cells, ["Pods", "1 (1 failed)"]);
+    assert!(pods.warn);
+}
+
+#[tokio::test]
 async fn related_with_limits_everywhere_and_no_pods_list() {
     let api = MockApi::new();
     // Pods can't be listed: treated as none. Other pods below are only for limits.

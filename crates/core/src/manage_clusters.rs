@@ -7,7 +7,7 @@
 //! keep fields this app doesn't know about, and replace the file in one step.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_norway::{Mapping, Value};
 
@@ -116,42 +116,46 @@ pub fn remove(files: &[PathBuf], context: &str) -> Result<RemovedContext> {
             .map(|e| inner(e, "context", field).to_owned())
             .collect()
     };
-    let (clusters_elsewhere, users_elsewhere) = (used_elsewhere("cluster"), used_elsewhere("user"));
+    let elsewhere = (used_elsewhere("cluster"), used_elsewhere("user"));
     let mut removed = RemovedContext { context: context.to_owned(), cluster: None, user: None };
     edit(&file, |doc| {
-        let contexts = doc
-            .get_mut("contexts")
-            .and_then(Value::as_sequence_mut)
-            .ok_or_else(|| Error::NotFound(format!("context {context:?} in {}", file.display())))?;
-        let at = contexts
-            .iter()
-            .position(|e| e.as_mapping().is_some_and(|m| name(m) == context))
-            .ok_or_else(|| Error::NotFound(format!("context {context:?} in {}", file.display())))?;
-        let entry = contexts.remove(at);
-        let entry = entry.as_mapping().cloned().unwrap_or_default();
-        for (field, list, elsewhere, out) in [
-            ("cluster", "clusters", &clusters_elsewhere, &mut removed.cluster),
-            ("user", "users", &users_elsewhere, &mut removed.user),
-        ] {
-            let target = inner(&entry, "context", field);
-            let still_used = target.is_empty() || elsewhere.contains(target) || entries(doc, "contexts").any(|e| inner(e, "context", field) == target);
-            if still_used {
-                continue;
-            }
-            if let Some(seq) = doc.get_mut(list).and_then(Value::as_sequence_mut) {
-                let before = seq.len();
-                seq.retain(|e| !e.as_mapping().is_some_and(|m| name(m) == target));
-                if seq.len() < before {
-                    *out = Some(target.to_owned());
-                }
-            }
-        }
-        if doc.get("current-context").and_then(Value::as_str) == Some(context) {
-            doc.remove("current-context");
-        }
+        removed = remove_from(doc, &file, context, &elsewhere)?;
         Ok(())
     })?;
     tracing::info!(context, path = %file.display(), cluster = ?removed.cluster, user = ?removed.user, "removed context from kubeconfig");
+    Ok(removed)
+}
+
+/// [`remove`]'s change to `file` as it is once locked (`doc`), which may
+/// have changed since it was read. `elsewhere`: the clusters and users the
+/// other files' contexts use.
+fn remove_from(doc: &mut Mapping, file: &Path, context: &str, elsewhere: &(HashSet<String>, HashSet<String>)) -> Result<RemovedContext> {
+    let gone = || Error::NotFound(format!("context {context:?} in {}", file.display()));
+    let contexts = doc.get_mut("contexts").and_then(Value::as_sequence_mut).ok_or_else(gone)?;
+    let at = contexts.iter().position(|e| e.as_mapping().is_some_and(|m| name(m) == context)).ok_or_else(gone)?;
+    let entry = contexts.remove(at);
+    let entry = entry.as_mapping().cloned().unwrap_or_default();
+    let mut removed = RemovedContext { context: context.to_owned(), cluster: None, user: None };
+    for (field, list, elsewhere, out) in [
+        ("cluster", "clusters", &elsewhere.0, &mut removed.cluster),
+        ("user", "users", &elsewhere.1, &mut removed.user),
+    ] {
+        let target = inner(&entry, "context", field);
+        let still_used = target.is_empty() || elsewhere.contains(target) || entries(doc, "contexts").any(|e| inner(e, "context", field) == target);
+        if still_used {
+            continue;
+        }
+        if let Some(seq) = doc.get_mut(list).and_then(Value::as_sequence_mut) {
+            let before = seq.len();
+            seq.retain(|e| !e.as_mapping().is_some_and(|m| name(m) == target));
+            if seq.len() < before {
+                *out = Some(target.to_owned());
+            }
+        }
+    }
+    if doc.get("current-context").and_then(Value::as_str) == Some(context) {
+        doc.remove("current-context");
+    }
     Ok(removed)
 }
 

@@ -22,6 +22,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(test: &str) -> Self {
+        crate::testing::record_all_traces();
         let dir = std::env::temp_dir().join(format!("subduer-add-cluster-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -218,4 +219,121 @@ fn refuses_a_file_that_is_not_a_kubeconfig() {
     let dir = Scratch::new("notconfig");
     fs::write(dir.config(), "- just\n- a list\n").unwrap();
     assert!(add_cluster(&dir.config(), &new_cluster("lab"), &TakenNames::default()).unwrap_err().to_string().contains("isn't a kubeconfig"));
+}
+
+#[test]
+fn the_process_environment_is_what_the_free_functions_use() {
+    let env = KubeconfigEnv::current();
+    assert_eq!(env.kubeconfig, std::env::var_os("KUBECONFIG"));
+    assert_eq!(env.home, std::env::home_dir());
+    assert_eq!(kubeconfig_path().ok(), env.path().ok());
+    assert_eq!(kubeconfig_files().ok(), env.files().ok());
+    // Read-only: whatever this machine has, both ways agree.
+    let (a, b) = (TakenNames::read(), TakenNames::read_in(&env));
+    assert_eq!(a.is_ok(), b.is_ok());
+    if let (Ok(a), Ok(b)) = (a, b) {
+        assert_eq!((a.contexts, a.clusters, a.users), (b.contexts, b.clusters, b.users));
+    }
+}
+
+#[test]
+fn files_and_names_follow_the_environment() {
+    let dir = Scratch::new("env");
+    let home = KubeconfigEnv { kubeconfig: None, home: Some(dir.0.clone()) };
+    assert_eq!(home.files().unwrap(), [dir.0.join(".kube/config")]);
+    // No kubeconfig yet: nothing is taken.
+    let none = TakenNames::read_in(&home).unwrap();
+    assert!(none.contexts.is_empty() && none.clusters.is_empty() && none.users.is_empty());
+    assert!(TakenNames::read_in(&KubeconfigEnv::default()).is_err());
+
+    let (one, two) = (dir.0.join("one"), dir.0.join("two"));
+    add_cluster(&one, &new_cluster("a"), &TakenNames::default()).unwrap();
+    let mut b = new_cluster("b");
+    b.auth = ClusterAuth::None;
+    add_cluster(&two, &b, &TakenNames::default()).unwrap();
+    add_cluster(&two, &new_cluster("a"), &TakenNames::default()).unwrap();
+    let both = KubeconfigEnv { kubeconfig: Some(std::env::join_paths([&one, &two]).unwrap()), home: None };
+    assert_eq!(both.files().unwrap(), [one.clone(), two.clone()]);
+    // Merged like kubectl: the first file wins a name both have.
+    let taken = TakenNames::read_in(&both).unwrap();
+    assert_eq!(taken.contexts, ["a", "b"]);
+    assert_eq!(taken.clusters, ["a", "b"]);
+    assert_eq!(taken.users, ["a"]);
+    // A file in $KUBECONFIG that isn't there is an error, as in kubectl.
+    let missing = KubeconfigEnv { kubeconfig: Some(dir.0.join("missing").into_os_string()), home: None };
+    assert!(TakenNames::read_in(&missing).is_err());
+    // An empty $KUBECONFIG falls back to the home folder.
+    let empty = KubeconfigEnv { kubeconfig: Some("".into()), home: Some(dir.0.clone()) };
+    assert_eq!(empty.files().unwrap(), [dir.0.join(".kube/config")]);
+    assert!(TakenNames::read_in(&empty).is_err());
+}
+
+#[test]
+fn the_root_folder_is_not_a_kubeconfig() {
+    // No parent folder to make; then it's a folder, not a file.
+    let err = add_cluster(Path::new("/"), &new_cluster("lab"), &TakenNames::default()).unwrap_err().to_string();
+    assert!(err.starts_with('/'), "{err}");
+}
+
+#[test]
+fn a_user_entry_for_no_auth_is_empty() {
+    assert!(user_entry(&ClusterAuth::None).unwrap().is_empty());
+}
+
+#[test]
+fn reads_empty_and_null_files_as_none() {
+    let dir = Scratch::new("empty");
+    fs::write(dir.config(), "  \n").unwrap();
+    assert_eq!(read(&dir.config()).unwrap(), None);
+    fs::write(dir.config(), "~\n").unwrap();
+    assert_eq!(read(&dir.config()).unwrap(), None);
+    // A folder where the file should be can't be read.
+    let folder = dir.0.join("folder");
+    fs::create_dir(&folder).unwrap();
+    assert!(read(&folder).unwrap_err().to_string().starts_with(&folder.display().to_string()));
+}
+
+#[test]
+fn null_lists_are_replaced_and_other_values_refused() {
+    let dir = Scratch::new("lists");
+    fs::write(dir.config(), "apiVersion: v1\nclusters:\nusers: ~\ncontexts:\n").unwrap();
+    add_cluster(&dir.config(), &new_cluster("lab"), &TakenNames::default()).unwrap();
+    let config = Kubeconfig::read_from(dir.config()).unwrap();
+    assert_eq!((config.clusters.len(), config.auth_infos.len(), config.contexts.len()), (1, 1, 1));
+    fs::write(dir.config(), "apiVersion: v1\nclusters: 5\n").unwrap();
+    let err = add_cluster(&dir.config(), &new_cluster("lab2"), &TakenNames::default()).unwrap_err().to_string();
+    assert_eq!(err, "the kubeconfig's clusters isn't a list");
+    assert!(!lock_left(&dir.config()));
+}
+
+#[test]
+fn reports_folders_it_cannot_make_or_write() {
+    let dir = Scratch::new("unwritable");
+    // The parent "folder" is a file.
+    let blocked = dir.0.join("file");
+    fs::write(&blocked, "").unwrap();
+    let err = add_cluster(&blocked.join("config"), &new_cluster("lab"), &TakenNames::default()).unwrap_err().to_string();
+    assert!(err.starts_with(&blocked.display().to_string()), "{err}");
+
+    // The temporary file's name is taken by a folder: nothing is written,
+    // and the lock is released.
+    fs::create_dir(dir.0.join(format!(".config.subduer-{}", std::process::id()))).unwrap();
+    let err = add_cluster(&dir.config(), &new_cluster("lab"), &TakenNames::default()).unwrap_err().to_string();
+    assert!(err.starts_with(&dir.config().display().to_string()), "{err}");
+    assert!(!dir.config().exists());
+    assert!(!lock_left(&dir.config()));
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_a_lock_it_cannot_create() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new("readonly");
+    let ro = dir.0.join("ro");
+    fs::create_dir(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = add_cluster(&ro.join("config"), &new_cluster("lab"), &TakenNames::default());
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.unwrap_err().to_string();
+    assert!(err.starts_with(&format!("{}.lock", ro.join("config").display())), "{err}");
 }

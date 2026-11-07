@@ -22,18 +22,18 @@ pub async fn browse_dir(
     let client = crate::commands::connected_client(&state).await?;
     subduer_core::upload::browse(client, &namespace, &pod, &container, &path, suggest)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(crate::commands::user)
 }
 
 #[tauri::command]
-pub async fn upload_file(state: Win, request: Request<'_>) -> Result<UploadOutcome, String> {
+pub async fn upload_file(request: Request<'_>, state: Win) -> Result<UploadOutcome, String> {
     let header = request
         .headers()
         .get("x-upload")
         .and_then(|v| v.to_str().ok())
         .ok_or("missing upload target")?;
-    let json = percent_encoding::percent_decode_str(header).decode_utf8().map_err(|e| e.to_string())?;
-    let target: UploadTarget = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let json = percent_encoding::percent_decode_str(header).decode_utf8().map_err(crate::commands::err)?;
+    let target: UploadTarget = serde_json::from_str(&json).map_err(crate::commands::err)?;
     let InvokeBody::Raw(data) = request.body() else {
         return Err("expected the file as a binary body".into());
     };
@@ -46,12 +46,10 @@ pub async fn upload_file(state: Win, request: Request<'_>) -> Result<UploadOutco
         }
         session.client.clone()
     };
-    state.gate.ensure_writable(&target.context).map_err(|e| e.to_string())?;
-    tracing::info!(
-        context = %target.context, namespace = %target.namespace, pod = %target.pod,
-        container = %target.container, path = %target.path, bytes = data.len(), "upload"
-    );
-    subduer_core::upload::upload(client, &target, &data).await.map_err(|e| e.user_message())
+    state.gate.ensure_writable(&target.context).map_err(crate::commands::err)?;
+    let (t, bytes) = (&target, data.len());
+    tracing::info!(context = %t.context, namespace = %t.namespace, pod = %t.pod, container = %t.container, path = %t.path, bytes, "upload");
+    subduer_core::upload::upload(client, &target, &data).await.map_err(crate::commands::user)
 }
 
 /// Copies a file out of a container into the Downloads folder, numbering the
@@ -66,14 +64,26 @@ pub async fn download_file<R: Runtime>(
     path: String,
 ) -> Result<DownloadResult, String> {
     use tauri::Manager;
-    let client = crate::commands::connected_client(&state).await?;
-    let dir = app.path().download_dir().map_err(|e| format!("no Downloads folder: {e}"))?;
+    download_into(&state, || app.path().download_dir(), &namespace, &pod, &container, &path).await
+}
+
+/// [`download_file`], into the folder `downloads` gives.
+pub(crate) async fn download_into(
+    state: &Win,
+    downloads: impl FnOnce() -> tauri::Result<std::path::PathBuf>,
+    namespace: &str,
+    pod: &str,
+    container: &str,
+    path: &str,
+) -> Result<DownloadResult, String> {
+    let client = crate::commands::connected_client(state).await?;
+    let dir = downloads().map_err(|e| format!("no Downloads folder: {e}"))?;
     let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
     let dest = subduer_core::download::unique_path(&dir, name);
     tracing::info!(%namespace, %pod, %container, %path, dest = %dest.display(), "download");
-    let bytes = subduer_core::download::download(client, &namespace, &pod, &container, &path, &dest)
+    let bytes = subduer_core::download::download(client, namespace, pod, container, path, &dest)
         .await
-        .map_err(|e| e.user_message())?;
+        .map_err(crate::commands::user)?;
     Ok(DownloadResult { saved_to: dest.display().to_string(), bytes })
 }
 
@@ -82,28 +92,10 @@ pub async fn download_file<R: Runtime>(
 #[tauri::command]
 pub fn reveal_download<R: Runtime>(app: tauri::AppHandle<R>, path: String) -> Result<(), String> {
     use tauri::Manager;
-    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    let dir = app.path().download_dir().map_err(crate::commands::err)?;
     let path = std::path::PathBuf::from(path);
     if !path.starts_with(&dir) {
         return Err("only files in the Downloads folder can be revealed".into());
     }
-    reveal(&path)
-}
-
-/// Shows a file in Finder or Explorer (selected), or opens its folder on Linux.
-pub(crate) fn reveal(path: &std::path::Path) -> Result<(), String> {
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    } else if cfg!(target_os = "windows") {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(format!("/select,{}", path.display()));
-        c
-    } else {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
-        c
-    };
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+    app.state::<crate::AppState>().launcher.reveal(&path)
 }

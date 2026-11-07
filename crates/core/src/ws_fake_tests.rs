@@ -3,7 +3,8 @@
 //! `v5.channel.k8s.io` exec protocol, so exec-based code (shells, uploads,
 //! downloads, browsing) can run end to end without a cluster. Each test gives
 //! it a script of steps: send bytes on a channel, wait for the client, send
-//! the exit `Status`. The in-memory `MockApi` can't do this: websocket
+//! the exit `Status`. Port-forwards use the same framing (see [`forwarding`]).
+//! The in-memory `MockApi` can't do this: websocket
 //! upgrades need a real connection.
 
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,14 @@ pub enum Step {
     Wait(fn(&Seen) -> bool),
     /// The exit status, on channel 3.
     Status(Value),
+    /// Does nothing for a while.
+    Pause(Duration),
+}
+
+/// Port-forward: the first frame on each of a port's two channels (data
+/// `0`, errors `1` for the first port) is the port number, little-endian.
+pub fn forwarding(port: u16) -> Vec<Step> {
+    vec![Step::Out(0, port.to_le_bytes().to_vec()), Step::Out(1, port.to_le_bytes().to_vec())]
 }
 
 pub struct Fake {
@@ -124,6 +133,7 @@ async fn session(
                     read_message(&mut read, &seen).await;
                 }
             }
+            Step::Pause(time) => tokio::time::sleep(time).await,
         }
     }
     let _ = write.write_all(&frame(0x8, &[])).await;

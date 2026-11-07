@@ -33,13 +33,17 @@ fn signature(files: &[PathBuf]) -> Signature {
         .collect()
 }
 
-/// Watches until the app quits.
-pub async fn run<R: Runtime>(app: AppHandle<R>) {
-    let files = || add_cluster::kubeconfig_files().unwrap_or_default();
+/// Watches kubectl's kubeconfig files until the app quits.
+pub fn run<R: Runtime>(app: AppHandle<R>) -> impl std::future::Future<Output = ()> + Send {
+    watch(app, || add_cluster::kubeconfig_files().unwrap_or_default(), EVERY)
+}
+
+/// Checks `files` every `every`, acting on each change once it has settled.
+pub(crate) async fn watch<R: Runtime>(app: AppHandle<R>, files: impl Fn() -> Vec<PathBuf>, every: Duration) {
     let mut seen = signature(&files());
     let mut pending = false;
     loop {
-        tokio::time::sleep(EVERY).await;
+        tokio::time::sleep(every).await;
         let now = signature(&files());
         if now != seen {
             seen = now;
@@ -56,7 +60,7 @@ pub async fn run<R: Runtime>(app: AppHandle<R>) {
 
 /// The kubeconfig changed: every window's context menu follows, and windows
 /// on a context that's gone move.
-async fn settle<R: Runtime>(app: &AppHandle<R>, files: &[PathBuf]) {
+pub(crate) async fn settle<R: Runtime>(app: &AppHandle<R>, files: &[PathBuf]) {
     // Unreadable (being rewritten, or broken): wait for the next change.
     let Ok(list) = manage_clusters::list(files) else { return };
     let names: Vec<String> = list.contexts.into_iter().map(|c| c.name).collect();
@@ -76,18 +80,23 @@ async fn settle<R: Runtime>(app: &AppHandle<R>, files: &[PathBuf]) {
         }
     }
     if let Some(label) = &plan.empty {
-        if let Some(w) = state.window(label) {
-            w.stop_watch();
-            *w.session.write().await = None;
-            *w.chosen.lock().unwrap() = None;
-        }
-        let _ = app.emit_to(label, cluster_events::NO_CONTEXTS, ());
-        crate::add_cluster::in_use_changed(app);
+        empty(app, label).await;
     }
     for (label, moved) in plan.switch {
         tracing::info!(window = %label, removed = %moved.removed, to = %moved.switch_to, "context removed from the kubeconfig");
         let _ = app.emit_to(&label, cluster_events::CONTEXT_REMOVED, moved);
     }
+}
+
+/// No contexts are left: main window `label`, the one kept, disconnects and
+/// offers Add Cluster.
+pub(crate) async fn empty<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let Some(w) = app.state::<AppState>().window(label) else { return };
+    w.stop_watch();
+    *w.session.write().await = None;
+    *w.chosen.lock().unwrap() = None;
+    let _ = app.emit_to(label, cluster_events::NO_CONTEXTS, ());
+    crate::add_cluster::in_use_changed(app);
 }
 
 /// What to do to the main windows (label, context picked) now that the

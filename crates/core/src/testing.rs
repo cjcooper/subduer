@@ -46,6 +46,8 @@ pub struct MockApi {
 
 impl MockApi {
     pub fn new() -> Self {
+        #[cfg(test)]
+        record_all_traces();
         Self::default()
     }
 
@@ -128,6 +130,48 @@ impl MockApi {
     }
 }
 
+/// Turns every `tracing` call site on for the rest of the process, so the
+/// field expressions in log lines (`%kind.key()`, `?err`, …) run in tests
+/// the way they do in the app, where a subscriber is always installed.
+/// Nothing is printed. Called by [`MockApi::new`] in this crate's tests.
+pub fn record_all_traces() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Another subscriber may already be set (e.g. by the app); keep it.
+        let _ = tracing::subscriber::set_global_default(Quiet);
+    });
+}
+
+/// A subscriber that accepts everything and formats each field into nothing.
+struct Quiet;
+
+struct Discard;
+
+impl tracing::field::Visit for Discard {
+    fn record_debug(&mut self, _field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let _ = format!("{value:?}");
+    }
+}
+
+impl tracing::Subscriber for Quiet {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        span.record(&mut Discard);
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        values.record(&mut Discard);
+    }
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        event.record(&mut Discard);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 /// An API error body, e.g. `status(403, "Forbidden", "pods is forbidden")`.
 pub fn status(code: u16, reason: &str, message: &str) -> Value {
     json!({"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
@@ -198,4 +242,18 @@ async fn fake_server_routes_and_records() {
     let err = cms.get("missing").await.unwrap_err();
     assert!(matches!(err, kube::Error::Api(s) if s.code == 404));
     assert_eq!(api.calls().len(), 2);
+}
+
+#[test]
+fn quiet_subscriber_takes_spans_and_events() {
+    record_all_traces();
+    let span = tracing::info_span!("outer", a = 1, b = tracing::field::Empty);
+    span.record("b", "two");
+    let other = tracing::info_span!("other");
+    span.follows_from(&other);
+    span.in_scope(|| tracing::info!(x = ?vec![1], "inside"));
+    assert!(!span.is_disabled());
+    let mut ran = false;
+    tracing::warn!(x = %{ ran = true; 1 }, "fields run");
+    assert!(ran);
 }

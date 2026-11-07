@@ -223,5 +223,44 @@ fn summary_needs_the_header() {
     assert!(file.summary(true).err().unwrap().to_string().contains("has no context"));
     file.set_meta("scope", "not json").unwrap();
     assert!(file.summary(true).err().unwrap().to_string().contains("trace scope"));
+    file.set_meta("scope", "\"Cluster\"").unwrap();
+    file.set_meta("context", "c").unwrap();
+    file.conn().execute("DELETE FROM meta WHERE key = 'started'", []).unwrap();
+    assert!(file.summary(true).err().unwrap().to_string().contains("has no start time"));
+    file.conn().execute("DELETE FROM meta WHERE key = 'scope'", []).unwrap();
+    assert!(file.summary(true).err().unwrap().to_string().contains("has no scope"));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn files_that_cant_be_made_or_replaced() {
+    let dir = scratch("unmakeable");
+    // A folder where the file should be can't be replaced.
+    let folder = dir.join("taken.trace");
+    std::fs::create_dir_all(&folder).unwrap();
+    let err = TraceFile::create(&folder, true, "c", &TraceScope::Cluster, 0.0).err().unwrap();
+    assert!(err.to_string().starts_with(&format!("can't replace {}", folder.display())), "{err}");
+    // SQLite's own errors read as trace file errors.
+    let err = TraceFile::create(&dir.join("no/such/folder/a.trace"), false, "c", &TraceScope::Cluster, 0.0).err().unwrap();
+    assert!(err.to_string().starts_with("trace file: "), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn failed_writes_are_errors() {
+    let dir = scratch("failed-writes");
+    let mut file = TraceFile::create(&dir.join("a.trace"), false, "c", &TraceScope::Cluster, 0.0).unwrap();
+    file.conn().execute_batch("CREATE TRIGGER no_usage BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'disk full'); END; DROP TABLE pulls;").unwrap();
+    let batch = Batch { usage: vec![(key("web-1"), bucket(60, 1.0, 1.0))], ..Batch::default() };
+    assert_eq!(file.write(&batch).unwrap_err().to_string(), "trace file: disk full");
+    assert!(usage(&file).is_empty(), "nothing of a failed batch is kept");
+    assert!(file.log_pull(0, 0, 60, 0, 0, None).unwrap_err().to_string().contains("no such table: pulls"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn json_errors_keep_serdes_message() {
+    let e = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    let text = e.to_string();
+    assert_eq!(json_error(e).to_string(), text);
 }

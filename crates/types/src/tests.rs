@@ -187,6 +187,11 @@ fn window_titles_and_labels() {
 
     assert_eq!(ForwardSource::Pod { pod: "api-1".into() }.label(), "pod/api-1");
     assert_eq!(ForwardSource::Service { service: "web".into() }.label(), "service/web");
+
+    let edit = EditTarget { kind: kind("", "ConfigMap"), namespace: Some("shop".into()), name: "app".into() };
+    assert_eq!(edit.title("acme-uat"), "ConfigMap shop/app · acme-uat · Edit");
+    let cluster_wide = EditTarget { kind: kind("", "Namespace"), namespace: None, name: "shop".into() };
+    assert_eq!(cluster_wide.title("acme-uat"), "Namespace shop · acme-uat · Edit");
 }
 
 #[test]
@@ -250,6 +255,8 @@ fn new_cluster_problems() {
         c.problem()
     };
     assert!(with(|c| c.name = "  ".into()).is_some_and(|p| p.contains("name")));
+    assert!(with(|c| c.name = "lab\u{7}".into()).is_some_and(|p| p.contains("control characters")));
+    assert!(with(|c| c.server = " ".into()).is_some_and(|p| p.contains("API server")));
     assert!(with(|c| c.server = "10.0.0.1:6443".into()).is_some_and(|p| p.contains("https://")));
     assert!(with(|c| c.server = "https://".into()).is_some_and(|p| p.contains("host")));
     assert_eq!(with(|c| c.server = "http://localhost:8080".into()), None);

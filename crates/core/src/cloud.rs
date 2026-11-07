@@ -7,13 +7,13 @@
 //! The CLIs run without a shell or a terminal (a prompt fails instead of
 //! waiting), with the user's sign-in; this app never sees the credentials.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::add_cluster;
+use crate::add_cluster::{self, KubeconfigEnv};
 use crate::types::{AddedCluster, CloudAccount, CloudAccounts, CloudCluster, CloudProvider};
 use crate::{Error, Result};
 
@@ -44,40 +44,208 @@ fn cli(provider: CloudProvider) -> (&'static str, &'static str) {
     }
 }
 
-/// Runs the provider's CLI with `args` (no shell, no stdin) and returns its
-/// standard output, or its error output as the error.
-async fn run(provider: CloudProvider, args: &[String], kubeconfig: Option<&Path>, timeout: Duration) -> Result<String> {
-    run_both(provider, args, kubeconfig, timeout).await.map(|(stdout, _)| stdout)
+/// Where the CLIs and the kubeconfig are, and how long to wait for the CLIs.
+/// [`Clis::system`] in the app; tests point it at fake CLIs in a scratch
+/// folder.
+#[derive(Clone, Debug)]
+pub struct Clis {
+    /// The folder the CLIs are in; empty finds them on `PATH`.
+    pub dir: PathBuf,
+    /// Reads an environment variable (`AWS_PROFILE`, `AWS_REGION`, …).
+    pub var: fn(&str) -> Option<String>,
+    /// Where the kubeconfig is.
+    pub kubeconfig: KubeconfigEnv,
+    /// How long listing waits.
+    pub list_timeout: Duration,
+    /// How long fetching credentials waits.
+    pub add_timeout: Duration,
 }
 
-/// [`run`], also returning the error output of a run that succeeded (where
-/// the CLIs print their progress and notes).
-async fn run_both(provider: CloudProvider, args: &[String], kubeconfig: Option<&Path>, timeout: Duration) -> Result<(String, String)> {
-    let (program, missing) = cli(provider);
-    #[allow(unused_mut)]
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args).stdin(Stdio::null()).kill_on_drop(true);
-    // gcloud has no flag for the file; all three honour this.
-    if let Some(path) = kubeconfig {
-        cmd.env("KUBECONFIG", path);
+impl Clis {
+    /// The CLIs on `PATH`, with this process's environment.
+    pub fn system() -> Self {
+        Self {
+            dir: PathBuf::new(),
+            var: |name| std::env::var(name).ok(),
+            kubeconfig: KubeconfigEnv::current(),
+            list_timeout: LIST_TIMEOUT,
+            add_timeout: ADD_TIMEOUT,
+        }
     }
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    let what = format!("{program} {}", args.iter().take(3).map(String::as_str).collect::<Vec<_>>().join(" "));
-    let out = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| Error::Message(format!("{what} didn't finish within {}s", timeout.as_secs())))?
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => Error::Message(missing.into()),
-            _ => Error::Message(format!("couldn't run {program}: {e}")),
-        })?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-    tracing::info!(%what, ok = out.status.success(), "cloud CLI");
-    if out.status.success() {
-        Ok((stdout, stderr))
-    } else {
-        Err(Error::Message(if stderr.is_empty() { format!("{what} failed ({})", out.status) } else { stderr }))
+
+    /// Runs the provider's CLI with `args` (no shell, no stdin) and returns its
+    /// standard output, or its error output as the error.
+    async fn run(&self, provider: CloudProvider, args: &[String]) -> Result<String> {
+        self.run_both(provider, args, None, self.list_timeout).await.map(|(stdout, _)| stdout)
+    }
+
+    /// [`Clis::run`], also returning the error output of a run that
+    /// succeeded (where the CLIs print their progress and notes).
+    async fn run_both(&self, provider: CloudProvider, args: &[String], kubeconfig: Option<&Path>, timeout: Duration) -> Result<(String, String)> {
+        let (program, missing) = cli(provider);
+        let path = self.dir.join(program);
+        #[allow(unused_mut)]
+        let mut cmd = tokio::process::Command::new(path);
+        cmd.args(args).stdin(Stdio::null()).kill_on_drop(true);
+        // gcloud has no flag for the file; all three honour this.
+        if let Some(path) = kubeconfig {
+            cmd.env("KUBECONFIG", path);
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let what = format!("{program} {}", args.iter().take(3).map(String::as_str).collect::<Vec<_>>().join(" "));
+        let out = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| Error::Message(format!("{what} didn't finish within {}s", timeout.as_secs())))?
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Error::Message(missing.into()),
+                _ => Error::Message(format!("couldn't run {program}: {e}")),
+            })?;
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        tracing::info!(%what, ok = out.status.success(), "cloud CLI");
+        if out.status.success() {
+            Ok((stdout, stderr))
+        } else {
+            Err(Error::Message(if stderr.is_empty() { format!("{what} failed ({})", out.status) } else { stderr }))
+        }
+    }
+
+    /// The projects (GKE), profiles (EKS) or subscriptions (AKS) to pick from.
+    pub async fn accounts(&self, provider: CloudProvider) -> Result<CloudAccounts> {
+        match provider {
+            CloudProvider::Gke => {
+                let list = self.run(provider, &args(["projects", "list", "--format=json(projectId,name)"])).await?;
+                let default = self.run(provider, &args(["config", "get-value", "project"])).await.ok();
+                Ok(CloudAccounts { accounts: gke_projects(&json(&list)?), default: default.filter(|p| !p.is_empty()), region: None })
+            }
+            CloudProvider::Eks => {
+                let list = self.run(provider, &args(["configure", "list-profiles"])).await?;
+                let names: Vec<String> = list.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+                let regions = futures::future::join_all(names.iter().map(|p| async move {
+                    self.run(provider, &[format!("--profile={p}"), "configure".into(), "get".into(), "region".into()])
+                        .await
+                        .ok()
+                        .filter(|r| !r.is_empty())
+                }))
+                .await;
+                let accounts = names
+                    .into_iter()
+                    .zip(regions)
+                    .map(|(name, region)| CloudAccount { id: name.clone(), label: name, region })
+                    .collect();
+                let default = (self.var)("AWS_PROFILE").filter(|p| !p.is_empty());
+                let region = match ["AWS_REGION", "AWS_DEFAULT_REGION"].iter().find_map(|v| (self.var)(v).filter(|r| !r.is_empty())) {
+                    Some(region) => Some(region),
+                    None => self.run(provider, &args(["configure", "get", "region"])).await.ok().filter(|r| !r.is_empty()),
+                };
+                Ok(CloudAccounts { accounts, default, region })
+            }
+            CloudProvider::Aks => {
+                let list = self.run(provider, &args(["account", "list", "--output=json"])).await?;
+                Ok(aks_subscriptions(&json(&list)?))
+            }
+        }
+    }
+
+    /// The clusters in `account` (EKS: in `region`).
+    pub async fn clusters(&self, provider: CloudProvider, account: &str, region: &str) -> Result<Vec<CloudCluster>> {
+        let mut list = match provider {
+            CloudProvider::Gke => {
+                let project = arg("project", account)?;
+                let out = self.run(provider, &args(["container", "clusters", "list", &format!("--project={project}"), "--format=json"])).await?;
+                let mut list = gke_clusters(&json(&out)?);
+                for c in &mut list {
+                    c.entry = format!("gke_{account}_{}_{}", c.location, c.name);
+                }
+                list
+            }
+            CloudProvider::Eks => {
+                let region = arg("region", region)?;
+                let profile = eks_profile(account)?;
+                let mut a = profile.clone();
+                a.extend(["eks".into(), "list-clusters".into(), format!("--region={region}"), "--output=json".into()]);
+                let out = self.run(provider, &a).await?;
+                let mut list = eks_clusters(&json(&out)?, &region);
+                self.eks_describe(&profile, &mut list).await;
+                list
+            }
+            CloudProvider::Aks => {
+                let subscription = arg("subscription", account)?;
+                let out = self.run(provider, &args(["aks", "list", &format!("--subscription={subscription}"), "--output=json"])).await?;
+                aks_clusters(&json(&out)?)
+            }
+        };
+        list.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.location.cmp(&b.location)));
+        Ok(list)
+    }
+
+    /// `list-clusters` gives only names: each cluster's version and status
+    /// come from `describe-cluster`, a few at a time (with `profile`, the
+    /// `--profile` argument if any). One that can't be described (no
+    /// `eks:DescribeCluster` permission, say) is listed without them.
+    async fn eks_describe(&self, profile: &[String], list: &mut [CloudCluster]) {
+        use futures::StreamExt;
+        let commands: Vec<Option<Vec<String>>> = list
+            .iter()
+            .map(|c| {
+                let mut a = profile.to_vec();
+                a.extend([
+                    "eks".into(),
+                    "describe-cluster".into(),
+                    format!("--name={}", arg("cluster", &c.name).ok()?),
+                    format!("--region={}", c.location),
+                    "--output=json".into(),
+                ]);
+                Some(a)
+            })
+            .collect();
+        let described: Vec<Option<Value>> = futures::stream::iter(commands)
+            .map(|a| async move {
+                let out = self.run(CloudProvider::Eks, &a?).await.ok()?;
+                json(&out).ok()
+            })
+            .buffered(EKS_DESCRIBE_AT_ONCE)
+            .collect()
+            .await;
+        for (cluster, found) in list.iter_mut().zip(described) {
+            if let Some(described) = found {
+                eks_fill(cluster, &described);
+            }
+        }
+    }
+
+    /// Has the provider's CLI add `cluster` to the kubeconfig, named `alias`
+    /// when given. The CLIs make it kubectl's current context; unless
+    /// `make_current`, the previous one is put back.
+    pub async fn add(&self, provider: CloudProvider, account: &str, cluster: &CloudCluster, alias: &str, make_current: bool) -> Result<AddedCluster> {
+        let path = self.kubeconfig.path()?;
+        let alias = alias.trim();
+        let alias = (!alias.is_empty()).then(|| arg("context name", alias)).transpose()?;
+        if let Some(alias) = &alias
+            && add_cluster::TakenNames::read_in(&self.kubeconfig)?.contexts.iter().any(|c| c == alias)
+        {
+            return Err(Error::Message(format!("A context named {alias:?} already exists.")));
+        }
+        let args = credential_args(provider, account, cluster, alias.as_deref(), &path)?;
+        let before = add_cluster::current_context(&path)?;
+        let (stdout, stderr) = self.run_both(provider, &args, Some(&path), self.add_timeout).await?;
+        let output = [stderr, stdout].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+        // All three end on the new context.
+        let mut context = add_cluster::current_context(&path)?
+            .ok_or_else(|| Error::Message(format!("{} didn't add a context to {}", cli(provider).0, path.display())))?;
+        if provider == CloudProvider::Gke
+            && let Some(alias) = alias
+            && alias != context
+        {
+            add_cluster::rename_context(&path, &context, &alias)?;
+            context = alias;
+        }
+        if !make_current && before.as_deref() != Some(context.as_str()) {
+            add_cluster::set_current_context(&path, before.as_deref())?;
+        }
+        tracing::info!(?provider, %context, path = %path.display(), "added cloud cluster to kubeconfig");
+        Ok(AddedCluster { context, output })
     }
 }
 
@@ -97,43 +265,6 @@ fn json(text: &str) -> Result<Value> {
 
 fn text(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or_default().to_owned()
-}
-
-/// The projects (GKE), profiles (EKS) or subscriptions (AKS) to pick from.
-pub async fn accounts(provider: CloudProvider) -> Result<CloudAccounts> {
-    match provider {
-        CloudProvider::Gke => {
-            let list = run(provider, &args(["projects", "list", "--format=json(projectId,name)"]), None, LIST_TIMEOUT).await?;
-            let default = run(provider, &args(["config", "get-value", "project"]), None, LIST_TIMEOUT).await.ok();
-            Ok(CloudAccounts { accounts: gke_projects(&json(&list)?), default: default.filter(|p| !p.is_empty()), region: None })
-        }
-        CloudProvider::Eks => {
-            let list = run(provider, &args(["configure", "list-profiles"]), None, LIST_TIMEOUT).await?;
-            let names: Vec<String> = list.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
-            let regions = futures::future::join_all(names.iter().map(|p| async move {
-                run(provider, &[format!("--profile={p}"), "configure".into(), "get".into(), "region".into()], None, LIST_TIMEOUT)
-                    .await
-                    .ok()
-                    .filter(|r| !r.is_empty())
-            }))
-            .await;
-            let accounts = names
-                .into_iter()
-                .zip(regions)
-                .map(|(name, region)| CloudAccount { id: name.clone(), label: name, region })
-                .collect();
-            let default = std::env::var("AWS_PROFILE").ok().filter(|p| !p.is_empty());
-            let region = match ["AWS_REGION", "AWS_DEFAULT_REGION"].iter().find_map(|v| std::env::var(v).ok().filter(|r| !r.is_empty())) {
-                Some(region) => Some(region),
-                None => run(provider, &args(["configure", "get", "region"]), None, LIST_TIMEOUT).await.ok().filter(|r| !r.is_empty()),
-            };
-            Ok(CloudAccounts { accounts, default, region })
-        }
-        CloudProvider::Aks => {
-            let list = run(provider, &args(["account", "list", "--output=json"]), None, LIST_TIMEOUT).await?;
-            Ok(aks_subscriptions(&json(&list)?))
-        }
-    }
 }
 
 fn args<const N: usize>(a: [&str; N]) -> Vec<String> {
@@ -166,58 +297,6 @@ fn aks_subscriptions(list: &Value) -> CloudAccounts {
         .filter(|s| !s.id.is_empty())
         .collect();
     CloudAccounts { accounts, default, region: None }
-}
-
-/// The clusters in `account` (EKS: in `region`).
-pub async fn clusters(provider: CloudProvider, account: &str, region: &str) -> Result<Vec<CloudCluster>> {
-    let mut list = match provider {
-        CloudProvider::Gke => {
-            let out = run(
-                provider,
-                &[
-                    "container".into(),
-                    "clusters".into(),
-                    "list".into(),
-                    format!("--project={}", arg("project", account)?),
-                    "--format=json".into(),
-                ],
-                None,
-                LIST_TIMEOUT,
-            )
-            .await?;
-            let mut list = gke_clusters(&json(&out)?);
-            for c in &mut list {
-                c.entry = format!("gke_{account}_{}_{}", c.location, c.name);
-            }
-            list
-        }
-        CloudProvider::Eks => {
-            let region = arg("region", region)?;
-            let mut a = eks_profile(account)?;
-            a.extend(["eks".into(), "list-clusters".into(), format!("--region={region}"), "--output=json".into()]);
-            let out = run(provider, &a, None, LIST_TIMEOUT).await?;
-            let mut list = eks_clusters(&json(&out)?, &region);
-            eks_describe(account, &mut list).await;
-            list
-        }
-        CloudProvider::Aks => {
-            let out = run(
-                provider,
-                &[
-                    "aks".into(),
-                    "list".into(),
-                    format!("--subscription={}", arg("subscription", account)?),
-                    "--output=json".into(),
-                ],
-                None,
-                LIST_TIMEOUT,
-            )
-            .await?;
-            aks_clusters(&json(&out)?)
-        }
-    };
-    list.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.location.cmp(&b.location)));
-    Ok(list)
 }
 
 /// `--profile=<p>`, or nothing for the default credentials.
@@ -261,40 +340,6 @@ fn eks_clusters(list: &Value, region: &str) -> Vec<CloudCluster> {
         .collect()
 }
 
-/// `list-clusters` gives only names: each cluster's version and status come
-/// from `describe-cluster`, a few at a time. One that can't be described (no
-/// `eks:DescribeCluster` permission, say) is listed without them.
-async fn eks_describe(account: &str, list: &mut [CloudCluster]) {
-    use futures::StreamExt;
-    let Ok(profile) = eks_profile(account) else { return };
-    let commands: Vec<Option<Vec<String>>> = list
-        .iter()
-        .map(|c| {
-            let mut a = profile.clone();
-            a.extend([
-                "eks".into(),
-                "describe-cluster".into(),
-                format!("--name={}", arg("cluster", &c.name).ok()?),
-                format!("--region={}", c.location),
-                "--output=json".into(),
-            ]);
-            Some(a)
-        })
-        .collect();
-    let described: Vec<Option<Value>> = futures::stream::iter(commands)
-        .map(|a| async move {
-            let out = run(CloudProvider::Eks, &a?, None, LIST_TIMEOUT).await.ok()?;
-            json(&out).ok()
-        })
-        .buffered(EKS_DESCRIBE_AT_ONCE)
-        .collect()
-        .await;
-    for (cluster, found) in list.iter_mut().zip(described) {
-        if let Some(described) = found {
-            eks_fill(cluster, &described);
-        }
-    }
-}
 
 /// How many `aws eks describe-cluster` run at once.
 const EKS_DESCRIBE_AT_ONCE: usize = 6;
@@ -381,38 +426,6 @@ fn credential_args(provider: CloudProvider, account: &str, cluster: &CloudCluste
     })
 }
 
-/// Has the provider's CLI add `cluster` to the kubeconfig, named `alias`
-/// when given. The CLIs make it kubectl's current context; unless
-/// `make_current`, the previous one is put back.
-pub async fn add(provider: CloudProvider, account: &str, cluster: &CloudCluster, alias: &str, make_current: bool) -> Result<AddedCluster> {
-    let path = add_cluster::kubeconfig_path()?;
-    let alias = alias.trim();
-    let alias = (!alias.is_empty()).then(|| arg("context name", alias)).transpose()?;
-    if let Some(alias) = &alias
-        && add_cluster::TakenNames::read()?.contexts.iter().any(|c| c == alias)
-    {
-        return Err(Error::Message(format!("A context named {alias:?} already exists.")));
-    }
-    let args = credential_args(provider, account, cluster, alias.as_deref(), &path)?;
-    let before = add_cluster::current_context(&path)?;
-    let (stdout, stderr) = run_both(provider, &args, Some(&path), ADD_TIMEOUT).await?;
-    let output = [stderr, stdout].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
-    // All three end on the new context.
-    let mut context = add_cluster::current_context(&path)?
-        .ok_or_else(|| Error::Message(format!("{} didn't add a context to {}", cli(provider).0, path.display())))?;
-    if provider == CloudProvider::Gke
-        && let Some(alias) = alias
-        && alias != context
-    {
-        add_cluster::rename_context(&path, &context, &alias)?;
-        context = alias;
-    }
-    if !make_current && before.as_deref() != Some(context.as_str()) {
-        add_cluster::set_current_context(&path, before.as_deref())?;
-    }
-    tracing::info!(?provider, %context, path = %path.display(), "added cloud cluster to kubeconfig");
-    Ok(AddedCluster { context, output })
-}
 
 #[cfg(test)]
 #[path = "cloud_tests.rs"]

@@ -6,35 +6,30 @@
 
 use tauri::image::Image;
 use tauri::plugin::{Builder, TauriPlugin};
-use tauri::{AppHandle, Manager, Runtime, Theme, Window, WindowEvent};
+use tauri::{AppHandle, Manager, Runtime, Theme, Window};
 
 const DARK: &[u8] = include_bytes!("../icons/dark-256x256.png");
 
-/// Sets each window's icon as it opens, and again when its appearance changes.
+/// Whether this system's window icons follow the window's appearance.
+const FOLLOWS: bool = cfg!(windows);
+
+/// Sets each window's icon as it opens; `theme_changed` sets it again when
+/// its appearance changes.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::new("app-icon")
-        .on_window_ready(|window| {
-            if !cfg!(windows) {
-                return;
-            }
-            apply(&window, window.theme().ok());
-            let w = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::ThemeChanged(theme) = event {
-                    apply(&w, Some(*theme));
-                }
-            });
-        })
-        .build()
+    Builder::new("app-icon").on_window_ready(|window| follow(&window, FOLLOWS, None)).build()
+}
+
+/// Window `label`'s appearance changed.
+pub fn theme_changed<R: Runtime>(app: &AppHandle<R>, label: &str, theme: Theme) {
+    if let Some(webview) = app.get_webview_window(label) {
+        follow(&webview.as_ref().window(), FOLLOWS, Some(theme));
+    }
 }
 
 /// Re-applies every window's icon, after Settings › Appearance changes.
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
-    if cfg!(windows) {
-        for webview in app.webview_windows().values() {
-            let window = webview.as_ref().window();
-            apply(&window, window.theme().ok());
-        }
+    for webview in app.webview_windows().values() {
+        follow(&webview.as_ref().window(), FOLLOWS, None);
     }
 }
 
@@ -47,17 +42,21 @@ fn version(follows: bool, theme: Option<Theme>) -> Theme {
     }
 }
 
-fn apply<R: Runtime>(window: &Window<R>, theme: Option<Theme>) {
-    let result = match version(cfg!(windows), theme) {
+/// Where icons follow the appearance (`follows`), sets `window`'s for
+/// `theme`, or for its current appearance when that's `None`.
+fn follow<R: Runtime>(window: &Window<R>, follows: bool, theme: Option<Theme>) {
+    if !follows {
+        return;
+    }
+    let theme = theme.or_else(|| window.theme().ok());
+    let result = match version(follows, theme) {
         Theme::Dark => Image::from_bytes(DARK).and_then(|icon| window.set_icon(icon)),
         _ => match window.app_handle().default_window_icon() {
             Some(icon) => window.set_icon(icon.clone()),
             None => Ok(()),
         },
     };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "setting the window icon failed");
-    }
+    crate::log_err(result, "setting the window icon failed");
 }
 
 #[cfg(test)]
@@ -80,5 +79,26 @@ mod tests {
     fn dark_icon_decodes() {
         let icon = Image::from_bytes(DARK).unwrap();
         assert_eq!((icon.width(), icon.height()), (256, 256));
+    }
+
+    #[test]
+    fn icons_are_set_where_they_follow_the_appearance() {
+        use tauri::test::{mock_builder, mock_context, noop_assets};
+        // With and without a default icon to go back to.
+        for icon in [None, Some(Image::from_bytes(DARK).unwrap())] {
+            let mut context = mock_context(noop_assets());
+            context.set_default_window_icon(icon);
+            let app = mock_builder().plugin(init()).build(context).unwrap();
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default()).build().unwrap();
+            let window = webview.as_ref().window();
+            // The mock window reports a light appearance; it takes either icon.
+            for theme in [None, Some(Theme::Dark), Some(Theme::Light)] {
+                follow(&window, true, theme);
+                follow(&window, false, theme);
+            }
+            theme_changed(app.handle(), "main", Theme::Dark);
+            theme_changed(app.handle(), "gone", Theme::Dark);
+            refresh(app.handle());
+        }
     }
 }

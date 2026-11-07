@@ -174,7 +174,7 @@ impl Trace {
             Ok(file)
         })
         .await
-        .map_err(|e| Error::Message(e.to_string()))??;
+        .map_err(join_error)??;
         let backfill = (retention_secs as i64 - RETENTION_MARGIN_SECS).clamp(0, BACKFILL_MAX_SECS);
         let covered_until = align_up(now as i64 - backfill);
         let data_start = if prometheus.is_some() { covered_until } else { align_down(now as i64) };
@@ -271,12 +271,13 @@ impl Trace {
     /// a gap), pending samples written, and the file closed.
     pub async fn finish(&self, reason: TraceEnd) -> Result<TraceSummary> {
         let now = unix_now();
+        // `None`: timed out.
         let pulled = match &self.prometheus {
-            Some(_) => tokio::time::timeout(FINAL_PULL_TIMEOUT, self.pull()).await.map_err(|_| "timed out".to_owned()),
-            None => Ok(Ok(PullReport::default())),
+            Some(_) => tokio::time::timeout(FINAL_PULL_TIMEOUT, self.pull()).await.ok(),
+            None => Some(Ok(PullReport::default())),
         };
         let mut state = self.state.lock().await;
-        if self.prometheus.is_some() && !matches!(pulled, Ok(Ok(_))) {
+        if self.prometheus.is_some() && !matches!(pulled, Some(Ok(_))) {
             let (start, end) = (state.covered_until, align_up(now as i64));
             self.with_file(move |f| f.add_gap(start, end, "the last pull before stopping failed")).await?;
             self.note(|l| l.gaps += 1);
@@ -433,7 +434,7 @@ impl Trace {
         let file = self.file.clone();
         tokio::task::spawn_blocking(move || f(&mut file.lock().unwrap()))
             .await
-            .map_err(|e| Error::Message(e.to_string()))?
+            .map_err(join_error)?
     }
 }
 
@@ -1145,7 +1146,12 @@ pub async fn read_summary(path: &Path) -> Result<TraceSummary> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || TraceFile::open(&path)?.summary(false))
         .await
-        .map_err(|e| Error::Message(e.to_string()))?
+        .map_err(join_error)?
+}
+
+/// A blocking task that panicked or was cancelled.
+fn join_error(e: tokio::task::JoinError) -> Error {
+    Error::Message(e.to_string())
 }
 
 fn unix_now() -> f64 {

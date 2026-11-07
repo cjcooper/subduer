@@ -33,7 +33,8 @@ pub async fn object_details(client: &Client, kind: &KindRef, namespace: Option<&
         return Err(Error::Message(format!("no details view for {}", kind.kind)));
     }
     let object = dynamic_api(client, kind, namespace).get(name).await?;
-    let v = serde_json::to_value(&object).map_err(|e| Error::Message(e.to_string()))?;
+    // An object read from JSON always turns back into JSON.
+    let v = serde_json::to_value(&object).unwrap_or_default();
     let mut d = describe(&kind.key(), &v, jiff::Timestamp::now());
     let ns = namespace.unwrap_or_default();
     match kind.key().as_str() {

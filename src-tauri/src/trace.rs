@@ -16,6 +16,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::oneshot;
 
+use crate::system::{self, Ask};
 use crate::{AppState, Win};
 use crate::commands::{CmdResult, connected_client, err};
 
@@ -54,7 +55,7 @@ impl TraceRunner {
         }
         tracing::info!(?reason, path = %r.trace.status().path, "stopping trace");
         let result = match (&mut r.done).await {
-            Ok(summary) => summary.map_err(|e| e.user_message()),
+            Ok(summary) => summary.map_err(crate::commands::user),
             Err(e) => Err(format!("the trace stopped unexpectedly: {e}")),
         };
         self.active.store(false, Ordering::SeqCst);
@@ -71,16 +72,18 @@ impl TraceRunner {
 /// the Dock's Quit or logging out), so its file still gets an end. Gives up
 /// a little after the last pull's own limit; the file keeps what it has.
 pub fn stop_on_exit(runner: &TraceRunner) {
+    stop_within(runner, subduer_core::trace::FINAL_PULL_TIMEOUT + std::time::Duration::from_secs(5));
+}
+
+/// [`stop_on_exit`], giving up after `limit`.
+fn stop_within(runner: &TraceRunner, limit: std::time::Duration) {
     if !runner.is_active() {
         return;
     }
-    let limit = subduer_core::trace::FINAL_PULL_TIMEOUT + std::time::Duration::from_secs(5);
-    let stopped = tauri::async_runtime::block_on(tokio::time::timeout(limit, runner.stop(TraceEnd::Quit)));
-    match stopped {
-        Ok(Some(Err(e))) => tracing::warn!(error = %e, "closing the trace on exit failed"),
-        Err(_) => tracing::warn!("closing the trace on exit timed out"),
-        _ => {}
-    }
+    let Ok(stopped) = tauri::async_runtime::block_on(tokio::time::timeout(limit, runner.stop(TraceEnd::Quit))) else {
+        return tracing::warn!("closing the trace on exit timed out");
+    };
+    crate::log_err(stopped.transpose(), "closing the trace on exit failed");
 }
 
 /// Workloads and running pods in a namespace, for the start dialog.
@@ -94,19 +97,12 @@ pub async fn trace_targets(state: Win, namespace: String) -> CmdResult<TraceTarg
 /// `suggested` as the name. `None` if cancelled. The dialog has already
 /// asked about replacing an existing file.
 #[tauri::command]
-pub async fn choose_trace_file<R: Runtime>(app: AppHandle<R>, suggested: String) -> CmdResult<Option<String>> {
+pub async fn choose_trace_file<R: Runtime>(app: AppHandle<R>, suggested: String, dialogs: tauri::State<'_, system::Dialogs<R>>) -> CmdResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = oneshot::channel();
-    let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_file_name(&suggested).set_title("Save trace as");
-    if let Ok(dir) = app.path().document_dir() {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.save_file(move |path| {
-        let _ = tx.send(path);
-    });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    let path = path.into_path().map_err(|e| e.to_string())?;
-    Ok(Some(with_extension(&path).display().to_string()))
+    let dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_file_name(&suggested).set_title("Save trace as");
+    let dialog = system::starting_in(dialog, app.path().document_dir().ok());
+    let path = system::ask(&dialogs, dialog, Ask::Save).await?;
+    Ok(path.map(|path| with_extension(&path).display().to_string()))
 }
 
 /// Adds `.trace` unless the name already ends with it.
@@ -193,33 +189,27 @@ pub async fn stop_trace<R: Runtime>(app: AppHandle<R>, state: Win, reason: Trace
 
 /// Shows a trace file this app recorded in Finder (or its folder elsewhere).
 #[tauri::command]
-pub fn reveal_trace(state: Win, path: String) -> CmdResult<()> {
+pub fn reveal_trace(app_state: tauri::State<'_, AppState>, state: Win, path: String) -> CmdResult<()> {
     let path = PathBuf::from(path);
     if !state.traces.known.lock().unwrap().contains(&path) {
         return Err("only traces recorded or opened in this session can be revealed".into());
     }
-    crate::upload::reveal(&path)
+    app_state.launcher.reveal(&path)
 }
 
 /// The native Open dialog for a trace file, starting in Documents. `None` if cancelled.
 #[tauri::command]
-pub async fn choose_trace_to_open<R: Runtime>(app: AppHandle<R>) -> CmdResult<Option<String>> {
+pub async fn choose_trace_to_open<R: Runtime>(app: AppHandle<R>, dialogs: tauri::State<'_, system::Dialogs<R>>) -> CmdResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = oneshot::channel();
-    let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_title("Open trace");
-    if let Ok(dir) = app.path().document_dir() {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.pick_file(move |path| {
-        let _ = tx.send(path);
-    });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    Ok(Some(path.into_path().map_err(|e| e.to_string())?.display().to_string()))
+    let dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_title("Open trace");
+    let dialog = system::starting_in(dialog, app.path().document_dir().ok());
+    let path = system::ask(&dialogs, dialog, Ask::Open).await?;
+    Ok(path.map(|path| path.display().to_string()))
 }
 
 /// Runs a file read off the async runtime.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> subduer_core::Result<T> + Send + 'static) -> CmdResult<T> {
-    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?.map_err(|e| e.user_message())
+    tauri::async_runtime::spawn_blocking(f).await.map_err(crate::commands::err)?.map_err(crate::commands::user)
 }
 
 /// Reads a trace file for review: its header and the right-sizing table.
@@ -292,24 +282,22 @@ pub async fn trace_compare(state: Win, paths: Vec<String>) -> CmdResult<TraceCom
 
 /// The native Save dialog for an HTML report, next to its trace.
 #[tauri::command]
-pub async fn choose_report_file<R: Runtime>(app: AppHandle<R>, trace: String) -> CmdResult<Option<String>> {
+pub async fn choose_report_file<R: Runtime>(app: AppHandle<R>, trace: String, dialogs: tauri::State<'_, system::Dialogs<R>>) -> CmdResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
     let trace = PathBuf::from(trace);
     let name = format!("{}-report.html", trace.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "trace".into()));
-    let (tx, rx) = oneshot::channel();
-    let mut dialog = app.dialog().file().add_filter("Web page", &["html"]).set_file_name(&name).set_title("Save report as");
-    if let Some(dir) = trace.parent() {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.save_file(move |path| {
-        let _ = tx.send(path);
-    });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    let mut path = path.into_path().map_err(|e| e.to_string())?;
+    let dialog = app.dialog().file().add_filter("Web page", &["html"]).set_file_name(&name).set_title("Save report as");
+    let dialog = system::starting_in(dialog, trace.parent());
+    let path = system::ask(&dialogs, dialog, Ask::Save).await?;
+    Ok(path.map(|path| html_extension(path).display().to_string()))
+}
+
+/// Ends a report's name in `.html`, unless it's already a web page.
+fn html_extension(mut path: PathBuf) -> PathBuf {
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm")) {
         path.set_extension("html");
     }
-    Ok(Some(path.display().to_string()))
+    path
 }
 
 /// Writes a trace's review as a self-contained HTML page to `out` (the Save
@@ -334,6 +322,48 @@ pub async fn export_trace_report(state: Win, path: String, out: String) -> CmdRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_are_web_pages() {
+        assert_eq!(html_extension(PathBuf::from("/tmp/r.html")), PathBuf::from("/tmp/r.html"));
+        assert_eq!(html_extension(PathBuf::from("/tmp/r.HTM")), PathBuf::from("/tmp/r.HTM"));
+        assert_eq!(html_extension(PathBuf::from("/tmp/r")), PathBuf::from("/tmp/r.html"));
+        assert_eq!(html_extension(PathBuf::from("/tmp/r.txt")), PathBuf::from("/tmp/r.html"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trace_that_dies_or_hangs_is_reported() {
+        use serde_json::json;
+        use subduer_core::testing::{MockApi, list, pod};
+        let api = MockApi::new();
+        api.on("GET", "/api/v1/services", list("ServiceList", vec![]));
+        api.on("GET", "/api/v1/namespaces/shop/pods", list("PodList", vec![pod("shop", "api-1", "node-a", json!({}))]));
+        let app = tauri::test::mock_app();
+        app.manage(AppState::default());
+        let win = app.state::<AppState>().add_window(crate::MAIN_LABEL);
+        *win.session.write().await = Some(crate::Session { context: "acme-uat".into(), client: api.client(), history: Default::default() });
+        let win = app.state::<AppState>().window(crate::MAIN_LABEL).unwrap();
+        let dir = std::env::temp_dir().join(format!("subduer-tauri-trace-dies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let scope = || TraceScope::Pod { namespace: "shop".into(), name: "api-1".into() };
+        let every = subduer_core::trace::DEFAULT_PULL_EVERY_SECS;
+        let start = |file: &str| start_trace(app.handle().clone(), win.clone(), "acme-uat".into(), scope(), dir.join(file).display().to_string(), every);
+
+        // The recording task dies.
+        start("dies").await.unwrap();
+        win.traces.running.lock().await.as_ref().unwrap().done.abort();
+        let stopped = win.traces.stop(TraceEnd::Stopped).await.unwrap();
+        assert!(stopped.unwrap_err().starts_with("the trace stopped unexpectedly"));
+        assert!(!win.traces.is_active());
+
+        // Quitting doesn't wait for a file that won't close.
+        start("hangs").await.unwrap();
+        let runner = win.clone();
+        tokio::task::spawn_blocking(move || stop_within(&runner.traces, std::time::Duration::ZERO)).await.unwrap();
+        assert!(win.traces.running.lock().await.is_none());
+        // The abandoned recording may still be closing its file.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn trace_files_get_their_extension() {

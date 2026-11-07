@@ -127,6 +127,23 @@ async fn uploads_send_every_byte() {
 }
 
 #[tokio::test]
+async fn stdin_ends_after_the_grace_period() {
+    // A container that waits for the end of stdin before answering.
+    let fake = start(vec![Step::Wait(|s| s.stdin_closed), out("/tmp/a.txt\n5\n"), success()]).await;
+    let got = upload_within(fake.client, &target("/tmp/", "a.txt"), b"hello", Duration::ZERO).await.unwrap();
+    assert_eq!(got, UploadOutcome::Uploaded { bytes: 5, path: "/tmp/a.txt".into() });
+    let seen = fake.seen.lock().unwrap().clone();
+    assert!(seen.stdin_closed);
+    assert_eq!(seen.stdin, b"hello");
+}
+
+#[test]
+fn unopened_streams_are_an_error() {
+    let err = opened::<()>(None, EXEC_STREAMS).unwrap_err();
+    assert_eq!(err.to_string(), "The API server didn't open the exec streams.");
+}
+
+#[tokio::test]
 async fn short_uploads_are_errors() {
     let fake = start(vec![out("/tmp/a.txt\n"), Step::Wait(|s| s.stdin.len() == 5), out("3\n"), success()]).await;
     let e = upload(fake.client, &target("/tmp/", "a.txt"), b"hello").await.unwrap_err();

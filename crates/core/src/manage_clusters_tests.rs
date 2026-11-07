@@ -9,6 +9,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(test: &str) -> Self {
+        crate::testing::record_all_traces();
         let dir = std::env::temp_dir().join(format!("subduer-manage-clusters-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -123,6 +124,40 @@ fn removes_the_context_and_what_only_it_used() {
     assert_eq!(Kubeconfig::read_from(&main).unwrap().current_context, None);
     assert!(remove(&files, "nope").unwrap_err().to_string().contains("nope"));
     assert!(!dir.0.join("main.lock").exists());
+}
+
+#[test]
+fn waits_for_no_one_holding_the_lock() {
+    let dir = Scratch::new("locked");
+    let main = dir.file("main", MAIN);
+    let lock = dir.file("main.lock", "");
+    let files = [main.clone()];
+    assert!(remove(&files, "a").unwrap_err().to_string().contains("another program"));
+    assert!(reorder(&files, &["b".into(), "a".into()]).unwrap_err().to_string().contains("another program"));
+    assert_eq!(fs::read_to_string(&main).unwrap(), MAIN);
+    assert!(lock.exists());
+}
+
+#[test]
+fn a_context_gone_by_the_time_the_file_is_locked_is_not_found() {
+    let file = Path::new("/k/config");
+    let none = (HashSet::new(), HashSet::new());
+    let mut no_list: Mapping = serde_norway::from_str("apiVersion: v1\n").unwrap();
+    let err = remove_from(&mut no_list, file, "a", &none).unwrap_err().to_string();
+    assert_eq!(err, "not found: context \"a\" in /k/config");
+    let mut other: Mapping = serde_norway::from_str("contexts:\n- name: b\n  context: {cluster: b}\n").unwrap();
+    assert!(remove_from(&mut other, file, "a", &none).is_err());
+    assert_eq!(entries(&other, "contexts").count(), 1);
+}
+
+#[test]
+fn a_cluster_or_user_the_file_does_not_define_is_not_reported() {
+    let file = Path::new("/k/config");
+    let none = (HashSet::new(), HashSet::new());
+    let mut doc: Mapping = serde_norway::from_str("users: []\ncontexts:\n- name: a\n  context: {cluster: elsewhere, user: someone}\n").unwrap();
+    let removed = remove_from(&mut doc, file, "a", &none).unwrap();
+    assert_eq!(removed, RemovedContext { context: "a".into(), cluster: None, user: None });
+    assert_eq!(entries(&doc, "contexts").count(), 0);
 }
 
 #[test]

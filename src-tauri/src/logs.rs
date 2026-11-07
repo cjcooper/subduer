@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use subduer_core::kube::Client;
 use subduer_core::types::{LogBatch, LogSession, LogTarget};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Runtime};
 
 use crate::{AppState, Win};
 
@@ -30,7 +30,8 @@ pub struct LogWindows {
 }
 
 impl LogWindows {
-    fn stop(&self, label: &str) {
+    /// The window closed: end its stream.
+    pub(crate) fn stop(&self, label: &str) {
         if let Some(w) = self.windows.lock().unwrap().remove(label)
             && let Some(task) = w.task
         {
@@ -58,7 +59,7 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         .map(|(label, _)| label.clone());
     if let Some(window) = existing.and_then(|label| app.get_webview_window(&label)) {
         let _ = window.unminimize();
-        return window.set_focus().map_err(|e| e.to_string());
+        return window.set_focus().map_err(crate::commands::err);
     }
 
     let id = state.logs.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -69,7 +70,8 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         LogWindow { client, context, target, task: None },
     );
     state.adopt(&label, &win.label);
-    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?logs={label}").into()))
+    // Closing it ends the stream (`LogWindows::stop`).
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?logs={label}").into()))
         .title(&title)
         .inner_size(1100.0, 700.0)
         .min_inner_size(480.0, 280.0)
@@ -80,14 +82,6 @@ pub async fn open_logs<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
             state.forget(&label);
             e.to_string()
         })?;
-    let handle = app.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Destroyed = event {
-            let state = handle.state::<AppState>();
-            state.logs.stop(&label);
-            state.forget(&label);
-        }
-    });
     Ok(())
 }
 
@@ -105,11 +99,7 @@ pub fn logs_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppStat
     let event = label.clone();
     let (client, target, emit_event) = (w.client.clone(), w.target.clone(), event.clone());
     w.task = Some(tauri::async_runtime::spawn(async move {
-        let send = move |batch: LogBatch| {
-            if let Err(e) = window.emit_to(window.label(), &emit_event, batch) {
-                tracing::warn!(error = %e, "logs emit failed");
-            }
-        };
+        let send = move |batch: LogBatch| crate::log_err(window.emit_to(window.label(), &emit_event, batch), "logs emit failed");
         if let Err(e) = subduer_core::logs::stream(client, target, previous, &send).await {
             send(LogBatch { lines: vec![], notices: vec![e.user_message()] });
         }

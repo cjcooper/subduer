@@ -56,7 +56,9 @@ pub async fn restart(
     if !dry_run {
         gate.ensure_writable(context)?;
     }
-    let now = jiff::Timestamp::now().round(jiff::Unit::Second).map_err(|e| Error::Message(e.to_string()))?;
+    // Rounding fails only at the very end of jiff's range; keep the time as is then.
+    let now = jiff::Timestamp::now();
+    let now = now.round(jiff::Unit::Second).unwrap_or(now);
     let patch = json!({
         "spec": { "template": { "metadata": { "annotations": { RESTARTED_AT: now.to_string() } } } }
     });

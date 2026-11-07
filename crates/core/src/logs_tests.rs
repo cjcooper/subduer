@@ -223,12 +223,65 @@ fn pod_streams_need_a_spec() {
 
 #[test]
 fn flush_skips_empty_batches() {
-    let emitted = RefCell::new(0);
+    let emitted = RefCell::new(vec![]);
+    let emit = |b: LogBatch| emitted.borrow_mut().push(b);
     let mut batch = LogBatch::default();
-    flush(&mut batch, true, &|_| *emitted.borrow_mut() += 1);
-    assert_eq!(*emitted.borrow(), 0);
+    flush(&mut batch, true, &emit);
+    assert!(emitted.borrow().is_empty());
     batch.notices.push("x".into());
-    flush(&mut batch, false, &|_| *emitted.borrow_mut() += 1);
-    assert_eq!(*emitted.borrow(), 1);
+    flush(&mut batch, false, &emit);
+    assert_eq!(emitted.borrow().len(), 1);
     assert!(batch.notices.is_empty());
+    // Merged batches are put in time order.
+    let line = |time: &str| LogLine { source: None, time: Some(time.into()), text: time.into() };
+    batch.lines = vec![line("2026-10-10T00:00:02Z"), line("2026-10-10T00:00:01Z")];
+    flush(&mut batch, true, &emit);
+    let texts: Vec<String> = emitted.borrow()[1].lines.iter().map(|l| l.text.clone()).collect();
+    assert_eq!(texts, ["2026-10-10T00:00:01Z", "2026-10-10T00:00:02Z"]);
+}
+
+fn web_stream(label: Option<&str>) -> Stream {
+    Stream { pod: "web".into(), container: "app".into(), label: label.map(str::to_owned) }
+}
+
+#[tokio::test]
+async fn following_stops_once_nobody_listens() {
+    let api = MockApi::new();
+    api.on_text("GET", WEB_LOG, 200, "one\ntwo\nthree\n");
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(rx);
+    let pods: Api<Pod> = Api::namespaced(api.client(), "shop");
+    tokio::time::timeout(Duration::from_secs(10), follow(pods, web_stream(Some("web/app")), 10, false, tx)).await.expect("kept following");
+    assert_eq!(api.calls_to("GET", WEB_LOG).len(), 1);
+}
+
+/// A plain HTTP server answering one request with `body` (any bytes).
+async fn raw_server(body: &'static [u8]) -> Client {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(body).await.unwrap();
+        let _ = socket.shutdown().await;
+    });
+    Client::try_from(kube::Config::new(url.parse().unwrap())).unwrap()
+}
+
+#[tokio::test]
+async fn unreadable_log_text_ends_the_stream_with_a_notice() {
+    // Not UTF-8: the line reader fails.
+    let client = raw_server(b"fine\n\xff\xfe broken\n").await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let pods: Api<Pod> = Api::namespaced(client, "shop");
+    tokio::time::timeout(Duration::from_secs(10), follow(pods, web_stream(None), 10, false, tx)).await.expect("kept following");
+    let Some(Msg::Line(first)) = rx.recv().await else { panic!("expected a line") };
+    assert_eq!(first.text, "fine");
+    let Some(Msg::Notice(notice)) = rx.recv().await else { panic!("expected a notice") };
+    assert!(notice.starts_with("app: stream error: "), "{notice}");
+    assert!(rx.recv().await.is_none());
 }

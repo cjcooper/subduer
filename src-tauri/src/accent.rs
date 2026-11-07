@@ -40,11 +40,25 @@ fn from_portal(output: &str) -> Option<String> {
 /// The accent the user picked; `None` for Multicolor, where apps use their own.
 #[cfg(target_os = "macos")]
 fn read() -> Option<String> {
-    use objc2_app_kit::{NSColor, NSColorSpace};
-    use objc2_foundation::{NSString, NSUserDefaults};
+    unless_multicolor(multicolor(), control_accent)
+}
 
-    let defaults = NSUserDefaults::standardUserDefaults();
-    defaults.objectForKey(&NSString::from_str("AppleAccentColor"))?;
+/// `accent`, unless the user picked Multicolor.
+fn unless_multicolor(multicolor: bool, accent: impl FnOnce() -> Option<String>) -> Option<String> {
+    if multicolor { None } else { accent() }
+}
+
+/// macOS keeps no accent colour setting for Multicolor.
+#[cfg(target_os = "macos")]
+fn multicolor() -> bool {
+    use objc2_foundation::{NSString, NSUserDefaults};
+    NSUserDefaults::standardUserDefaults().objectForKey(&NSString::from_str("AppleAccentColor")).is_none()
+}
+
+/// The accent colour controls are drawn in.
+#[cfg(target_os = "macos")]
+fn control_accent() -> Option<String> {
+    use objc2_app_kit::{NSColor, NSColorSpace};
     let color = NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
     hex(color.redComponent(), color.greenComponent(), color.blueComponent())
 }
@@ -91,6 +105,27 @@ mod tests {
     }
 
     #[test]
+    fn multicolor_keeps_the_apps_own() {
+        fn blue() -> Option<String> {
+            Some("#0080ff".into())
+        }
+        assert_eq!(unless_multicolor(true, blue), None);
+        assert_eq!(unless_multicolor(false, blue).as_deref(), Some("#0080ff"));
+    }
+
+    #[test]
+    fn reads_the_systems_accent() {
+        let accent = system_accent();
+        assert!(accent.as_deref().is_none_or(|a| a.len() == 7 && a.starts_with('#')), "{accent:?}");
+        #[cfg(target_os = "macos")]
+        {
+            // Whatever the setting, controls have an accent colour.
+            assert!(control_accent().is_some_and(|a| a.starts_with('#')));
+            assert_eq!(accent.is_none(), multicolor());
+        }
+    }
+
+    #[test]
     fn windows_accent_is_abgr() {
         assert_eq!(from_abgr(0xff_d7_78_00), "#0078d7");
     }
@@ -104,6 +139,7 @@ mod tests {
         // Unset: components out of range.
         assert_eq!(from_portal("(<(-1.0, -1.0, -1.0)>,)"), None);
         assert_eq!(from_portal("(<uint32 0>,)"), None);
+        assert_eq!(from_portal("(<(0.2, 0.6)>,)"), None);
         assert_eq!(from_portal(""), None);
     }
 }

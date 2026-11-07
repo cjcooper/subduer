@@ -541,6 +541,131 @@ fn cloud_event_sources() {
 }
 
 #[test]
+fn cloud_event_source_defaults() {
+    let v = object("eventing.keda.sh/v1alpha1", "CloudEventSource", Some("shop"), "ce", json!({
+        "spec": {"destination": {"http": {"uri": "http://sink"}}},
+        "status": {"conditions": conditions(&[("Active", "False")])}
+    }));
+    let d = describe_object("eventing.keda.sh/CloudEventSource", &v, now());
+    assert_eq!(d.status.as_deref(), Some("Inactive"));
+    assert_eq!(row(&d, "Authentication"), None);
+    assert_eq!(row(&d, "Events"), Some("all"));
+
+    let unknown = object("keda.sh/v1alpha1", "SomethingNew", Some("shop"), "n", json!({}));
+    assert_eq!(describe_object("keda.sh/SomethingNew", &unknown, now()).status.as_deref(), Some("Pending"));
+}
+
+#[tokio::test]
+async fn other_kinds_add_only_the_controller() {
+    let api = MockApi::new();
+    api.on("GET", DEPLOYMENTS, controller_deployment());
+    let ce = kind("eventing.keda.sh", "v1alpha1", "CloudEventSource", "cloudeventsources", true);
+    let v = object("eventing.keda.sh/v1alpha1", "CloudEventSource", Some("shop"), "ce", json!({"spec": {}}));
+    let mut d = describe_object("eventing.keda.sh/CloudEventSource", &v, now());
+    let sections = d.sections.len();
+    related(&api.client(), &ce, "shop", "ce", &v, &mut d).await.unwrap();
+    assert_eq!(row(&d, "Controller"), Some("keda/keda-operator"));
+    assert_eq!(d.sections.len(), sections);
+    assert!(api.calls_to("GET", "/api/v1/events").is_empty(), "namespaced: its events come with the details");
+}
+
+#[tokio::test]
+async fn cluster_kinds_show_events_from_any_namespace() {
+    let api = MockApi::new();
+    api.on("GET", "/apis/keda.sh/v1alpha1/scaledobjects", list("ScaledObjectList", vec![]));
+    api.on("GET", "/apis/keda.sh/v1alpha1/scaledjobs", list("ScaledJobList", vec![]));
+    api.on("GET", "/api/v1/events", list("EventList", vec![json!({
+        "metadata": {"name": "e1", "namespace": "keda", "creationTimestamp": "2026-10-27T11:00:00Z"},
+        "involvedObject": {"kind": "ClusterTriggerAuthentication", "name": "prom-auth"},
+        "type": "Warning", "reason": "KEDAClusterTriggerAuthenticationFailed", "message": "no secret", "count": 1,
+        "lastTimestamp": "2026-10-27T11:00:00Z"
+    })]));
+    let cta = kind("keda.sh", "v1alpha1", "ClusterTriggerAuthentication", "clustertriggerauthentications", false);
+    let v = auth("ClusterTriggerAuthentication", None);
+    let mut d = describe_object("keda.sh/ClusterTriggerAuthentication", &v, now());
+    related(&api.client(), &cta, "", "prom-auth", &v, &mut d).await.unwrap();
+    assert_eq!(d.events.len(), 1);
+    assert_eq!(d.events[0].object, None);
+}
+
+#[tokio::test]
+async fn trigger_details_for_other_targets_and_health() {
+    let mut so = web();
+    so["status"]["originalReplicaCount"] = Value::Null;
+    so["status"]["health"]["s0-prometheus"]["status"] = json!("Unknown");
+    so["spec"]["triggers"][0]["metadata"]["threshold"] = json!(50);
+    so["spec"]["triggers"][0]["useCachedMetrics"] = json!(true);
+    let mut hpa = web_hpa();
+    hpa["spec"]["metrics"][0]["external"]["target"] = json!({"type": "Value", "value": "5k"});
+    hpa["spec"]["metrics"][1]["resource"]["target"] = json!({"type": "SomethingNew"});
+    let api = MockApi::new();
+    api.on("GET", "/apis/keda.sh/v1alpha1/namespaces/shop/scaledobjects/web", so);
+    api.on("GET", HPA, hpa);
+    let d = object_details(&api.client(), &so_kind(), Some("shop"), "web").await.unwrap();
+    assert_eq!(row(&d, "When deleted"), Some("puts back the replicas it had before"));
+    let t = table(&d, "keda-triggers");
+    assert_eq!((cells(t)[0][3], cells(t)[0][4]), ("5k", "Unknown"));
+    assert_eq!(cells(t)[1][3], "");
+    let settings = &section(&d, "keda-trigger-0").rows;
+    assert_eq!(settings.iter().find(|r| r.key == "threshold").unwrap().value, "50", "numbers are shown as written");
+    assert_eq!(settings.iter().find(|r| r.key == "useCachedMetrics").unwrap().value, "true");
+}
+
+#[tokio::test]
+async fn scaled_job_strategies_rollouts_and_pending_jobs() {
+    let with = |scaling: Value, rollout: Value| {
+        let mut v = worker();
+        v["spec"]["scalingStrategy"] = scaling;
+        v["spec"]["rollout"] = rollout;
+        describe_object("keda.sh/ScaledJob", &v, now())
+    };
+    let d = with(json!({}), Value::Null);
+    assert!(row(&d, "Strategy").unwrap().starts_with("default: "));
+    assert!(row(&d, "On change").unwrap().starts_with("default: "));
+    let d = with(json!({"strategy": "custom"}), json!({"strategy": "later"}));
+    assert_eq!(row(&d, "Strategy"), Some("custom: waiting items less 0 and 100% of running jobs"));
+    assert_eq!(row(&d, "On change"), Some("later"));
+    let d = with(json!({"strategy": "lazy"}), Value::Null);
+    assert_eq!(row(&d, "Strategy"), Some("lazy"));
+    for (strategy, start) in [("accurate", "accurate: "), ("eager", "eager: ")] {
+        assert!(row(&with(json!({"strategy": strategy}), Value::Null), "Strategy").unwrap().starts_with(start));
+    }
+    let mut old_style = worker();
+    old_style["spec"]["rollout"] = Value::Null;
+    old_style["spec"]["rolloutStrategy"] = json!("gradual");
+    assert!(row(&describe_object("keda.sh/ScaledJob", &old_style, now()), "On change").unwrap().starts_with("gradual: "));
+
+    let api = MockApi::new();
+    api.on("GET", "/apis/batch/v1/namespaces/shop/jobs", list("JobList", vec![job("worker-1", "2026-10-27T11:00:00Z", json!({}))]));
+    let mut d = describe_object("keda.sh/ScaledJob", &worker(), now());
+    let sj = kind("keda.sh", "v1alpha1", "ScaledJob", "scaledjobs", true);
+    related(&api.client(), &sj, "shop", "worker", &worker(), &mut d).await.unwrap();
+    assert_eq!(cells(table(&d, "scaledjob-jobs")), vec![vec!["worker-1", "Pending", ""]]);
+}
+
+#[test]
+fn other_identity_owners_providers_and_aws_versions() {
+    let v = object("keda.sh/v1alpha1", "TriggerAuthentication", Some("shop"), "a", json!({
+        "spec": {
+            "podIdentity": {"provider": "spiffe", "identityOwner": "keda"},
+            "awsSecretManager": {"secrets": [{"parameter": "p", "name": "db", "versionId": "v-1"}, {"parameter": "q", "name": "db"}]}
+        }
+    }));
+    let d = describe_object("keda.sh/TriggerAuthentication", &v, now());
+    assert_eq!(row(&d, "Pod identity"), Some("spiffe · KEDA's own"));
+    assert_eq!(cells(table(&d, "keda-auth-params")), vec![vec!["p", "AWS Secrets Manager", "db", "v-1"], vec!["q", "AWS Secrets Manager", "db", ""]]);
+}
+
+#[tokio::test]
+async fn only_keda_scalers_have_a_replica_range() {
+    let api = MockApi::new();
+    let ta = kind("keda.sh", "v1alpha1", "TriggerAuthentication", "triggerauthentications", true);
+    let err = set_replica_range(&api.client(), &unlocked(), "acme-uat", &ta, "shop", "a", 0, 5, false).await.unwrap_err();
+    assert_eq!(err.to_string(), "TriggerAuthentication has no replica range");
+    assert!(api.calls().is_empty());
+}
+
+#[test]
 fn dropped_columns_keep_numeric_and_time_columns_in_place() {
     let t = InfoTable {
         columns: ["a", "b", "c", "d"].map(String::from).to_vec(),

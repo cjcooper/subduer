@@ -16,7 +16,7 @@ use subduer_core::kube::Client;
 use subduer_core::tls_scan::Scanner;
 use subduer_core::types::{CapturePhase, CaptureRequest, CaptureSession, CaptureUpdate, TlsScan};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::{AppState, Win};
 use crate::commands::{CmdResult, connected_client};
@@ -29,13 +29,15 @@ const UPDATE_EVERY: Duration = Duration::from_secs(1);
 const START_LIMIT: Duration = Duration::from_secs(180);
 /// The container sleeps this much longer than the capture, so it's there to the end.
 const GRACE_SECS: u32 = 60;
+/// How long a closed window's capture may take to finish its file.
+const FINISH_GRACE: Duration = Duration::from_secs(5);
 
 struct CaptureWindow {
     client: Client,
     session: CaptureSession,
     /// The latest update, shared with the running task.
     update: Arc<Mutex<CaptureUpdate>>,
-    task: Option<JoinHandle<()>>,
+    task: JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -46,7 +48,7 @@ pub struct CaptureWindows {
 
 impl CaptureWindows {
     /// The window closed: interrupt tcpdump if it's still running, and forget it.
-    fn closed(&self, label: &str) {
+    pub(crate) fn closed(&self, label: &str) {
         let Some(w) = self.windows.lock().unwrap().remove(label) else { return };
         let running = matches!(w.update.lock().unwrap().phase, CapturePhase::Starting | CapturePhase::Capturing | CapturePhase::Stopping);
         if running {
@@ -55,17 +57,16 @@ impl CaptureWindows {
                 let _ = capture::stop(&client, &s.namespace, &s.pod, &s.container).await;
             });
         }
-        if let Some(task) = w.task {
-            // Give tcpdump a moment to finish the file, then stop reading.
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                task.abort();
-            });
-        }
+        // Give tcpdump a moment to finish the file, then stop reading.
+        let task = w.task;
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(FINISH_GRACE).await;
+            task.abort();
+        });
     }
 }
 
-fn update(phase: CapturePhase) -> CaptureUpdate {
+pub(crate) fn update(phase: CapturePhase) -> CaptureUpdate {
     CaptureUpdate { phase, message: None, image_id: None, started: None, ends: None, bytes: 0, scan: TlsScan::default() }
 }
 
@@ -93,19 +94,12 @@ fn with_extension(path: &Path) -> PathBuf {
 /// `suggested` as the name. `None` if cancelled. The dialog has already
 /// asked about replacing an existing file.
 #[tauri::command]
-pub async fn choose_capture_file<R: Runtime>(app: AppHandle<R>, suggested: String) -> CmdResult<Option<String>> {
+pub async fn choose_capture_file<R: Runtime>(app: AppHandle<R>, suggested: String, dialogs: State<'_, crate::system::Dialogs<R>>) -> CmdResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_file_name(&suggested).set_title("Save capture as");
-    if let Ok(dir) = app.path().document_dir() {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.save_file(move |path| {
-        let _ = tx.send(path);
-    });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    let path = path.into_path().map_err(|e| e.to_string())?;
-    Ok(Some(with_extension(&path).display().to_string()))
+    let dialog = app.dialog().file().add_filter(FILE_TYPE, &[EXTENSION]).set_file_name(&suggested).set_title("Save capture as");
+    let dialog = crate::system::starting_in(dialog, app.path().document_dir().ok());
+    let path = crate::system::ask(&dialogs, dialog, crate::system::Ask::Save).await?;
+    Ok(path.map(|path| with_extension(&path).display().to_string()))
 }
 
 /// Attaches a capture container to the pod (after a dry run, so a refusal
@@ -114,7 +108,7 @@ pub async fn choose_capture_file<R: Runtime>(app: AppHandle<R>, suggested: Strin
 pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, win: Win, request: CaptureRequest) -> CmdResult<String> {
     let client = connected_client(&win).await?;
     let context = win.session.read().await.as_ref().map(|s| s.context.clone()).ok_or("not connected to a cluster")?;
-    win.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
+    win.gate.ensure_writable(&context).map_err(crate::commands::err)?;
     let CaptureRequest { namespace, pod, image, filter, secs, path } = request.clone();
     if secs == 0 || secs > capture::MAX_SECS {
         return Err(format!("a capture lasts 1 to {} minutes", capture::MAX_SECS / 60));
@@ -127,7 +121,7 @@ pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppSt
     }
     let gate = &win.gate;
     let lives = secs + GRACE_SECS;
-    capture::attach(&client, gate, &context, &namespace, &pod, &image, lives, true).await.map_err(|e| e.user_message())?;
+    capture::attach(&client, gate, &context, &namespace, &pod, &image, lives, true).await.map_err(crate::commands::user)?;
     // The file first: a folder that can't be written fails here, before the pod is changed.
     let path = with_extension(Path::new(path.trim()));
     std::fs::File::create(&path).map_err(|e| format!("can't write {}: {e}", path.display()))?;
@@ -160,31 +154,32 @@ pub async fn start_capture<R: Runtime>(app: AppHandle<R>, state: State<'_, AppSt
         update: update(CapturePhase::Starting),
     };
     let shared = Arc::new(Mutex::new(session.update.clone()));
-    let task = tauri::async_runtime::spawn(run(app.clone(), client.clone(), session.clone(), shared.clone()));
-    state.captures.windows.lock().unwrap().insert(label.clone(), CaptureWindow { client, session, update: shared, task: Some(task) });
+    let timing = Timing { start_limit: START_LIMIT, update_every: UPDATE_EVERY };
+    let task = tauri::async_runtime::spawn(run(app.clone(), client.clone(), session.clone(), shared.clone(), timing));
+    state.captures.windows.lock().unwrap().insert(label.clone(), CaptureWindow { client, session, update: shared, task });
     tracing::info!(%context, %namespace, %pod, %container, %label, "capture started");
 
+    // Closing it stops the capture (`CaptureWindows::closed`).
     let title = format!("Capture · {pod} · {context}");
-    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?capture={label}").into()))
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?capture={label}").into()))
         .title(&title)
         .inner_size(1100.0, 720.0)
         .min_inner_size(560.0, 360.0)
         .disable_drag_drop_handler()
         .build()
-        .map_err(|e| e.to_string())?;
-    let handle = app.clone();
-    let closed = label.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Destroyed = event {
-            handle.state::<AppState>().captures.closed(&closed);
-        }
-    });
+        .map_err(crate::commands::err)?;
     Ok(label)
+}
+
+/// How long a capture waits for its container, and how often it reports.
+pub(crate) struct Timing {
+    pub start_limit: Duration,
+    pub update_every: Duration,
 }
 
 /// The capture: wait for the container, run tcpdump into the file and the
 /// scanner, and keep the window told.
-async fn run<R: Runtime>(app: AppHandle<R>, client: Client, s: CaptureSession, shared: Arc<Mutex<CaptureUpdate>>) {
+pub(crate) async fn run<R: Runtime>(app: AppHandle<R>, client: Client, s: CaptureSession, shared: Arc<Mutex<CaptureUpdate>>, timing: Timing) {
     let send = |u: &CaptureUpdate| {
         *shared.lock().unwrap() = u.clone();
         let _ = app.emit_to(&s.event, &s.event, u.clone());
@@ -195,7 +190,7 @@ async fn run<R: Runtime>(app: AppHandle<R>, client: Client, s: CaptureSession, s
         u.message = Some(message);
         u
     };
-    match capture::wait_running(&client, &s.namespace, &s.pod, &s.container, START_LIMIT).await {
+    match capture::wait_running(&client, &s.namespace, &s.pod, &s.container, timing.start_limit).await {
         Ok(image_id) => u.image_id = Some(image_id),
         Err(e) => return send(&fail(u, e.user_message())),
     }
@@ -213,7 +208,7 @@ async fn run<R: Runtime>(app: AppHandle<R>, client: Client, s: CaptureSession, s
     let result = capture::run(&client, &s.namespace, &s.pod, &s.container, &s.expression, s.secs, &mut file, |piece| {
         bytes += piece.len() as u64;
         let _ = scanner.feed(piece);
-        if last.elapsed() >= UPDATE_EVERY {
+        if last.elapsed() >= timing.update_every {
             last = Instant::now();
             let mut now = u.clone();
             // Stop may have been asked for meanwhile.
@@ -261,5 +256,69 @@ pub async fn stop_capture<R: Runtime>(app: AppHandle<R>, window: WebviewWindow<R
         u.clone()
     };
     let _ = app.emit_to(&s.event, &s.event, stopping);
-    capture::stop(&client, &s.namespace, &s.pod, &s.container).await.map_err(|e| e.user_message())
+    capture::stop(&client, &s.namespace, &s.pod, &s.container).await.map_err(crate::commands::user)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::fake::{Fake, success};
+    use subduer_core::types::{CaptureFilter, CaptureTraffic};
+
+    /// Adds capture window `label` in `phase`, reading forever.
+    fn add(state: &AppState, label: &str, client: Client, phase: CapturePhase) {
+        let session = CaptureSession {
+            context: "acme-uat".into(),
+            namespace: "shop".into(),
+            pod: "api-1".into(),
+            container: "cap".into(),
+            image: "acme/netshoot:1".into(),
+            expression: String::new(),
+            filter: CaptureFilter { traffic: CaptureTraffic::All, handshakes_only: false },
+            secs: 60,
+            path: "/tmp/cap.pcap".into(),
+            pod_ips: vec![],
+            event: label.into(),
+            update: update(phase),
+        };
+        let task = tauri::async_runtime::spawn(std::future::pending());
+        let w = CaptureWindow { client, update: Arc::new(Mutex::new(session.update.clone())), session, task };
+        state.captures.windows.lock().unwrap().insert(label.into(), w);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_and_closing_interrupt_tcpdump() {
+        let fake = Fake::start();
+        // Stop, then the closed window's stop.
+        fake.exec(vec![success()]).exec(vec![success()]);
+        let app = tauri::test::mock_app();
+        app.manage(AppState::default());
+        let state = app.state::<AppState>();
+        add(&state, "capture-1", fake.client(), CapturePhase::Capturing);
+        let window = WebviewWindowBuilder::new(&app, "capture-1", WebviewUrl::default()).build().unwrap();
+        stop_capture(app.handle().clone(), window.clone(), app.state()).await.unwrap();
+        assert_eq!(capture_session(window.clone(), app.state()).unwrap().update.phase, CapturePhase::Stopping);
+        let execs = || fake.requests.lock().unwrap().iter().filter(|r| r.contains("/exec")).count();
+        assert_eq!(execs(), 1);
+        // Already stopping: nothing more to do.
+        stop_capture(app.handle().clone(), window.clone(), app.state()).await.unwrap();
+        assert_eq!(execs(), 1);
+        // Closing a running capture interrupts it, and stops reading after a grace period.
+        state.captures.closed("capture-1");
+        assert!(capture_session(window, app.state()).is_err());
+        tokio::time::sleep(FINISH_GRACE + Duration::from_millis(300)).await;
+        assert_eq!(execs(), 2);
+        // A finished capture closing interrupts nothing; nor does one already gone.
+        add(&state, "capture-2", fake.client(), CapturePhase::Done);
+        state.captures.closed("capture-2");
+        state.captures.closed("capture-2");
+        assert_eq!(execs(), 2);
+    }
+
+    #[test]
+    fn capture_files_get_their_extension() {
+        assert_eq!(with_extension(Path::new("/tmp/a.pcap")), PathBuf::from("/tmp/a.pcap"));
+        assert_eq!(with_extension(Path::new("/tmp/a.PCAP")), PathBuf::from("/tmp/a.PCAP"));
+        assert_eq!(with_extension(Path::new("/tmp/a")), PathBuf::from("/tmp/a.pcap"));
+    }
 }

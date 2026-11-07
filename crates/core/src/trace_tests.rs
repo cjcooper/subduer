@@ -571,3 +571,138 @@ async fn targets_list_workloads_and_running_pods() {
     api.on_error("GET", "/apis/apps/v1/namespaces/shop/daemonsets", 403, "Forbidden", "daemonsets is forbidden");
     assert!(targets(&api.client(), "shop").await.unwrap_err().to_string().contains("forbidden"));
 }
+
+#[tokio::test]
+async fn targets_of_the_same_name_sort_by_kind() {
+    let api = MockApi::new();
+    let one = |kind: &str| list(&format!("{kind}List"), vec![object("apps/v1", kind, Some("shop"), "web", json!({}))]);
+    api.on("GET", "/apis/apps/v1/namespaces/shop/deployments", one("Deployment"));
+    api.on("GET", "/apis/apps/v1/namespaces/shop/statefulsets", one("StatefulSet"));
+    api.on("GET", "/apis/apps/v1/namespaces/shop/daemonsets", one("DaemonSet"));
+    api.on("GET", "/apis/batch/v1/namespaces/shop/cronjobs", list("CronJobList", vec![]));
+    api.on("GET", "/apis/batch/v1/namespaces/shop/jobs", list("JobList", vec![]));
+    api.on("GET", "/api/v1/namespaces/shop/pods", list("PodList", vec![]));
+    let t = targets(&api.client(), "shop").await.unwrap();
+    let kinds: Vec<&str> = t.workloads.iter().map(|w| w.kind.kind.as_str()).collect();
+    assert_eq!(kinds, ["DaemonSet", "Deployment", "StatefulSet"]);
+}
+
+#[test]
+fn state_points_move_to_their_window_start() {
+    let shifted = window_starts(vec![(key("web-1", "app"), vec![(600, 1.0), (900, 2.0)])]);
+    assert_eq!(shifted, vec![(key("web-1", "app"), vec![(600 - STATE_STEP_SECS, 1.0), (900 - STATE_STEP_SECS, 2.0)])]);
+}
+
+#[test]
+fn cpu_limits_owners_and_samples_come_sorted() {
+    let (a, b) = (key("web-1", "app"), key("web-2", "app"));
+    let raw = Raw {
+        limits: vec![((a.clone(), "cpu".into()), vec![(60, 0.5)])],
+        pod_owners: [
+            (("shop".into(), "web-2".into()), ("StatefulSet".into(), "web".into())),
+            (("shop".into(), "web-1".into()), ("StatefulSet".into(), "web".into())),
+        ]
+        .into(),
+        ..Raw::default()
+    };
+    let batch = build_batch(&raw, &mut Memory::default());
+    assert_eq!(batch.resources, vec![(a.clone(), 60, Resources { cpu_limit: Some(500.0), ..Resources::default() })]);
+    let pods: Vec<&str> = batch.owners.iter().map(|((_, pod), _)| pod.as_str()).collect();
+    assert_eq!(pods, ["web-1", "web-2"]);
+
+    let mut state = State::default();
+    for (k, t) in [(&b, 120), (&a, 120), (&a, 60)] {
+        state.local.pending.entry(k.clone()).or_default().entry(t).or_default().add(10.0, 100.0);
+    }
+    let batch = local_batch(&mut state, 180);
+    let order: Vec<(&ContainerKey, i64)> = batch.usage.iter().map(|(k, b)| (k, b.t)).collect();
+    assert_eq!(order, vec![(&a, 60), (&a, 120), (&b, 120)]);
+    assert!(state.local.pending.is_empty());
+}
+
+#[test]
+fn a_cpu_limit_is_read_from_the_pod() {
+    let p: Pod = serde_json::from_value(pod("shop", "web-1", "n1", json!({
+        "spec": {"containers": [{"name": "app", "resources": {"limits": {"cpu": "2"}}}]}
+    })))
+    .unwrap();
+    assert_eq!(local_pod(&p).resources, vec![("app".into(), Resources { cpu_limit: Some(2000.0), ..Resources::default() })]);
+}
+
+#[tokio::test]
+async fn an_empty_range_isnt_asked_for() {
+    let api = MockApi::new();
+    let prom = crate::history::Prometheus { namespace: "monitoring".into(), service: "prometheus-server".into(), port: 9090 };
+    let (data, bytes) = query_range(&api.client(), &prom, "up".into(), 120, 60, 60).await.unwrap();
+    assert_eq!((data, bytes), (json!({"result": []}), 0));
+    assert!(api.calls().is_empty());
+}
+
+#[tokio::test]
+async fn running_pods_across_the_cluster_or_one_pod() {
+    let api = MockApi::new();
+    api.on("GET", "/api/v1/pods", list("PodList", vec![pod("shop", "web-1", "n1", json!({})), pod("ops", "agent", "n2", json!({}))]));
+    let all = scope_pods(&api.client(), &TraceScope::Cluster).await.unwrap();
+    assert_eq!(all.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["web-1", "agent"]);
+    assert!(api.calls_to("GET", "/api/v1/pods")[0].query.contains("status.phase"));
+    // A pod that's no longer running isn't sampled.
+    api.on("GET", "/api/v1/namespaces/shop/pods/done", pod("shop", "done", "n1", json!({"status": {"phase": "Succeeded"}})));
+    let one = TraceScope::Pod { namespace: "shop".into(), name: "done".into() };
+    assert!(scope_pods(&api.client(), &one).await.unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_pulls_and_samples_dont_stop_the_trace() {
+    let api = MockApi::new();
+    with_prometheus(&api);
+    // Prometheus is found but answers no data queries: the first pull fails too.
+    api.on_error("GET", &format!("{PROM}/query_range"), 503, "ServiceUnavailable", "down");
+    let (trace, dir) = start(&api, "failures", TraceScope::Cluster).await;
+    assert_eq!(trace.status().last_error.as_deref(), Some("Prometheus didn't answer"));
+    // A finished minute waits to be written, and the file refuses it.
+    trace.state.lock().await.local.pending.entry(key("web-1", "app")).or_default().entry(60).or_default().add(10.0, 100.0);
+    trace
+        .file
+        .lock()
+        .unwrap()
+        .conn()
+        .execute_batch("CREATE TRIGGER no_usage BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'disk full'); END;")
+        .unwrap();
+    let ok_pulls = || rows(&trace, "SELECT COUNT(*) FROM pulls WHERE ok = 1")[0][0].as_i64().unwrap();
+    let failed_pulls = || rows(&trace, "SELECT COUNT(*) FROM pulls WHERE ok = 0")[0][0].as_i64().unwrap();
+    assert_eq!((ok_pulls(), failed_pulls()), (0, 1));
+    // The first interval's pull (at ten minutes) fails too; then Prometheus
+    // answers again, for the second interval's pull and the final one.
+    let stop = async {
+        tokio::time::sleep(Duration::from_secs(700)).await;
+        assert_eq!((ok_pulls(), failed_pulls()), (0, 2));
+        api.on("GET", &format!("{PROM}/query_range"), matrix(vec![]));
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        TraceEnd::Stopped
+    };
+    let summary = trace.run(stop).await.unwrap();
+    assert!(ok_pulls() >= 2, "the second interval's pull and the final one");
+    assert_eq!(summary.end_reason, Some(TraceEnd::Stopped));
+    assert_eq!(summary.local_samples, 0, "the refused minute is dropped");
+    assert!(summary.gaps.is_empty(), "the final pull worked");
+    assert_eq!(trace.status().last_error, None);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn sampling_now_uses_the_clock() {
+    let api = MockApi::new();
+    api.on("GET", "/api/v1/services", list("ServiceList", vec![]));
+    api.on("GET", "/api/v1/pods", list("PodList", vec![]));
+    let (trace, dir) = start(&api, "sample-now", TraceScope::Cluster).await;
+    assert_eq!(trace.sample_local().await.unwrap(), 0);
+    let listed_at = trace.state.lock().await.local.listed_at.unwrap();
+    assert!((listed_at as f64 - unix_now()).abs() < 60.0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn panicked_blocking_work_is_an_error() {
+    let e = tokio::task::spawn_blocking(|| panic!("boom")).await.unwrap_err();
+    assert!(join_error(e).to_string().contains("panicked"));
+}
