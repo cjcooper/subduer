@@ -66,6 +66,11 @@ fn free_names_without_extensions() {
 use crate::coverage_tests::ws_fake;
 use ws_fake::{err, exit, out, start, success};
 
+#[test]
+fn unopened_streams_are_an_error() {
+    assert_eq!(opened::<()>(None, EXEC_STREAMS).unwrap_err().to_string(), "The API server didn't open the exec streams.");
+}
+
 #[tokio::test]
 async fn downloads_stream_to_disk() {
     let fake = start(vec![out("hello "), out("world"), success()]).await;
@@ -123,5 +128,28 @@ async fn download_local_file_errors() {
     let fake = start(vec![out("x"), success()]).await;
     let e = download(fake.client, "shop", "web", "app", "/x", &busy).await.unwrap_err();
     assert!(matches!(&e, Error::Message(m) if m.starts_with("Can't save")), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Writing the file fails part way: the `.part` file is a pipe whose reader
+/// has gone, so every write is refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_write_is_an_error_and_leaves_nothing() {
+    let dir = scratch("write");
+    let dest = dir.join("app.log");
+    let part = dir.join("app.log.part");
+    let made = std::process::Command::new("mkfifo").arg(&part).status().unwrap();
+    assert!(made.success());
+    // The reader opens the pipe (once the download opens it to write) and leaves.
+    let reader = {
+        let part = part.clone();
+        std::thread::spawn(move || drop(std::fs::File::open(part).unwrap()))
+    };
+    let fake = start(vec![ws_fake::Step::Pause(std::time::Duration::from_millis(300)), out("data"), success()]).await;
+    let e = download(fake.client, "shop", "web", "app", "/var/log/app.log", &dest).await.unwrap_err();
+    reader.join().unwrap();
+    assert!(matches!(&e, Error::Message(m) if m.starts_with(&format!("Writing {} failed: ", part.display()))), "{e}");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }

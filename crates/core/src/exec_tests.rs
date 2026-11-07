@@ -46,6 +46,88 @@ fn other_failures_keep_their_message() {
     assert_eq!(ended(failure(Some(m))), Ended::Failed(m.into()));
 }
 
+type NoStatus = std::future::Ready<Option<Status>>;
+/// One emit type for every `drive` test, so they share one instantiation.
+type Emit<'a> = &'a dyn Fn(ExecOutput);
+
+fn channels<T>() -> (tokio::sync::mpsc::UnboundedSender<T>, UnboundedReceiver<T>) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
+#[tokio::test]
+async fn missing_terminal_streams_are_reported() {
+    let emitted = RefCell::new(vec![]);
+    let streams: Streams<tokio::io::DuplexStream, tokio::io::DuplexStream, NoStatus> =
+        Streams { stdin: None, stdout: Some(tokio::io::duplex(8).0), sizer: None, status: None };
+    let ended = drive(streams, (80, 24), channels().1, channels().1, (&|o| emitted.borrow_mut().push(o)) as Emit).await;
+    let message = "The API server didn't open the terminal streams.".to_owned();
+    assert_eq!(ended, Ended::Failed(message.clone()));
+    assert_eq!(emitted.into_inner(), [ExecOutput::Exited(message)]);
+}
+
+#[tokio::test]
+async fn a_closed_stdin_ends_the_session() {
+    let (stdin, gone) = tokio::io::duplex(8);
+    drop(gone);
+    let (stdout, _keep) = tokio::io::duplex(8);
+    let (keys, input) = channels();
+    keys.send(b"ls\n".to_vec()).unwrap();
+    let emitted = RefCell::new(vec![]);
+    let streams: Streams<_, _, NoStatus> = Streams { stdin: Some(stdin), stdout: Some(stdout), sizer: None, status: None };
+    let ended = drive(streams, (80, 24), input, channels().1, (&|o| emitted.borrow_mut().push(o)) as Emit).await;
+    // No status to say how the shell ended.
+    assert_eq!(ended, Ended::Failed("Shell ended.".into()));
+    assert_eq!(emitted.into_inner(), [ExecOutput::Exited("Shell ended.".into())]);
+}
+
+#[tokio::test]
+async fn keys_go_in_and_resizes_without_a_size_channel_are_ignored() {
+    let (stdin, mut typed) = tokio::io::duplex(64);
+    let (stdout, mut shell) = tokio::io::duplex(8);
+    let (keys, input) = channels();
+    keys.send(b"ls\n".to_vec()).unwrap();
+    let (sizes, resize) = channels();
+    sizes.send((120, 40)).unwrap();
+    let streams: Streams<_, _, NoStatus> = Streams { stdin: Some(stdin), stdout: Some(stdout), sizer: None, status: None };
+    let ignore = |_| {};
+    let ended = tokio::join!(drive(streams, (80, 24), input, resize, &ignore as Emit), async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        shell.shutdown().await.unwrap();
+    })
+    .0;
+    assert_eq!(ended, Ended::Failed("Shell ended.".into()));
+    let mut got = [0u8; 3];
+    typed.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ls\n");
+}
+
+#[tokio::test]
+async fn output_and_terminal_sizes_over_plain_streams() {
+    use futures::StreamExt;
+    let (stdin, _peer) = tokio::io::duplex(8);
+    let (stdout, mut shell) = tokio::io::duplex(8);
+    let (sizer, mut sized) = futures::channel::mpsc::channel(4);
+    let (sizes, resize) = channels();
+    sizes.send((120, 40)).unwrap();
+    let status = std::future::ready(Some(Status { status: Some("Success".into()), ..Status::default() }));
+    let streams = Streams { stdin: Some(stdin), stdout: Some(stdout), sizer: Some(sizer), status: Some(status) };
+    let emitted = RefCell::new(vec![]);
+    let emit = |o| emitted.borrow_mut().push(o);
+    let ended = tokio::join!(drive(streams, (80, 24), channels().1, resize, &emit as Emit), async move {
+        // The resize is handled first; then the shell prints and its output ends.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        shell.write_all(b"$ ").await.unwrap();
+        shell.shutdown().await.unwrap();
+    })
+    .0;
+    assert_eq!(ended, Ended::Exited);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    assert_eq!(emitted.into_inner(), [ExecOutput::Data(b64.encode("$ "))]);
+    let first = sized.next().await.unwrap();
+    let second = sized.next().await.unwrap();
+    assert_eq!((first.width, first.height, second.width, second.height), (80, 24, 120, 40));
+}
+
 use crate::coverage_tests::ws_fake;
 use ws_fake::{Step, out, start, success};
 

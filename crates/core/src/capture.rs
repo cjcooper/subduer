@@ -162,7 +162,8 @@ pub async fn wait_running(client: &Client, namespace: &str, pod: &str, container
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     let deadline = tokio::time::Instant::now() + limit;
     loop {
-        let current = serde_json::to_value(pods.get(pod).await?).map_err(|e| Error::Message(e.to_string()))?;
+        // A `Pod` always converts.
+        let current = serde_json::to_value(pods.get(pod).await?).unwrap_or_default();
         match state(&current, container) {
             State::Running { image_id } => return Ok(image_id),
             State::Failed(why) => return Err(Error::Message(why)),
@@ -213,9 +214,8 @@ pub async fn run(
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     let params = AttachParams::default().container(container).stdin(false).stdout(true).stderr(true).tty(false);
     let mut process = pods.exec(pod, command(expression, secs), &params).await?;
-    let (Some(mut stdout), Some(mut stderr)) = (process.stdout(), process.stderr()) else {
-        return Err(Error::Message("the API server didn't open the capture's streams".into()));
-    };
+    let (mut stdout, mut stderr) =
+        crate::upload::opened(process.stdout().zip(process.stderr()), "the API server didn't open the capture's streams")?;
     // Both streams are read side by side until tcpdump exits.
     let copy = async {
         let mut bytes = 0u64;
@@ -248,9 +248,7 @@ pub async fn stop(client: &Client, namespace: &str, pod: &str, container: &str) 
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     let params = AttachParams::default().container(container).stdin(false).stdout(false).stderr(true).tty(false);
     let mut process = pods.exec(pod, ["pkill", "-INT", "tcpdump"], &params).await?;
-    if let Some(status) = process.take_status() {
-        let _ = status.await;
-    }
+    futures::future::OptionFuture::from(process.take_status()).await;
     Ok(())
 }
 

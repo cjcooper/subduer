@@ -6,17 +6,6 @@ fn target() -> ExecTarget {
 }
 
 #[test]
-fn label_in_finds_the_exec_parameter() {
-    assert_eq!(label_in("?exec=shell-3").as_deref(), Some("shell-3"));
-    assert_eq!(label_in("?theme=dark&exec=shell-3&x=1").as_deref(), Some("shell-3"));
-    assert_eq!(label_in("exec=abc").as_deref(), Some("abc"));
-    assert_eq!(label_in("?exec="), None);
-    assert_eq!(label_in("?logs=abc"), None);
-    assert_eq!(label_in("?myexec=abc"), None);
-    assert_eq!(label_in(""), None);
-}
-
-#[test]
 fn request_asks_to_unlock_first() {
     let s = store_on(false);
     request(s, target());

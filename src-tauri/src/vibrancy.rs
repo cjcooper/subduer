@@ -50,14 +50,17 @@ fn effects() -> WindowEffectsConfig {
 /// Builds a main window from its config: transparent where supported, with
 /// the material unless Settings turned it off.
 pub fn build_main<R: Runtime>(app: &AppHandle<R>, config: &WindowConfig) -> tauri::Result<WebviewWindow<R>> {
-    let mut builder = WebviewWindowBuilder::from_config(app, config)?;
-    if supported() {
-        builder = builder.transparent(true);
-        if !app.state::<AppState>().opaque.load(Ordering::SeqCst) {
-            builder = builder.effects(effects());
-        }
+    build(app, config, supported(), WebviewWindow::set_effects)
+}
+
+/// [`build_main`] on a system with a material (`material`) or without. The
+/// material goes on as the window opens, as Tauri does for configured effects.
+fn build<R: Runtime>(app: &AppHandle<R>, config: &WindowConfig, material: bool, set: SetEffects<R>) -> tauri::Result<WebviewWindow<R>> {
+    let window = WebviewWindowBuilder::from_config(app, config)?.transparent(material).build()?;
+    if material && !app.state::<AppState>().opaque.load(Ordering::SeqCst) {
+        let _ = set(&window, Some(effects()));
     }
-    builder.build()
+    Ok(window)
 }
 
 /// Settings › Transparency: turns the material on or off in every main
@@ -65,14 +68,75 @@ pub fn build_main<R: Runtime>(app: &AppHandle<R>, config: &WindowConfig) -> taur
 /// draw clear and to offer the setting.
 #[tauri::command]
 pub fn set_transparency<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>, on: bool) -> bool {
+    set_material(&app, &state, on, supported(), WebviewWindow::set_effects)
+}
+
+/// Sets or clears a window's effects (Tauri's, in the app).
+type SetEffects<R> = fn(&WebviewWindow<R>, Option<WindowEffectsConfig>) -> tauri::Result<()>;
+
+/// [`set_transparency`] on a system with a material (`material`) or without.
+fn set_material<R: Runtime>(app: &AppHandle<R>, state: &AppState, on: bool, material: bool, set: SetEffects<R>) -> bool {
     state.opaque.store(!on, Ordering::SeqCst);
-    if !supported() {
+    if !material {
         return false;
     }
     for main in state.main_windows() {
         if let Some(window) = app.get_webview_window(&main.label) {
-            let _ = window.set_effects(on.then(effects));
+            let _ = set(&window, on.then(effects));
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::Manager;
+    use tauri::test::mock_app;
+
+    #[test]
+    fn only_macos_and_windows_11_have_a_material() {
+        assert_eq!(supported(), cfg!(target_os = "macos") || windows_11());
+        assert!(cfg!(windows) || !windows_11());
+    }
+
+    #[test]
+    fn main_windows_get_the_material_unless_settings_turned_it_off() {
+        let app = mock_app();
+        app.manage(AppState::default());
+        let state = app.state::<AppState>();
+        // The mock's windows have no native window to put a material on, so
+        // the effects are recorded instead.
+        static SET: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+        let record: SetEffects<tauri::test::MockRuntime> = |w, effects| {
+            SET.lock().unwrap().push((w.label().to_owned(), effects.is_some()));
+            Ok(())
+        };
+        let config = |label: &str| WindowConfig { label: label.into(), ..Default::default() };
+        for (label, material, opaque) in [("main", true, false), ("main-2", true, true), ("main-3", false, false)] {
+            state.opaque.store(opaque, Ordering::SeqCst);
+            state.add_window(label);
+            let window = build(app.handle(), &config(label), material, record).unwrap();
+            assert_eq!(window.label(), label);
+        }
+        // Only the transparent window that isn't opaque got the material.
+        assert_eq!(*SET.lock().unwrap(), [("main".to_owned(), true)]);
+        SET.lock().unwrap().clear();
+        // A main window whose webview never opened is skipped.
+        state.add_window("main-4");
+        assert!(set_material(app.handle(), &state, false, true, record));
+        assert!(state.opaque.load(Ordering::SeqCst));
+        assert!(set_material(app.handle(), &state, true, true, record));
+        assert!(!state.opaque.load(Ordering::SeqCst));
+        let mut set = SET.lock().unwrap().clone();
+        set.sort();
+        let expected: Vec<(String, bool)> =
+            ["main", "main-2", "main-3"].iter().flat_map(|l| [((*l).to_owned(), false), ((*l).to_owned(), true)]).collect();
+        assert_eq!(set, expected);
+        // Without a material the setting is remembered but does nothing.
+        assert!(!set_material(app.handle(), &state, false, false, record));
+        assert!(state.opaque.load(Ordering::SeqCst));
+        assert_eq!(SET.lock().unwrap().len(), 6);
+        assert_eq!(effects().effects, vec![Effect::Sidebar, Effect::Mica]);
+    }
 }

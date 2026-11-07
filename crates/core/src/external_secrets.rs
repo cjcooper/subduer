@@ -843,16 +843,17 @@ async fn push_secrets(client: &Client, namespace: Option<&str>) -> Result<Vec<Va
 }
 
 async fn list_any(client: &Client, kind: &str, plural: &str, versions: &[&str], namespace: Option<&str>) -> Result<Vec<Value>> {
-    let mut last = None;
+    // What's returned if every version is missing (or none is given).
+    let mut last = Error::Message(format!("no {kind} API"));
     for version in versions {
         let k = es_kind(kind, plural, version);
         match dynamic_api(client, &k, namespace).list(&ListParams::default()).await {
             Ok(list) => return Ok(list.items.iter().filter_map(|o: &DynamicObject| serde_json::to_value(o).ok()).collect()),
-            Err(kube::Error::Api(s)) if s.code == 404 => last = Some(kube::Error::Api(s)),
+            Err(kube::Error::Api(s)) if s.code == 404 => last = kube::Error::Api(s).into(),
             Err(e) => return Err(e.into()),
         }
     }
-    Err(last.map_or_else(|| Error::Message(format!("no {kind} API")), Into::into))
+    Err(last)
 }
 
 fn es_kind(kind: &str, plural: &str, version: &str) -> KindRef {
@@ -919,7 +920,8 @@ pub async fn force_sync(
     if kind.kind == "ExternalSecret" {
         count = 1;
     } else {
-        let v = serde_json::to_value(&object).map_err(|e| Error::Message(e.to_string()))?;
+        // Spec and status (all that's read here) are in the object's data.
+        let v = object.data;
         let child = str_at(&v["spec"], "externalSecretName")
             .or_else(|| str_at(&v["status"], "externalSecretName"))
             .unwrap_or_else(|| name.to_owned());

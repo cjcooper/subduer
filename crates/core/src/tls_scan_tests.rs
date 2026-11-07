@@ -184,8 +184,94 @@ fn a_stream_fed_in_pieces_reads_the_same() {
 }
 
 #[test]
+fn other_byte_orders_and_cooked_v2() {
+    let hello = client_hello_record(Some("a.example"), &[0x0304]);
+    let segment = tcp(40000, 443, &hello);
+    // Little-endian nanoseconds and big-endian microseconds.
+    for (little, nanos) in [(true, true), (false, false)] {
+        let s = scan(&pcap(little, nanos, 1, &[(3, eth_frame(POD, 40000, PEER, 443, &hello))]), &[]).unwrap();
+        assert_eq!((s.connections.len(), s.connections[0].first_seen), (1, 3.5), "little {little}, nanos {nanos}");
+    }
+    // Linux cooked capture v2: the protocol comes first, then a 20-byte header.
+    let sll2 = [&[0x08, 0x00][..], &[0u8; 18], &ipv4(POD, PEER, &segment)].concat();
+    assert_eq!(scan(&pcap(true, false, 276, &[(1, sll2)]), &[]).unwrap().connections.len(), 1);
+    // A link type this doesn't read: the packet is counted, nothing found.
+    let unknown = scan(&pcap(true, false, 147, &[(1, ipv4(POD, PEER, &segment))]), &[]).unwrap();
+    assert_eq!((unknown.packets, unknown.connections.len()), (1, 0));
+    // A header with only its magic is cut short.
+    let header = pcap(true, false, 1, &[]);
+    assert_eq!(scan(&header[..12], &[]).unwrap_err().to_string(), "the capture's header is cut short");
+}
+
+#[test]
+fn packets_that_arent_tls_hellos_are_skipped() {
+    let hello = client_hello_record(None, &[0x0304]);
+    // UDP over IPv4 and IPv6, and an IP version that isn't 4 or 6.
+    let mut udp4 = ipv4(POD, PEER, &tcp(1, 2, &hello));
+    udp4[9] = 17;
+    let mut udp6 = vec![0u8; 40];
+    udp6[0] = 0x60;
+    udp6[6] = 17;
+    let udp6 = [udp6, tcp(1, 2, &hello)].concat();
+    let mut v5 = ipv4(POD, PEER, &tcp(1, 2, &hello));
+    v5[0] = 0x55;
+    // An application-data record, and a handshake that's neither hello (a Certificate).
+    let app_data = [&[23, 3, 3][..], &[0, 2], &[1, 2]].concat();
+    let certificate = handshake(11, &[0, 0, 0]);
+    let frames = vec![
+        (1, udp4),
+        (1, udp6),
+        (1, v5),
+        (1, ipv4(POD, PEER, &tcp(40000, 443, &app_data))),
+        (1, ipv4(POD, PEER, &tcp(40000, 443, &certificate))),
+    ];
+    let s = scan(&pcap(true, false, 101, &frames), &[]).unwrap();
+    assert_eq!((s.packets, s.hellos, s.connections.len()), (5, 0, 0));
+}
+
+#[test]
+fn unknown_extensions_are_skipped() {
+    let mut hello = client_hello_record(Some("a.example"), &[]);
+    // Append an ALPN extension after SNI: patch the lengths that cover it.
+    let alpn = ext(16, &[0, 3, 2, b'h', b'2']);
+    hello.extend(&alpn);
+    let grow = |at: usize, by: usize, bytes: usize, h: &mut Vec<u8>| {
+        let mut v = 0usize;
+        for b in &h[at..at + bytes] {
+            v = v << 8 | usize::from(*b);
+        }
+        let v = (v + by).to_be_bytes();
+        h[at..at + bytes].copy_from_slice(&v[v.len() - bytes..]);
+    };
+    let n = alpn.len();
+    grow(3, n, 2, &mut hello); // record length
+    grow(6, n, 3, &mut hello); // handshake length
+    let exts_at = 5 + 4 + 2 + 32 + 1 + 4 + 2;
+    grow(exts_at, n, 2, &mut hello); // extensions length
+    let Hello::Client(c) = &hellos(&hello)[0] else { panic!("not a client hello") };
+    assert_eq!(c.server_name.as_deref(), Some("a.example"));
+}
+
+#[test]
+fn three_byte_vectors() {
+    let mut r = Reader::new(&[0, 0, 2, 9, 8, 7]);
+    assert_eq!(r.vector(3), Some(&[9u8, 8][..]));
+    assert_eq!(r.vector(3), None);
+}
+
+#[test]
 fn names() {
     assert_eq!((version_name(0x0300), version_name(0x7f1c)), ("SSL 3.0".into(), "0x7f1c".into()));
+    assert_eq!((version_name(0x0302), version_name(0x0002)), ("TLS 1.1".into(), "SSL 2.0".into()));
+    let known = [
+        0x1301, 0x1302, 0x1303, 0x1304, 0x1305, 0xc02b, 0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9, 0xc013, 0xc014, 0xc009, 0xc00a, 0xc023, 0xc027,
+        0x009c, 0x009d, 0x002f, 0x0035, 0x003c, 0x003d, 0x000a, 0x0005,
+    ];
+    let names: Vec<String> = known.iter().map(|c| cipher_name(*c)).collect();
+    assert!(names.iter().all(|n| n.starts_with("TLS_")), "{names:?}");
+    assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), known.len());
+    assert_eq!(cipher_name(0x1303), "TLS_CHACHA20_POLY1305_SHA256");
+    assert_eq!(cipher_name(0x0005), "TLS_RSA_WITH_RC4_128_SHA");
     assert_eq!(cipher_name(0xfefe), "0xfefe");
     assert!(is_grease(0x1a1a) && !is_grease(0x0304));
 }

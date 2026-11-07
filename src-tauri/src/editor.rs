@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use subduer_core::kube::Client;
 use subduer_core::types::{EditSession, EditTarget, edit_events};
-use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::{AppState, Win};
 
@@ -30,8 +30,14 @@ pub struct EditWindows {
 }
 
 impl EditWindows {
-    fn is_dirty(&self, label: &str) -> bool {
+    /// Edit window `label` holds unsaved YAML: closing it asks first.
+    pub(crate) fn is_dirty(&self, label: &str) -> bool {
         self.windows.lock().unwrap().get(label).is_some_and(|w| w.dirty)
+    }
+
+    /// The window closed.
+    pub(crate) fn forget(&self, label: &str) {
+        self.windows.lock().unwrap().remove(label);
     }
 }
 
@@ -68,7 +74,7 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
         .map(|(label, _)| label.clone());
     if let Some(window) = existing.and_then(|label| app.get_webview_window(&label)) {
         let _ = window.unminimize();
-        return window.set_focus().map_err(|e| e.to_string());
+        return window.set_focus().map_err(crate::commands::err);
     }
     let id = state.editors.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let label = format!("{LABEL_PREFIX}{id}");
@@ -80,32 +86,18 @@ pub async fn open_editor<R: Runtime>(app: AppHandle<R>, state: State<'_, AppStat
         .unwrap()
         .insert(label.clone(), EditWindow { client, context, target, dirty: false });
     state.adopt(&label, &win.label);
-    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?edit={label}").into()))
+    // Closing it with unsaved edits asks first (`hold_close` in lib.rs).
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?edit={label}").into()))
         .title(&title)
         .inner_size(1000.0, 780.0)
         .min_inner_size(560.0, 360.0)
         .disable_drag_drop_handler()
         .build()
         .map_err(|e| {
-            state.editors.windows.lock().unwrap().remove(&label);
+            state.editors.forget(&label);
             state.forget(&label);
             e.to_string()
         })?;
-    let handle = app.clone();
-    let events = window.clone();
-    window.on_window_event(move |event| match event {
-        // Unsaved edits: ask the window first; it closes itself on Discard.
-        WindowEvent::CloseRequested { api, .. } if handle.state::<AppState>().editors.is_dirty(&label) => {
-            api.prevent_close();
-            let _ = events.emit_to(events.label(), edit_events::CLOSE_REQUESTED, ());
-        }
-        WindowEvent::Destroyed => {
-            let state = handle.state::<AppState>();
-            state.editors.windows.lock().unwrap().remove(&label);
-            state.forget(&label);
-        }
-        _ => {}
-    });
     Ok(())
 }
 
@@ -122,7 +114,7 @@ pub async fn editor_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_,
     let (client, context, target) = window_target(&window, &state)?;
     let yaml = subduer_core::edit::load(&client, &target.kind, target.namespace.as_deref(), &target.name)
         .await
-        .map_err(|e| e.user_message())?;
+        .map_err(crate::commands::user)?;
     Ok(EditSession {
         prod_like: prod_like(&state, &context),
         unlocked: win.gate.is_unlocked(&context),
@@ -156,7 +148,7 @@ pub async fn editor_save<R: Runtime>(
         dry_run,
     )
     .await
-    .map_err(|e| e.user_message())?;
+    .map_err(crate::commands::user)?;
     if !dry_run {
         if let Some(w) = state.editors.windows.lock().unwrap().get_mut(window.label()) {
             w.dirty = false;

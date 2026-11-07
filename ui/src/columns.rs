@@ -1,21 +1,17 @@
 //! User-resizable table columns. Widths are kept per table (a kind key, or
 //! `nodes`) and per header, and saved in localStorage.
 
-use std::collections::HashMap;
-
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::logic::columns::{self as logic, WidthState};
 use crate::prefs::storage;
 
 const KEY: &str = "table.columnWidths";
-const MIN_WIDTH: f64 = 40.0;
-/// Width for a column that appears after the table's widths were set.
-const FALLBACK_WIDTH: f64 = 120.0;
 
 /// `(table, header) -> width in px`.
 #[derive(Clone, Copy)]
-pub struct ColumnWidths(RwSignal<HashMap<(String, String), f64>>);
+pub struct ColumnWidths(RwSignal<WidthState>);
 
 impl ColumnWidths {
     pub fn load() -> Self {
@@ -23,71 +19,38 @@ impl ColumnWidths {
         Self::from_saved(&saved)
     }
 
-    /// Widths from their saved form: `table\theader\twidth` lines. Malformed
-    /// lines are skipped.
+    /// Widths from their saved form (see [`WidthState::from_saved`]).
     pub(crate) fn from_saved(saved: &str) -> Self {
-        let map = saved
-            .lines()
-            .filter_map(|line| {
-                let mut f = line.split('\t');
-                let (table, header, width) = (f.next()?, f.next()?, f.next()?.parse().ok()?);
-                Some(((table.to_owned(), header.to_owned()), width))
-            })
-            .collect();
-        Self(RwSignal::new(map))
+        Self(RwSignal::new(WidthState::from_saved(saved)))
     }
 
     fn save(&self) {
-        let text = self.saved();
+        let text = self.0.with_untracked(WidthState::saved);
         if let Some(s) = storage() {
             let _ = s.set_item(KEY, &text);
         }
     }
 
-    /// The saved form read by [`Self::from_saved`].
-    fn saved(&self) -> String {
-        self.0.with_untracked(|m| {
-            m.iter()
-                .map(|((t, h), w)| format!("{t}\t{h}\t{w:.0}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    }
-
-    pub fn get(&self, table: &str, header: &str) -> Option<f64> {
-        self.0.with(|m| m.get(&(table.to_owned(), header.to_owned())).copied())
-    }
-
     pub fn has_table(&self, table: &str) -> bool {
-        self.0.with(|m| m.keys().any(|(t, _)| t == table))
+        self.0.with(|m| m.has_table(table))
     }
 
     fn set(&self, table: &str, header: &str, width: f64) {
-        self.0.update(|m| {
-            m.insert((table.to_owned(), header.to_owned()), width.max(MIN_WIDTH));
-        });
+        self.0.update(|m| m.set(table, header, width));
     }
 
     fn reset(&self, table: &str) {
-        self.forget(table);
+        self.0.update(|m| m.forget(table));
         self.save();
     }
 
-    fn forget(&self, table: &str) {
-        self.0.update(|m| m.retain(|(t, _), _| t != table));
+    /// See [`WidthState::table_style`].
+    pub fn table_style(&self, table: &str, headers: &[String]) -> String {
+        self.0.with(|m| m.table_style(table, headers))
     }
 
-    /// Fixed layout at the summed width once the table has custom widths;
-    /// otherwise the browser's automatic layout.
-    pub fn table_style(&self, table: &str, headers: &[String]) -> String {
-        if !self.has_table(table) {
-            return String::new();
-        }
-        let total: f64 = headers
-            .iter()
-            .map(|h| self.get(table, h).unwrap_or(FALLBACK_WIDTH))
-            .sum();
-        format!("table-layout: fixed; width: max(100%, {total:.0}px)")
+    fn cell_style(&self, table: &str, header: &str) -> String {
+        self.0.with(|m| m.cell_style(table, header))
     }
 }
 
@@ -109,17 +72,13 @@ pub fn ResizableTh(
     };
     let aria = {
         let (t, h) = (table.clone(), header.clone());
-        move || match sorts.and_then(|s| s.get(&t)) {
-            Some((s, d)) if s == h => Some(if d { "descending" } else { "ascending" }),
-            _ if sorts.is_some() => Some("none"),
-            _ => None,
-        }
+        move || logic::column_aria(sorts.is_some(), sorts.and_then(|s| s.get(&t)), &h)
     };
     // (pointer x, column width) when the drag started.
     let drag = StoredValue::new(None::<(f64, f64)>);
     let style = {
         let (table, header) = (table.clone(), header.clone());
-        move || widths.get(&table, &header).map(|w| format!("width: {w:.0}px")).unwrap_or_default()
+        move || widths.cell_style(&table, &header)
     };
     let down = {
         let table = table.clone();
@@ -150,7 +109,7 @@ pub fn ResizableTh(
         let (table, header) = (table.clone(), header.clone());
         move |ev: leptos::ev::PointerEvent| {
             if let Some((x0, w0)) = drag.get_value() {
-                widths.set(&table, &header, w0 + ev.client_x() as f64 - x0);
+                widths.set(&table, &header, logic::dragged_width(w0, x0, ev.client_x() as f64));
             }
         }
     };
@@ -181,7 +140,3 @@ pub fn ResizableTh(
         </th>
     }
 }
-
-#[cfg(test)]
-#[path = "columns_tests.rs"]
-mod tests_unit;

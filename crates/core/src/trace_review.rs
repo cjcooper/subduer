@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, Row, params_from_iter};
 
 use crate::trace_file::{BUCKET_SECS, TraceFile};
 use crate::types::{
@@ -42,14 +42,15 @@ fn groups(conn: &Connection) -> Result<BTreeMap<TraceKey, Group>> {
          FROM containers c JOIN pods p ON p.id = c.pod_id",
     )?;
     let mut out: BTreeMap<TraceKey, Group> = BTreeMap::new();
-    let rows = stmt.query_map([], |r| {
+    let read = |r: &Row<'_>| -> rusqlite::Result<(i64, TraceKey, String, Option<String>)> {
         Ok((
-            r.get::<_, i64>(0)?,
+            r.get(0)?,
             TraceKey { namespace: r.get(1)?, kind: r.get(2)?, name: r.get(3)?, container: r.get(4)? },
-            r.get::<_, String>(5)?,
-            r.get::<_, Option<String>>(6)?,
+            r.get(5)?,
+            r.get(6)?,
         ))
-    })?;
+    };
+    let rows = stmt.query_map([], read)?;
     for row in rows {
         let (id, key, pod, revision) = row?;
         let g = out.entry(key).or_insert_with(|| Group { containers: vec![], pods: BTreeSet::new(), revisions: BTreeSet::new() });
@@ -100,17 +101,10 @@ struct Samples {
 fn review_row(conn: &Connection, key: TraceKey, group: &Group, span: f64, gap_secs: f64) -> Result<Option<ReviewRow>> {
     let mut s = Samples::default();
     let mut usage = conn.prepare_cached("SELECT t, cpu_avg, cpu_max, mem_max, throttled, source FROM usage WHERE container_id = ?1")?;
+    type UsageRow = (i64, Option<i64>, Option<i64>, Option<i64>, Option<f64>, i64);
+    let read = |r: &Row<'_>| -> rusqlite::Result<UsageRow> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)) };
     for id in &group.containers {
-        let rows = usage.query_map([id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<i64>>(1)?,
-                r.get::<_, Option<i64>>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-                r.get::<_, Option<f64>>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        })?;
+        let rows = usage.query_map([id], read)?;
         for row in rows {
             let (t, cpu_avg, cpu_max, mem_max, throttled, source) = row?;
             s.minutes.insert(t);
@@ -139,10 +133,11 @@ fn review_row(conn: &Connection, key: TraceKey, group: &Group, span: f64, gap_se
     let mut resources = conn.prepare_cached(
         "SELECT t, cpu_request, cpu_limit, mem_request, mem_limit FROM resources WHERE container_id = ?1",
     )?;
+    let read = |r: &Row<'_>| -> rusqlite::Result<(i64, [Option<f64>; 4])> {
+        Ok((r.get(0)?, [r.get(1)?, r.get(2)?, r.get::<_, Option<i64>>(3)?.map(|v| v as f64), r.get::<_, Option<i64>>(4)?.map(|v| v as f64)]))
+    };
     for id in &group.containers {
-        let rows = resources.query_map([id], |r| {
-            Ok((r.get::<_, i64>(0)?, [r.get(1)?, r.get(2)?, r.get::<_, Option<i64>>(3)?.map(|v| v as f64), r.get::<_, Option<i64>>(4)?.map(|v| v as f64)]))
-        })?;
+        let rows = resources.query_map([id], read)?;
         for row in rows {
             let (t, values): (i64, [Option<f64>; 4]) = row?;
             seen.insert(values.map(|v| v.map(f64::to_bits)));
@@ -396,9 +391,9 @@ pub fn series(path: &Path, key: &TraceKey, start: Option<f64>, end: Option<f64>,
          FROM usage WHERE t >= ?2 AND t < ?3 AND container_id IN ({}) GROUP BY b ORDER BY b",
         placeholders_from(ids.len(), 4)
     ))?;
-    let rows = stmt.query_map(params_from_iter(&args), |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<f64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, i64>(5)?))
-    })?;
+    type BucketRow = (i64, Option<f64>, Option<i64>, Option<f64>, Option<i64>, i64);
+    let read = |r: &Row<'_>| -> rusqlite::Result<BucketRow> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)) };
+    let rows = stmt.query_map(params_from_iter(&args), read)?;
     for row in rows {
         let (b, cpu_avg, cpu_max, mem_avg, mem_max, n) = row?;
         let t = b as f64;
@@ -421,9 +416,9 @@ pub fn series(path: &Path, key: &TraceKey, start: Option<f64>, end: Option<f64>,
     let mut stmt = conn.prepare(&format!(
         "SELECT t, cpu_request, cpu_limit, mem_request, mem_limit FROM resources WHERE container_id IN ({list}) ORDER BY t"
     ))?;
-    let rows = stmt.query_map(params_from_iter(&ids), |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?, r.get::<_, Option<f64>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?))
-    })?;
+    type ResourcesRow = (i64, Option<f64>, Option<f64>, Option<i64>, Option<i64>);
+    let read = |r: &Row<'_>| -> rusqlite::Result<ResourcesRow> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)) };
+    let rows = stmt.query_map(params_from_iter(&ids), read)?;
     for row in rows {
         let (t, cr, cl, mr, ml) = row?;
         let t = t as f64;
@@ -444,15 +439,17 @@ fn add_marks(conn: &Connection, ids: &[i64], start: i64, end: i64, out: &mut Tra
     ))?;
     let mut args: Vec<i64> = vec![start, end];
     args.extend(ids);
-    let rows = stmt.query_map(params_from_iter(&args), |r| {
+    let event = |r: &Row<'_>| -> rusqlite::Result<TraceEventMark> {
         Ok(TraceEventMark { t: r.get::<_, i64>(0)? as f64, kind: r.get(1)?, reason: r.get(2)?, count: r.get::<_, i64>(3)?.max(0) as u32 })
-    })?;
+    };
+    let rows = stmt.query_map(params_from_iter(&args), event)?;
     out.events = rows.collect::<rusqlite::Result<_>>()?;
 
     let mut stmt = conn.prepare("SELECT start, end, reason FROM gaps WHERE end > ?1 AND start < ?2 ORDER BY start")?;
-    let rows = stmt.query_map([start, end], |r| {
+    let gap = |r: &Row<'_>| -> rusqlite::Result<TraceGap> {
         Ok(TraceGap { start: r.get::<_, i64>(0)? as f64, end: r.get::<_, i64>(1)? as f64, reason: r.get(2)? })
-    })?;
+    };
+    let rows = stmt.query_map([start, end], gap)?;
     out.gaps = rows.collect::<rusqlite::Result<_>>()?;
     Ok(())
 }
@@ -496,9 +493,8 @@ pub fn overview(path: &Path, namespace: Option<&str>, start: Option<f64>, end: O
     let mut requests: HashMap<i64, Vec<(i64, f64, f64)>> = HashMap::new();
     let mut stmt =
         conn.prepare(&format!("SELECT container_id, t, cpu_request, mem_request FROM resources WHERE container_id IN ({list}) ORDER BY t"))?;
-    let rows = stmt.query_map(params_from_iter(&ids), |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?, r.get::<_, Option<i64>>(3)?))
-    })?;
+    let read = |r: &Row<'_>| -> rusqlite::Result<(i64, i64, Option<f64>, Option<i64>)> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)) };
+    let rows = stmt.query_map(params_from_iter(&ids), read)?;
     for row in rows {
         let (id, t, cpu, mem) = row?;
         requests.entry(id).or_default().push((t, cpu.unwrap_or(0.0), mem.unwrap_or(0) as f64));
@@ -519,9 +515,8 @@ pub fn overview(path: &Path, namespace: Option<&str>, start: Option<f64>, end: O
         "SELECT container_id, t, cpu_avg, mem_avg FROM usage WHERE t >= ?1 AND t < ?2 AND container_id IN ({})",
         placeholders_from(ids.len(), 3)
     ))?;
-    let rows = stmt.query_map(params_from_iter(&args), |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?))
-    })?;
+    let read = |r: &Row<'_>| -> rusqlite::Result<(i64, i64, Option<i64>, Option<i64>)> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)) };
+    let rows = stmt.query_map(params_from_iter(&args), read)?;
     for row in rows {
         let (id, t, cpu, mem) = row?;
         let (cpu_req, mem_req) = request_at(id, t);
@@ -639,9 +634,8 @@ pub fn daily(path: &Path, key: &TraceKey, tz: &jiff::tz::TimeZone) -> Result<Tra
     ))?;
     // (date, hour) → CPU values and peak memory.
     let mut cells: BTreeMap<(jiff::civil::Date, i8), (Vec<f64>, Option<f64>)> = BTreeMap::new();
-    let rows = stmt.query_map(params_from_iter(&ids), |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?))
-    })?;
+    let read = |r: &Row<'_>| -> rusqlite::Result<(i64, Option<i64>, Option<i64>)> { Ok((r.get(0)?, r.get(1)?, r.get(2)?)) };
+    let rows = stmt.query_map(params_from_iter(&ids), read)?;
     for row in rows {
         let (t, cpu, mem) = row?;
         let Ok(ts) = jiff::Timestamp::from_second(t) else { continue };

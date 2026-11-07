@@ -3,35 +3,21 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
 use subduer_types::ResourceRow;
 
-use crate::modal::Modal;
 use crate::app::{Store, guard};
+use crate::logic::namespace::{self as logic, CreateArgs};
+use crate::modal::Modal;
 use crate::tauri::invoke;
 
 fn on_namespaces(store: Store) -> bool {
-    store.kind.with(|k| k.as_ref().is_some_and(|k| k.key() == "core/Namespace"))
-}
-
-/// DNS-1123 label: lowercase letters, digits and `-`, starting and ending
-/// with a letter or digit, at most 63 characters.
-fn valid_name(name: &str) -> bool {
-    let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    !name.is_empty() && name.len() <= 63 && name.starts_with(ok) && name.ends_with(ok) && name.chars().all(|c| ok(c) || c == '-')
+    store.kind.with(|k| logic::is_namespaces(k.as_ref()))
 }
 
 /// "New namespace" in the Namespace list's header, when creating is allowed.
 #[component]
 pub fn NewNamespaceButton(store: Store) -> impl IntoView {
-    let allowed = move || {
-        on_namespaces(store)
-            && store.cluster.with(|c| {
-                c.iter()
-                    .flat_map(|c| &c.kinds)
-                    .any(|k| k.kind.key() == "core/Namespace" && k.verbs.iter().any(|v| v == "create"))
-            })
-    };
+    let allowed = move || on_namespaces(store) && store.cluster.with(|c| c.as_ref().is_some_and(|c| logic::may_create(&c.kinds)));
     let open = move |_| {
         let Some(ctx) = store.current_context_untracked() else { return };
         if ctx.unlocked {
@@ -43,8 +29,7 @@ pub fn NewNamespaceButton(store: Store) -> impl IntoView {
     };
     move || {
         allowed().then(|| {
-            let locked = store.current_context().is_some_and(|c| !c.unlocked);
-            let title = if locked { "Create a namespace… (asks to allow changes first)" } else { "Create a namespace…" };
+            let title = logic::new_title(store.current_context().is_some_and(|c| !c.unlocked));
             view! { <button class="btn small" title=title on:click=open>"New namespace"</button> }
         })
     }
@@ -52,11 +37,6 @@ pub fn NewNamespaceButton(store: Store) -> impl IntoView {
 
 #[component]
 pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
-    #[derive(Serialize)]
-    struct Args {
-        context: String,
-        name: String,
-    }
     let name = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -68,9 +48,9 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
     };
     let exists = move || {
         let n = name.get();
-        store.table.with(|t| t.as_ref().is_some_and(|t| t.rows.iter().any(|r| r.name == n.trim())))
+        store.table.with(|t| t.as_ref().is_some_and(|t| logic::exists(&t.rows, &n)))
     };
-    let ok = move || valid_name(name.get().trim()) && !exists() && !busy.get();
+    let ok = move || logic::can_create(&name.get(), exists(), busy.get());
     let create = move || {
         if !ok() {
             return;
@@ -80,7 +60,7 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match invoke::<_, ()>("create_namespace", &Args { context: ctx.name, name: new.clone() }).await {
+            match invoke::<_, ()>("create_namespace", &CreateArgs { context: ctx.name, name: new.clone() }).await {
                 Ok(()) => {
                     close();
                     // Select it once the watch lists it.
@@ -98,19 +78,7 @@ pub fn NewNamespaceDialog(store: Store) -> impl IntoView {
             let context = store.current_context_untracked();
             let prod = context.as_ref().is_some_and(|c| c.prod_like);
             let ctx_name = context.map(|c| c.name).unwrap_or_default();
-            let hint = move || {
-                let n = name.get();
-                let n = n.trim();
-                if n.is_empty() {
-                    None
-                } else if !valid_name(n) {
-                    Some("Use lowercase letters, digits and '-', starting and ending with a letter or digit (63 at most).")
-                } else if exists() {
-                    Some("A namespace with that name already exists.")
-                } else {
-                    None
-                }
-            };
+            let hint = move || logic::hint(&name.get(), exists());
             view! {
                 <Modal on_cancel=move |()| close() busy=busy prod=prod>
                         <h2>"New namespace"</h2>
@@ -145,7 +113,7 @@ pub fn FilterButton(store: Store, row: ResourceRow) -> impl IntoView {
         on_namespaces(store).then(|| {
             let name = row.name.clone();
             let current = store.namespace.get().as_deref() == Some(name.as_str());
-            let title = format!("Show only objects in {name} in every list");
+            let (title, label) = logic::filter_button(&name, current);
             view! {
                 <button
                     class="btn small"
@@ -155,12 +123,8 @@ pub fn FilterButton(store: Store, row: ResourceRow) -> impl IntoView {
                         let name = name.clone();
                         guard(store, move || store.namespace.set(Some(name)));
                     }
-                >{if current { "Filtering to it" } else { "Filter to it" }}</button>
+                >{label}</button>
             }
         })
     }
 }
-
-#[cfg(test)]
-#[path = "namespace_tests.rs"]
-mod tests_unit;

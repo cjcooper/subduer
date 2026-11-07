@@ -74,7 +74,7 @@ pub async fn forward_ports(
     source: ForwardSource,
 ) -> Result<Vec<PortOption>, String> {
     let client = crate::commands::connected_client(&state).await?;
-    forward::port_options(&client, &namespace, &source).await.map_err(|e| e.user_message())
+    forward::port_options(&client, &namespace, &source).await.map_err(crate::commands::user)
 }
 
 #[tauri::command]
@@ -84,8 +84,8 @@ pub async fn start_forward<R: Runtime>(app: AppHandle<R>, state: Win, request: F
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.context.clone())
     };
-    let (listener, backend) = forward::bind(&client, &request).await.map_err(|e| e.user_message())?;
-    let local_port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let (listener, backend) = forward::bind(&client, &request).await.map_err(crate::commands::user)?;
+    let local_port = listener.local_addr().map_err(crate::commands::err)?.port();
     let stats = Arc::new(Mutex::new(ForwardStats::default()));
     let notify_app = app.clone();
     let notify_win = state.clone();
@@ -115,23 +115,7 @@ pub fn stop_forward<R: Runtime>(app: AppHandle<R>, state: Win, id: u64) {
 
 /// Opens `http://127.0.0.1:<port>` for a forward in the default browser.
 #[tauri::command]
-pub fn open_forward(state: Win, id: u64) -> Result<(), String> {
+pub fn open_forward(app_state: tauri::State<'_, crate::AppState>, state: Win, id: u64) -> Result<(), String> {
     let port = state.forwards.forwards.lock().unwrap().get(&id).map(|f| f.local_port).ok_or("no such forward")?;
-    open_in_browser(&format!("http://127.0.0.1:{port}/"))
-}
-
-/// Opens an http(s) address in the default browser, passed as a single
-/// argument (no shell).
-pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
-    let url = url.to_owned();
-    let opener = if cfg!(target_os = "macos") {
-        ("open", vec![url])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C".into(), "start".into(), String::new(), url])
-    } else {
-        ("xdg-open", vec![url])
-    };
-    let mut cmd = std::process::Command::new(opener.0);
-    cmd.args(opener.1);
-    crate::shell_env::hide_console(&mut cmd).spawn().map(|_| ()).map_err(|e| e.to_string())
+    app_state.launcher.open_in_browser(&format!("http://127.0.0.1:{port}/"))
 }

@@ -188,6 +188,26 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_written_beside_an_installed_package() {
+        let dir = scratch("package-only");
+        let (home, usr) = (dir.join("home"), dir.join("usr"));
+        fs::create_dir_all(usr.join("applications")).unwrap();
+        fs::write(entry_path(&usr), "[Desktop Entry]\n").unwrap();
+        sync(&home, &[usr], Path::new("/usr/bin/subduer"), false).unwrap();
+        assert!(!entry_path(&home).exists());
+    }
+
+    #[test]
+    fn an_up_to_date_entry_is_not_rewritten() {
+        let dir = scratch("unchanged");
+        let home = dir.join("home");
+        sync(&home, &[], Path::new("/tmp/subduer"), false).unwrap();
+        let written = fs::metadata(entry_path(&home)).unwrap().modified().unwrap();
+        sync(&home, &[], Path::new("/tmp/subduer"), false).unwrap();
+        assert_eq!(fs::metadata(entry_path(&home)).unwrap().modified().unwrap(), written);
+    }
+
+    #[test]
     fn users_own_entry_is_left_alone() {
         let dir = scratch("own");
         let home = dir.join("home");

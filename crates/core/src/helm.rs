@@ -561,20 +561,24 @@ pub async fn rollback(
     wait: bool,
     dry_run: bool,
 ) -> Result<String> {
-    if !valid_name(release) || !valid_name(namespace) {
-        return Err(Error::Message("not a valid release or namespace name".into()));
-    }
-    if revision < 1 {
-        return Err(Error::Message("pick a revision to roll back to".into()));
-    }
-    if !dry_run {
-        gate.ensure_writable(context)?;
-    }
-    let helm4 = helm_major().await? >= 4;
-    let args = rollback_args(context, namespace, release, revision, wait, dry_run, helm4);
-    let result = run_helm(&args).await;
-    tracing::info!(%context, %namespace, %release, revision, wait, dry_run, ok = result.is_ok(), "helm rollback");
-    result
+    HelmCli::INSTALLED.rollback(gate, context, namespace, release, revision, wait, dry_run).await
+}
+
+/// Deletes a release with `helm uninstall`: its resources (except those
+/// marked `helm.sh/resource-policy: keep`, and PVCs made by StatefulSets)
+/// and, unless `keep_history`, its revision records. A `dry_run` changes
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+pub async fn uninstall(
+    gate: &SafetyGate,
+    context: &str,
+    namespace: &str,
+    release: &str,
+    keep_history: bool,
+    wait: bool,
+    dry_run: bool,
+) -> Result<String> {
+    HelmCli::INSTALLED.uninstall(gate, context, namespace, release, keep_history, wait, dry_run).await
 }
 
 /// `helm uninstall` arguments.
@@ -597,66 +601,105 @@ fn uninstall_args(context: &str, namespace: &str, release: &str, keep_history: b
     args
 }
 
-/// Deletes a release with `helm uninstall`: its resources (except those
-/// marked `helm.sh/resource-policy: keep`, and PVCs made by StatefulSets)
-/// and, unless `keep_history`, its revision records. A `dry_run` changes
-/// nothing.
-#[allow(clippy::too_many_arguments)]
-pub async fn uninstall(
-    gate: &SafetyGate,
-    context: &str,
-    namespace: &str,
-    release: &str,
-    keep_history: bool,
-    wait: bool,
-    dry_run: bool,
-) -> Result<String> {
-    if !valid_name(release) || !valid_name(namespace) {
-        return Err(Error::Message("not a valid release or namespace name".into()));
+/// The `helm` program and how long one of its commands may take. Tests run
+/// a stand-in script instead of the installed Helm.
+struct HelmCli<'a> {
+    program: &'a str,
+    limit: Duration,
+}
+
+impl HelmCli<'static> {
+    /// `helm` (`helm.exe` on Windows) found on `PATH`, given 6 minutes.
+    const INSTALLED: Self = Self { program: "helm", limit: Duration::from_secs(6 * 60) };
+}
+
+impl HelmCli<'_> {
+    #[allow(clippy::too_many_arguments)]
+    async fn rollback(
+        &self,
+        gate: &SafetyGate,
+        context: &str,
+        namespace: &str,
+        release: &str,
+        revision: i64,
+        wait: bool,
+        dry_run: bool,
+    ) -> Result<String> {
+        if !valid_name(release) || !valid_name(namespace) {
+            return Err(Error::Message("not a valid release or namespace name".into()));
+        }
+        if revision < 1 {
+            return Err(Error::Message("pick a revision to roll back to".into()));
+        }
+        if !dry_run {
+            gate.ensure_writable(context)?;
+        }
+        let helm4 = self.major().await? >= 4;
+        let args = rollback_args(context, namespace, release, revision, wait, dry_run, helm4);
+        let result = self.run(&args).await;
+        tracing::info!(%context, %namespace, %release, revision, wait, dry_run, ok = result.is_ok(), "helm rollback");
+        result
     }
-    if !dry_run {
-        gate.ensure_writable(context)?;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn uninstall(
+        &self,
+        gate: &SafetyGate,
+        context: &str,
+        namespace: &str,
+        release: &str,
+        keep_history: bool,
+        wait: bool,
+        dry_run: bool,
+    ) -> Result<String> {
+        if !valid_name(release) || !valid_name(namespace) {
+            return Err(Error::Message("not a valid release or namespace name".into()));
+        }
+        if !dry_run {
+            gate.ensure_writable(context)?;
+        }
+        self.major().await?;
+        let result = self.run(&uninstall_args(context, namespace, release, keep_history, wait, dry_run)).await;
+        tracing::info!(%context, %namespace, %release, keep_history, wait, dry_run, ok = result.is_ok(), "helm uninstall");
+        result
     }
-    helm_major().await?;
-    let result = run_helm(&uninstall_args(context, namespace, release, keep_history, wait, dry_run)).await;
-    tracing::info!(%context, %namespace, %release, keep_history, wait, dry_run, ok = result.is_ok(), "helm uninstall");
-    result
-}
 
-/// `helm` (`helm.exe` on Windows, found on `PATH`), without a console window.
-fn helm_command() -> tokio::process::Command {
-    #[allow(unused_mut)]
-    let mut cmd = tokio::process::Command::new("helm");
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    cmd
-}
+    /// The program, without a console window on Windows.
+    fn command(&self) -> tokio::process::Command {
+        #[allow(unused_mut)]
+        let mut cmd = tokio::process::Command::new(self.program);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    }
 
-/// The installed Helm's major version; an error if `helm` can't be run.
-async fn helm_major() -> Result<u32> {
-    let version = helm_command()
-        .args(["version", "--short"])
-        .output()
-        .await
-        .map_err(|_| Error::Message("The helm command isn't installed or isn't on PATH (brew install helm).".into()))?;
-    let text = String::from_utf8_lossy(&version.stdout);
-    Ok(text.trim_start().trim_start_matches('v').split('.').next().and_then(|m| m.parse().ok()).unwrap_or(3))
-}
+    /// The installed Helm's major version; an error if `helm` can't be run.
+    async fn major(&self) -> Result<u32> {
+        let version = self
+            .command()
+            .args(["version", "--short"])
+            .output()
+            .await
+            .map_err(|_| Error::Message("The helm command isn't installed or isn't on PATH (brew install helm).".into()))?;
+        let text = String::from_utf8_lossy(&version.stdout);
+        Ok(text.trim_start().trim_start_matches('v').split('.').next().and_then(|m| m.parse().ok()).unwrap_or(3))
+    }
 
-/// Runs `helm` with `args` (no shell) and returns its output, or its error
-/// output as the error. Gives up after 6 minutes.
-async fn run_helm(args: &[String]) -> Result<String> {
-    let what = format!("helm {}", args.first().map_or("", String::as_str));
-    let run = helm_command().args(args).kill_on_drop(true).output();
-    let out = tokio::time::timeout(Duration::from_secs(6 * 60), run)
-        .await
-        .map_err(|_| Error::Message(format!("{what} took more than 6 minutes; check the release's history")))?
-        .map_err(|e| Error::Message(format!("couldn't run helm: {e}")))?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim().to_owned();
-    if out.status.success() {
-        Ok(text)
-    } else {
-        Err(Error::Message(if text.is_empty() { format!("{what} failed ({})", out.status) } else { text }))
+    /// Runs `helm` with `args` (no shell) and returns its output, or its error
+    /// output as the error. Gives up after the time limit.
+    async fn run(&self, args: &[String]) -> Result<String> {
+        let what = format!("helm {}", args.first().map_or("", String::as_str));
+        let run = self.command().args(args).kill_on_drop(true).output();
+        let out = tokio::time::timeout(self.limit, run)
+            .await
+            .map_err(|_| Error::Message(format!("{what} took more than {} minutes; check the release's history", self.limit.as_secs() / 60)))?
+            .map_err(|e| Error::Message(format!("couldn't run helm: {e}")))?;
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim().to_owned();
+        if out.status.success() {
+            Ok(text)
+        } else {
+            Err(Error::Message(if text.is_empty() { format!("{what} failed ({})", out.status) } else { text }))
+        }
     }
 }
 

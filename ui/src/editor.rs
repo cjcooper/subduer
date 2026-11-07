@@ -8,13 +8,13 @@ use js_sys::{Array, Function, Promise};
 use leptos::html::Div;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
 use subduer_types::{EditSession, EditTarget, ResourceRow, edit_events};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use crate::app::Store;
 use crate::exec::{call, get, object};
+use crate::logic::editor::{self as logic, After, Check, DirtyArgs, KUBERNETES_KEYS, Line, Modal, OpenArgs, SaveArgs, UnlockArgs, label_in};
 use crate::tauri::{invoke, listen};
 
 // ---- Opening from the main window ----
@@ -24,28 +24,19 @@ use crate::tauri::{invoke, listen};
 #[component]
 pub fn EditButton(store: Store, row: ResourceRow) -> impl IntoView {
     move || {
-        let kind = store.kind.get().filter(|k| !(k.group == "helm.sh" && k.kind == "Release"))?;
-        let allowed = store.cluster.with(|c| {
-            c.iter().flat_map(|c| &c.kinds).any(|k| k.kind == kind && k.verbs.iter().any(|v| v == "update"))
-        });
-        allowed.then(|| {
-            let target = EditTarget { kind: kind.clone(), namespace: row.namespace.clone(), name: row.name.clone() };
-            view! {
-                <button class="btn small" title="Edit this YAML in a new window" on:click=move |_| open(store, target.clone())>
-                    "Edit"
-                </button>
-            }
+        let kind = store.kind.get();
+        let target = store.cluster.with(|c| logic::edit_target(kind, c.as_ref().map_or(&[], |c| &c.kinds), &row))?;
+        Some(view! {
+            <button class="btn small" title="Edit this YAML in a new window" on:click=move |_| open(store, target.clone())>
+                "Edit"
+            </button>
         })
     }
 }
 
 fn open(store: Store, target: EditTarget) {
-    #[derive(Serialize)]
-    struct Args {
-        target: EditTarget,
-    }
     spawn_local(async move {
-        if let Err(e) = invoke::<_, ()>("open_editor", &Args { target }).await {
+        if let Err(e) = invoke::<_, ()>("open_editor", &OpenArgs { target }).await {
             store.error.set(Some(e));
         }
     });
@@ -56,127 +47,6 @@ pub fn label_from_url() -> Option<String> {
     let search = window().location().search().ok()?;
     label_in(&search)
 }
-
-fn label_in(search: &str) -> Option<String> {
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("edit="))
-        // Only window labels (`edit-3`): other pages may use `edit` for something else.
-        .filter(|l| l.strip_prefix("edit-").is_some_and(|id| !id.is_empty()))
-        .map(str::to_owned)
-}
-
-// ---- Diff ----
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Line {
-    Same(String),
-    Added(String),
-    Removed(String),
-    /// A run of unchanged lines left out of the summary.
-    Skipped(usize),
-}
-
-/// Line diff of `old` → `new`: common prefix and suffix are trimmed, the rest
-/// compared with an LCS (or shown as replaced when it's too big to compare).
-pub(crate) fn line_diff(old: &str, new: &str) -> Vec<Line> {
-    let a: Vec<&str> = old.lines().collect();
-    let b: Vec<&str> = new.lines().collect();
-    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let suffix = a[prefix..].iter().rev().zip(b[prefix..].iter().rev()).take_while(|(x, y)| x == y).count();
-    let (ma, mb) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
-    let mut out: Vec<Line> = a[..prefix].iter().map(|l| Line::Same((*l).to_owned())).collect();
-    if ma.len() * mb.len() > 4_000_000 {
-        out.extend(ma.iter().map(|l| Line::Removed((*l).to_owned())));
-        out.extend(mb.iter().map(|l| Line::Added((*l).to_owned())));
-    } else {
-        // lcs[i][j]: longest common subsequence of ma[i..] and mb[j..].
-        let mut lcs = vec![vec![0u32; mb.len() + 1]; ma.len() + 1];
-        for i in (0..ma.len()).rev() {
-            for j in (0..mb.len()).rev() {
-                lcs[i][j] = if ma[i] == mb[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
-            }
-        }
-        let (mut i, mut j) = (0, 0);
-        while i < ma.len() || j < mb.len() {
-            if i < ma.len() && j < mb.len() && ma[i] == mb[j] {
-                out.push(Line::Same(ma[i].to_owned()));
-                i += 1;
-                j += 1;
-            } else if i < ma.len() && (j == mb.len() || lcs[i + 1][j] >= lcs[i][j + 1]) {
-                // Removals before additions, as diffs usually read.
-                out.push(Line::Removed(ma[i].to_owned()));
-                i += 1;
-            } else {
-                out.push(Line::Added(mb[j].to_owned()));
-                j += 1;
-            }
-        }
-    }
-    out.extend(a[a.len() - suffix..].iter().map(|l| Line::Same((*l).to_owned())));
-    out
-}
-
-/// Keeps `context` unchanged lines around each change and folds the rest.
-pub(crate) fn summarize(lines: Vec<Line>, context: usize) -> Vec<Line> {
-    let changed: Vec<usize> =
-        lines.iter().enumerate().filter(|(_, l)| !matches!(l, Line::Same(_))).map(|(i, _)| i).collect();
-    let near = |i: usize| changed.iter().any(|c| c.abs_diff(i) <= context);
-    let mut out = Vec::new();
-    let mut skipped = 0;
-    for (i, line) in lines.into_iter().enumerate() {
-        if matches!(line, Line::Same(_)) && !near(i) {
-            skipped += 1;
-            continue;
-        }
-        if skipped > 0 {
-            out.push(Line::Skipped(skipped));
-            skipped = 0;
-        }
-        out.push(line);
-    }
-    if skipped > 0 {
-        out.push(Line::Skipped(skipped));
-    }
-    out
-}
-
-/// (added, removed) line counts.
-pub(crate) fn counts(lines: &[Line]) -> (usize, usize) {
-    lines.iter().fold((0, 0), |(a, r), l| match l {
-        Line::Added(_) => (a + 1, r),
-        Line::Removed(_) => (a, r + 1),
-        _ => (a, r),
-    })
-}
-
-/// "1 line added, 2 removed."
-pub(crate) fn change_summary(added: usize, removed: usize) -> String {
-    let lines = |n: usize| if n == 1 { "line" } else { "lines" };
-    match (added, removed) {
-        (a, 0) => format!("{a} {} added.", lines(a)),
-        (0, r) => format!("{r} {} removed.", lines(r)),
-        (a, r) => format!("{a} {} added, {r} removed.", lines(a)),
-    }
-}
-
-/// Keys offered by completion, besides the words already in the document.
-pub(crate) const KUBERNETES_KEYS: &[&str] = &[
-    "apiVersion", "kind", "metadata", "name", "namespace", "labels", "annotations", "spec", "status", "replicas",
-    "selector", "matchLabels", "matchExpressions", "template", "containers", "initContainers", "image",
-    "imagePullPolicy", "command", "args", "ports", "containerPort", "protocol", "env", "envFrom", "value",
-    "valueFrom", "configMapKeyRef", "secretKeyRef", "configMapRef", "secretRef", "resources", "requests", "limits",
-    "cpu", "memory", "volumeMounts", "mountPath", "subPath", "readOnly", "volumes", "configMap", "secret",
-    "secretName", "persistentVolumeClaim", "claimName", "emptyDir", "livenessProbe", "readinessProbe",
-    "startupProbe", "httpGet", "path", "port", "tcpSocket", "exec", "initialDelaySeconds", "periodSeconds",
-    "timeoutSeconds", "failureThreshold", "serviceAccountName", "nodeSelector", "tolerations", "affinity",
-    "securityContext", "runAsNonRoot", "runAsUser", "fsGroup", "restartPolicy", "strategy", "rollingUpdate",
-    "maxSurge", "maxUnavailable", "type", "targetPort", "data", "stringData", "rules", "host", "http", "paths",
-    "pathType", "backend", "service", "number", "tls", "hosts", "schedule", "suspend", "jobTemplate",
-    "concurrencyPolicy", "backoffLimit", "accessModes", "storageClassName", "storage", "minReplicas",
-    "maxReplicas", "metrics", "target", "averageUtilization",
-];
 
 // ---- Ace ----
 
@@ -198,7 +68,7 @@ async fn load_script(src: &str) -> Result<(), String> {
 }
 
 fn ace_theme() -> &'static str {
-    if crate::prefs::is_dark() { "ace/theme/cloud_editor_dark" } else { "ace/theme/cloud_editor" }
+    logic::ace_theme(crate::prefs::is_dark())
 }
 
 /// One Ace editor.
@@ -301,28 +171,6 @@ impl Ace {
 
 // ---- The window ----
 
-#[derive(Debug, Clone, PartialEq)]
-enum Modal {
-    /// The context is read-only: allow changes first.
-    Unlock,
-    /// What will change, and the final go-ahead.
-    Confirm(Vec<Line>),
-    /// Throw the edits away (Cancel, Reload or closing the window).
-    Discard(After),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum After {
-    Close,
-    Reload,
-}
-
-#[derive(Serialize)]
-struct SaveArgs<'a> {
-    yaml: &'a str,
-    dry_run: bool,
-}
-
 #[component]
 pub fn EditorApp(label: String) -> impl IntoView {
     let _ = label;
@@ -340,12 +188,8 @@ pub fn EditorApp(label: String) -> impl IntoView {
     let report_dirty = move |now: bool| {
         if dirty.get_untracked() != now {
             dirty.set(now);
-            #[derive(Serialize)]
-            struct Args {
-                dirty: bool,
-            }
             spawn_local(async move {
-                let _ = invoke::<_, ()>("editor_dirty", &Args { dirty: now }).await;
+                let _ = invoke::<_, ()>("editor_dirty", &DirtyArgs { dirty: now }).await;
             });
         }
     };
@@ -377,18 +221,20 @@ pub fn EditorApp(label: String) -> impl IntoView {
 
     // Step 1 of Save: local checks, then the server validates (dry run).
     let save = move || {
-        if busy.get_untracked() || modal.get_untracked().is_some() {
-            return;
-        }
         let Some(text) = ace.with_value(|a| a.as_ref().map(Ace::text)) else { return };
-        if let Some((row, text)) = errors.get_untracked().first().cloned() {
-            message.set(Some((true, format!("Fix the YAML first: line {}: {text}", row + 1))));
-            ace.with_value(|a| a.as_ref().map(|a| a.go_to(row)));
-            return;
-        }
-        if text == original.get_untracked() {
-            message.set(Some((false, "No changes to save.".into())));
-            return;
+        let prompting = modal.with_untracked(Option::is_some);
+        match errors.with_untracked(|e| logic::check(busy.get_untracked(), prompting, e, &text, &original.get_untracked())) {
+            Check::Ignore => return,
+            Check::Fix(row, m) => {
+                message.set(Some((true, m)));
+                ace.with_value(|a| a.as_ref().map(|a| a.go_to(row)));
+                return;
+            }
+            Check::NoChanges => {
+                message.set(Some((false, "No changes to save.".into())));
+                return;
+            }
+            Check::Validate => {}
         }
         busy.set(true);
         message.set(Some((false, "Checking with the server…".into())));
@@ -400,12 +246,8 @@ pub fn EditorApp(label: String) -> impl IntoView {
                 Ok(_) => {
                     message.set(None);
                     typed.set(String::new());
-                    let unlocked = session.with_untracked(|s| matches!(s, Some(Ok(s)) if s.unlocked));
-                    modal.set(Some(if unlocked {
-                        Modal::Confirm(summarize(line_diff(&original.get_untracked(), &text), 3))
-                    } else {
-                        Modal::Unlock
-                    }));
+                    let unlocked = session.with_untracked(logic::unlocked);
+                    modal.set(Some(logic::after_check(unlocked, &original.get_untracked(), &text)));
                 }
             }
         });
@@ -414,15 +256,10 @@ pub fn EditorApp(label: String) -> impl IntoView {
     // Step 2 for a read-only context: allow changes, as in the main window.
     let unlock = move || {
         let Some(Ok(s)) = session.get_untracked() else { return };
-        #[derive(Serialize)]
-        struct Args {
-            context: String,
-            unlocked: bool,
-        }
         let context = s.context.clone();
         busy.set(true);
         spawn_local(async move {
-            let _ = invoke::<_, ()>("set_unlocked", &Args { context, unlocked: true }).await;
+            let _ = invoke::<_, ()>("set_unlocked", &UnlockArgs { context, unlocked: true }).await;
             busy.set(false);
             session.update(|s| {
                 if let Some(Ok(s)) = s {
@@ -435,7 +272,7 @@ pub fn EditorApp(label: String) -> impl IntoView {
             }
             typed.set(String::new());
             let text = ace.with_value(|a| a.as_ref().map(Ace::text)).unwrap_or_default();
-            modal.set(Some(Modal::Confirm(summarize(line_diff(&original.get_untracked(), &text), 3))));
+            modal.set(Some(logic::confirm(&original.get_untracked(), &text)));
         });
     };
 
@@ -460,19 +297,13 @@ pub fn EditorApp(label: String) -> impl IntoView {
         });
     };
 
-    let cancel = move || {
-        if dirty.get_untracked() {
-            modal.set(Some(Modal::Discard(After::Close)));
-        } else {
-            close();
-        }
+    let cancel = move || match logic::leave(dirty.get_untracked(), After::Close) {
+        Some(ask) => modal.set(Some(ask)),
+        None => close(),
     };
-    let reload = move || {
-        if dirty.get_untracked() {
-            modal.set(Some(Modal::Discard(After::Reload)));
-        } else {
-            start();
-        }
+    let reload = move || match logic::leave(dirty.get_untracked(), After::Reload) {
+        Some(ask) => modal.set(Some(ask)),
+        None => start(),
     };
 
     // Build the editor once its element exists, then load the YAML.
@@ -505,12 +336,9 @@ pub fn EditorApp(label: String) -> impl IntoView {
 
     // Closing the window with unsaved edits: the backend holds it and asks here.
     spawn_local(async move {
-        listen::<()>(edit_events::CLOSE_REQUESTED, move |()| {
-            if dirty.get_untracked() {
-                modal.set(Some(Modal::Discard(After::Close)));
-            } else {
-                close();
-            }
+        listen::<()>(edit_events::CLOSE_REQUESTED, move |()| match logic::leave(dirty.get_untracked(), After::Close) {
+            Some(ask) => modal.set(Some(ask)),
+            None => close(),
         })
         .await;
     });
@@ -519,30 +347,22 @@ pub fn EditorApp(label: String) -> impl IntoView {
         ace.with_value(|a| a.as_ref().map(Ace::set_theme));
     });
 
-    let heading = move || match session.get() {
-        None => "Loading…".to_owned(),
-        Some(Ok(s)) => s.title,
-        Some(Err(_)) => "Edit".to_owned(),
-    };
+    let heading = move || logic::heading(session.get());
     let status = move || {
         let e = errors.get();
         if let Some((true, m)) | Some((false, m)) = message.get() {
             let error = matches!(message.get(), Some((true, _)));
             return view! { <span class:warn-text=error class:muted=!error>{m}</span> }.into_any();
         }
-        match e.first() {
-            Some((row, text)) => {
-                let row = *row;
-                let more = if e.len() > 1 { format!(" (+{} more)", e.len() - 1) } else { String::new() };
-                view! {
-                    <button class="link warn-text" on:click=move |_| { ace.with_value(|a| a.as_ref().map(|a| a.go_to(row))); }>
-                        {format!("Line {}: {text}{more}", row + 1)}
-                    </button>
-                }
-                .into_any()
+        match logic::first_error(&e) {
+            Some((row, text)) => view! {
+                <button class="link warn-text" on:click=move |_| { ace.with_value(|a| a.as_ref().map(|a| a.go_to(row))); }>
+                    {text}
+                </button>
             }
+            .into_any(),
             None => view! {
-                <span class="muted">{move || if dirty.get() { "Edited · not saved" } else { "No changes" }}</span>
+                <span class="muted">{move || logic::dirty_text(dirty.get())}</span>
             }
             .into_any(),
         }
@@ -616,7 +436,7 @@ fn EditorModal(
     match m {
         Modal::Unlock => {
             let context = s.context.clone();
-            let ok = move || !busy.get() && (!prod || typed.get().trim() == context);
+            let ok = move || logic::can_go(busy.get(), prod, &typed.get(), &context);
             view! {
                 <crate::modal::Modal on_cancel=move |()| close() busy=busy prod=prod>
                         <h2>"Allow changes?"</h2>
@@ -634,7 +454,7 @@ fn EditorModal(
             .into_any()
         }
         Modal::Confirm(lines) => {
-            let (added, removed) = counts(&lines);
+            let (added, removed) = logic::counts(&lines);
             let ok = move || !busy.get();
             let rows = lines
                 .into_iter()
@@ -642,14 +462,14 @@ fn EditorModal(
                     Line::Same(t) => view! { <div class="diff-line"><span class="diff-mark">" "</span>{t}</div> }.into_any(),
                     Line::Added(t) => view! { <div class="diff-line diff-add"><span class="diff-mark">"+"</span>{t}</div> }.into_any(),
                     Line::Removed(t) => view! { <div class="diff-line diff-del"><span class="diff-mark">"−"</span>{t}</div> }.into_any(),
-                    Line::Skipped(n) => view! { <div class="diff-skip">{format!("… {n} unchanged lines")}</div> }.into_any(),
+                    Line::Skipped(n) => view! { <div class="diff-skip">{logic::skipped_text(n)}</div> }.into_any(),
                 })
                 .collect_view();
             view! {
                 <crate::modal::Modal on_cancel=move |()| close() busy=busy prod=prod wide=true>
-                        <h2>{format!("Save {}?", s.target.kind.kind)}</h2>
+                        <h2>{logic::save_heading(&s.target.kind.kind)}</h2>
                         <p>"Save "{what}"? The server has checked it."</p>
-                        <p class="muted">{change_summary(added, removed)}</p>
+                        <p class="muted">{logic::change_summary(added, removed)}</p>
                         <div class="diff">{rows}</div>
                         {prod.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
@@ -665,10 +485,7 @@ fn EditorModal(
             .into_any()
         }
         Modal::Discard(after) => {
-            let (title, action) = match after {
-                After::Close => ("Discard your edits?", "Discard and close"),
-                After::Reload => ("Reload and discard your edits?", "Discard and reload"),
-            };
+            let (title, action) = logic::discard_texts(after);
             view! {
                 <crate::modal::Modal on_cancel=move |()| close()>
                         <h2>{title}</h2>
@@ -684,52 +501,3 @@ fn EditorModal(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn d(old: &str, new: &str) -> Vec<Line> {
-        line_diff(old, new)
-    }
-
-    #[test]
-    fn diffs_lines() {
-        use Line::*;
-        assert_eq!(d("a\nb\nc", "a\nb\nc"), [Same("a".into()), Same("b".into()), Same("c".into())]);
-        assert_eq!(d("a\nb\nc", "a\nx\nc"), [Same("a".into()), Removed("b".into()), Added("x".into()), Same("c".into())]);
-        assert_eq!(d("a\nc", "a\nb\nc"), [Same("a".into()), Added("b".into()), Same("c".into())]);
-        assert_eq!(d("a\nb\nc", "a\nc"), [Same("a".into()), Removed("b".into()), Same("c".into())]);
-        assert_eq!(d("", "a"), [Added("a".into())]);
-        assert_eq!(counts(&d("a\nb\nc\nd", "a\nB\nc\nd\ne")), (2, 1));
-    }
-
-    #[test]
-    fn summaries_fold_unchanged_runs() {
-        let old: String = (0..20).map(|i| format!("l{i}\n")).collect();
-        let new = old.replace("l10\n", "L10\n");
-        let s = summarize(line_diff(&old, &new), 2);
-        assert_eq!(s.first(), Some(&Line::Skipped(8)));
-        assert_eq!(s.last(), Some(&Line::Skipped(7)));
-        assert_eq!(counts(&s), (1, 1));
-        assert_eq!(change_summary(1, 1), "1 line added, 1 removed.");
-        assert_eq!(change_summary(2, 0), "2 lines added.");
-        assert_eq!(change_summary(0, 1), "1 line removed.");
-        assert!(s.contains(&Line::Same("l8".into())) && !s.contains(&Line::Same("l7".into())));
-        assert_eq!(summarize(line_diff("a", "a"), 3), [Line::Skipped(1)]);
-    }
-
-    #[test]
-    fn edit_labels_and_keys() {
-        assert_eq!(label_in("?edit=edit-3"), Some("edit-3".into()));
-        assert_eq!(label_in("?a=1&edit=edit-9"), Some("edit-9".into()));
-        assert_eq!(label_in("?logs=x"), None);
-        assert_eq!(label_in("?edit="), None);
-        assert_eq!(label_in("?kind=cm&edit=1"), None);
-        assert_eq!(label_in("?edit=edit-"), None);
-        let mut keys = KUBERNETES_KEYS.to_vec();
-        keys.sort_unstable();
-        keys.dedup();
-        assert_eq!(keys.len(), KUBERNETES_KEYS.len(), "no duplicate completion keys");
-    }
-
-}

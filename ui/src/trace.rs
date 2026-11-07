@@ -2,13 +2,20 @@
 //! trace, then Save as), the running trace's panel with Stop, the "trace
 //! saved" summary, and the prompts that stop a trace before switching
 //! context or quitting.
+//!
+//! The logic is in `logic::trace`.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{KindRef, ResourceRow, TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets, TraceWorkload};
+use subduer_types::{ResourceRow, TraceEnd, TraceScope, TraceStatus, TraceSummary, TraceTargets};
 
 use crate::app::Store;
+pub(crate) use crate::logic::trace::Draft;
+use crate::logic::trace::{
+    Level, duration_text, every_text, file_name, holds_text, indicator_text, indicator_title, needs_attention, open_blocked, pull_text, pulled_text, pulls_text,
+    quit_texts, quit_what, recent, running_gaps_text, sampled_text, saved_gaps_text, scope_text, span_text, stops_on_switch, trace_this_title,
+};
 use crate::modal::Modal;
 use crate::tauri::{NoArgs, invoke, listen};
 
@@ -18,172 +25,10 @@ const TRACE_CHANGED: &str = "trace-changed";
 /// How often the running trace's status is re-read.
 pub(crate) const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// What the start dialog will trace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Level {
-    Cluster,
-    Namespaces,
-    Workloads,
-    Pod,
-}
-
-/// The start dialog's choices.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Draft {
-    pub(crate) level: Level,
-    /// Chosen for the Namespaces level.
-    pub(crate) namespaces: Vec<String>,
-    /// The namespace whose workloads or pods are listed.
-    pub(crate) namespace: String,
-    /// Chosen for the Workloads level, from any namespace.
-    pub(crate) workloads: Vec<TraceWorkload>,
-    pub(crate) pod: String,
-    pub(crate) filter: String,
-}
-
-impl Draft {
-    /// The whole cluster, or the namespace being viewed.
-    pub(crate) fn for_view(namespace: Option<String>) -> Self {
-        let level = if namespace.is_some() { Level::Namespaces } else { Level::Cluster };
-        Self {
-            level,
-            namespaces: namespace.iter().cloned().collect(),
-            namespace: namespace.unwrap_or_default(),
-            workloads: vec![],
-            pod: String::new(),
-            filter: String::new(),
-        }
-    }
-
-    /// "Trace this…" from a Details tab: the object itself. `None` for kinds
-    /// that can't be traced.
-    pub(crate) fn for_object(kind: &KindRef, namespace: Option<String>, name: &str) -> Option<Self> {
-        let mut d = Self::for_view(namespace.clone());
-        match (kind.key().as_str(), namespace) {
-            ("core/Namespace", _) => {
-                d.level = Level::Namespaces;
-                d.namespaces = vec![name.to_owned()];
-                d.namespace = name.to_owned();
-            }
-            ("core/Pod", Some(_)) => {
-                d.level = Level::Pod;
-                d.pod = name.to_owned();
-            }
-            (_, Some(ns)) if traceable_workload(kind) => {
-                d.level = Level::Workloads;
-                d.workloads = vec![TraceWorkload { kind: kind.clone(), namespace: ns, name: name.to_owned() }];
-            }
-            _ => return None,
-        }
-        Some(d)
-    }
-
-    pub(crate) fn scope(&self) -> Option<TraceScope> {
-        match self.level {
-            Level::Cluster => Some(TraceScope::Cluster),
-            Level::Namespaces => (!self.namespaces.is_empty()).then(|| TraceScope::Namespaces(self.namespaces.clone())),
-            Level::Workloads => (!self.workloads.is_empty()).then(|| TraceScope::Workloads(self.workloads.clone())),
-            Level::Pod => (!self.namespace.is_empty() && !self.pod.is_empty())
-                .then(|| TraceScope::Pod { namespace: self.namespace.clone(), name: self.pod.clone() }),
-        }
-    }
-
-    fn toggle_namespace(&mut self, ns: &str) {
-        if let Some(i) = self.namespaces.iter().position(|n| n == ns) {
-            self.namespaces.remove(i);
-        } else {
-            self.namespaces.push(ns.to_owned());
-            self.namespaces.sort();
-        }
-    }
-
-    fn toggle_workload(&mut self, w: &TraceWorkload) {
-        if let Some(i) = self.workloads.iter().position(|x| x == w) {
-            self.workloads.remove(i);
-        } else {
-            self.workloads.push(w.clone());
-        }
-    }
-}
-
-pub(crate) fn traceable_workload(kind: &KindRef) -> bool {
-    matches!(kind.key().as_str(), "apps/Deployment" | "apps/StatefulSet" | "apps/DaemonSet" | "batch/Job" | "batch/CronJob")
-}
-
-/// What a scope covers, in a few words.
-pub(crate) fn scope_text(scope: &TraceScope) -> String {
-    match scope {
-        TraceScope::Cluster => "the whole cluster".into(),
-        TraceScope::Namespaces(ns) if ns.len() == 1 => format!("namespace {}", ns[0]),
-        TraceScope::Namespaces(ns) => format!("{} namespaces", ns.len()),
-        TraceScope::Workloads(ws) if ws.len() == 1 => format!("{} {}", ws[0].kind.kind, ws[0].name),
-        TraceScope::Workloads(ws) => format!("{} workloads", ws.len()),
-        TraceScope::Pod { name, .. } => format!("pod {name}"),
-    }
-}
-
-/// A file name for the Save dialog: context, what's traced and when, e.g.
-/// `acme-uat-shop-2026-10-11-1405.trace`.
-pub(crate) fn file_name(context: &str, scope: &TraceScope, stamp: &str) -> String {
-    let what = match scope {
-        TraceScope::Cluster => "cluster".to_owned(),
-        TraceScope::Namespaces(ns) => more(&ns[..], |n| n.clone()),
-        TraceScope::Workloads(ws) => more(&ws[..], |w| w.name.clone()),
-        TraceScope::Pod { name, .. } => name.clone(),
-    };
-    let name: String = format!("{context}-{what}-{stamp}")
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+') { c } else { '-' })
-        .collect();
-    format!("{name}.trace")
-}
-
-/// The first item's name, and "+N" for the rest.
-fn more<T>(items: &[T], name: impl Fn(&T) -> String) -> String {
-    match items {
-        [] => String::new(),
-        [one] => name(one),
-        [first, rest @ ..] => format!("{}+{}", name(first), rest.len()),
-    }
-}
-
 /// `2026-10-11-1405` in local time.
 pub(crate) fn stamp_now() -> String {
-    let d = js_sys::Date::new_0();
-    format!(
-        "{:04}-{:02}-{:02}-{:02}{:02}",
-        d.get_full_year(),
-        d.get_month() + 1,
-        d.get_date(),
-        d.get_hours(),
-        d.get_minutes()
-    )
-}
-
-/// A span like `2d 4h`, `3h 12m` or `5m`.
-pub(crate) fn duration_text(secs: f64) -> String {
-    let mins = (secs.max(0.0) / 60.0).floor() as u64;
-    let (d, h, m) = (mins / 1440, mins / 60 % 24, mins % 60);
-    match (d, h) {
-        (0, 0) => format!("{m}m"),
-        (0, _) => format!("{h}h {m}m"),
-        _ => format!("{d}d {h}h"),
-    }
-}
-
-fn ago_text(secs: f64) -> String {
-    if secs < 60.0 { "just now".into() } else { format!("{} ago", duration_text(secs)) }
-}
-
-/// Shown in the top bar while a trace runs.
-pub(crate) fn indicator_text(status: &TraceStatus, now_secs: f64) -> String {
-    let base = format!("Trace · {}", duration_text(now_secs - status.started));
-    if status.stopping { format!("{base} · stopping…") } else { base }
-}
-
-/// Something about the running trace needs attention.
-pub(crate) fn needs_attention(status: &TraceStatus) -> bool {
-    status.last_error.is_some() || status.gaps > 0
+    let now = js_sys::Date::now() / 1000.0;
+    crate::logic::trace::stamp(now, crate::trace_overlay::local_offset(now))
 }
 
 /// Listens for the backend's trace events and loads the current state.
@@ -205,11 +50,11 @@ pub(crate) fn refresh(store: Store) {
 /// Opens the trace dialog: the running trace, or the start form (with
 /// `draft`, or the current view's namespace).
 pub(crate) fn open(store: Store, draft: Option<Draft>) {
+    if let Some(e) = open_blocked(store.trace.with_untracked(Option::is_some), store.cluster.with_untracked(Option::is_some)) {
+        store.error.set(Some(e.into()));
+        return;
+    }
     if store.trace.with_untracked(Option::is_none) {
-        if store.cluster.with_untracked(Option::is_none) {
-            store.error.set(Some("Connect to a cluster to start a trace.".into()));
-            return;
-        }
         store.trace_draft.set(Some(draft.unwrap_or_else(|| Draft::for_view(store.namespace.get_untracked()))));
     }
     store.trace_open.set(true);
@@ -218,7 +63,7 @@ pub(crate) fn open(store: Store, draft: Option<Draft>) {
 /// Runs `then` now, or, if a trace of another context is running, once the
 /// user agreed to stop it (it's saved first).
 pub(crate) fn before_switch(store: Store, context: String, then: impl FnOnce() + 'static) {
-    let other = store.trace.with_untracked(|t| t.as_ref().is_some_and(|t| t.context != context));
+    let other = store.trace.with_untracked(|t| stops_on_switch(t.as_ref(), &context));
     if other {
         store.trace_then.set_value(Some(Box::new(then)));
         store.trace_switch.set(Some(context));
@@ -244,8 +89,7 @@ async fn stop(store: Store, reason: TraceEnd) {
     }
     let result = invoke::<_, TraceSummary>("stop_trace", &Args { reason }).await;
     if let Ok(s) = &result {
-        let recent = crate::prefs::RecentTrace { path: s.path.clone(), context: s.context.clone(), what: scope_text(&s.scope), at: js_sys::Date::now() };
-        store.recent_traces.set(crate::prefs::remember_trace(recent));
+        store.recent_traces.set(crate::prefs::remember_trace(recent(s.path.clone(), s, js_sys::Date::now())));
     }
     store.trace.set(None);
     store.trace_saved.set(Some(result));
@@ -258,7 +102,7 @@ pub(crate) fn TraceButton(store: Store) -> impl IntoView {
         Some(status) => {
             let text = move || store.trace.with(|t| t.as_ref().map(|t| indicator_text(t, store.now.get() / 1000.0)));
             let warn = needs_attention(&status);
-            let title = format!("Tracing {} of {} into {}. Click for details.", scope_text(&status.scope), status.context, status.path);
+            let title = indicator_title(&status);
             view! {
                 <button class="trace-indicator" class:attention=warn title=title on:click=move |_| open(store, None)>
                     <span class="rec-dot" aria-hidden="true"></span>
@@ -291,7 +135,7 @@ pub(crate) fn TraceThisButton(store: Store, row: ResourceRow) -> impl IntoView {
     move || {
         let kind = store.kind.get()?;
         let draft = Draft::for_object(&kind, row.namespace.clone(), &row.name)?;
-        let title = format!("Record this {}'s CPU and memory over time", kind.kind);
+        let title = trace_this_title(&kind.kind);
         Some(view! {
             <button class="btn small" title=title on:click=move |_| open(store, Some(draft.clone()))>"Trace…"</button>
         })
@@ -330,35 +174,21 @@ fn RunningPanel(store: Store, close: Callback<()>) -> impl IntoView {
     let body = move || {
         let s = store.trace.get()?;
         let now = store.now.get() / 1000.0;
-        let pull = match (&s.last_error, s.last_pull, s.prometheus) {
-            (_, _, false) => "No Prometheus found: only the app's own samples are kept, while it runs.".to_owned(),
-            (Some(e), _, _) => format!("The last pull failed: {e}. The next one tries again."),
-            (None, Some(t), _) => format!("Last pulled from Prometheus {}.", ago_text(now - t)),
-            (None, None, _) => "Not pulled from Prometheus yet.".to_owned(),
-        };
-        let gaps = match s.gaps {
-            0 => None,
-            1 => Some("1 gap: Prometheus no longer had some data when it was pulled.".to_owned()),
-            n => Some(format!("{n} gaps: Prometheus no longer had some data when it was pulled.")),
-        };
+        let pull = pull_text(&s, now);
+        let gaps = running_gaps_text(s.gaps);
         Some(view! {
             <dl class="trace-facts">
                 <dt>"Context"</dt><dd>{s.context.clone()}</dd>
                 <dt>"Tracing"</dt><dd>{scope_text(&s.scope)}</dd>
                 <dt>"Running for"</dt><dd>{duration_text(now - s.started)}</dd>
                 <dt>"Data covers"</dt><dd>{duration_text(s.data_end - s.data_start)}</dd>
-                {(s.prometheus && s.pull_every > 0.0).then(|| view! {
-                    <dt>"Pulls"</dt><dd>{format!("Every {} min", (s.pull_every / 60.0).round())}</dd>
+                {pulls_text(&s).map(|every| view! {
+                    <dt>"Pulls"</dt><dd>{every}</dd>
                 })}
                 <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
             </dl>
             <p class:warn-text=s.last_error.is_some()>{pull}</p>
-            {(s.sampled_pods > 0).then(|| view! {
-                <p class="muted">{match s.sampled_pods {
-                    1 => "1 running pod isn't in Prometheus; the app samples it every 30 s.".to_owned(),
-                    n => format!("{n} running pods aren't in Prometheus; the app samples them every 30 s."),
-                }}</p>
-            })}
+            {sampled_text(s.sampled_pods).map(|text| view! { <p class="muted">{text}</p> })}
             {gaps.map(|g| view! { <p class="warn-text">{g}</p> })}
             <p class="muted small">"Closing the app stops the trace. The file is saved either way."</p>
         })
@@ -398,10 +228,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
     // Load the listed namespace's targets when it changes.
     Effect::new(move |_| {
         let Some(d) = store.trace_draft.get() else { return };
-        let ns = d.namespace.clone();
-        if !matches!(d.level, Level::Workloads | Level::Pod) || ns.is_empty() {
-            return;
-        }
+        let Some(ns) = d.targets_namespace().map(str::to_owned) else { return };
         if targets.with_untracked(|t| t.as_ref().is_some_and(|(n, _)| *n == ns)) {
             return;
         }
@@ -473,10 +300,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                     type="radio"
                     name="trace-level"
                     prop:checked=on
-                    on:change=move |_| edit(&|d| {
-                        d.level = level;
-                        d.filter.clear();
-                    })
+                    on:change=move |_| edit(&|d| d.set_level(level))
                 />
                 <span class="trace-level-name">{label}</span>
                 <span class="muted small">{hint}</span>
@@ -491,11 +315,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                 "Namespace"
                 <select on:change=move |ev| {
                     let ns = event_target_value(&ev);
-                    edit(&|d| {
-                        d.namespace = ns.clone();
-                        d.pod.clear();
-                        d.filter.clear();
-                    });
+                    edit(&|d| d.set_namespace(&ns));
                 }>
                     <option value="" selected=current.is_empty() disabled=true>"Choose…"</option>
                     {namespaces().into_iter().map(|ns| {
@@ -529,8 +349,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                 <p class="muted">"Every pod in "<strong>{context()}</strong>". Takes the most space: about 55 MB a day per 1,000 containers."</p>
             }.into_any()),
             Level::Namespaces => {
-                let filter = d.filter.to_lowercase();
-                let list = namespaces().into_iter().filter(|ns| ns.to_lowercase().contains(&filter)).map(|ns| {
+                let list = namespaces().into_iter().filter(|ns| d.shows(ns)).map(|ns| {
                     let checked = d.namespaces.contains(&ns);
                     let name = ns.clone();
                     view! {
@@ -543,7 +362,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                 Some(view! {
                     {filter_box()}
                     <div class="trace-options">{list}</div>
-                    <p class="muted small">{format!("{} chosen", d.namespaces.len())}</p>
+                    <p class="muted small">{d.chosen_text()}</p>
                 }.into_any())
             }
             Level::Workloads | Level::Pod => {
@@ -553,9 +372,8 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                     None => view! { <p class="muted">"Loading…"</p> }.into_any(),
                     Some((_, Err(e))) => view! { <p class="warn-text">{e}</p> }.into_any(),
                     Some((_, Ok(t))) => {
-                        let filter = d.filter.to_lowercase();
                         if d.level == Level::Workloads {
-                            let items: Vec<_> = t.workloads.into_iter().filter(|w| w.name.to_lowercase().contains(&filter)).collect();
+                            let items: Vec<_> = t.workloads.into_iter().filter(|w| d.shows(&w.name)).collect();
                             if items.is_empty() {
                                 view! { <p class="muted">"No workloads here."</p> }.into_any()
                             } else {
@@ -573,7 +391,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                                 }).collect_view().into_any()
                             }
                         } else {
-                            let items: Vec<_> = t.pods.into_iter().filter(|p| p.to_lowercase().contains(&filter)).collect();
+                            let items: Vec<_> = t.pods.into_iter().filter(|p| d.shows(p)).collect();
                             if items.is_empty() {
                                 view! { <p class="muted">"No running pods here."</p> }.into_any()
                             } else {
@@ -594,14 +412,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                         }
                     }
                 };
-                let chosen = (d.level == Level::Workloads).then(|| {
-                    let others = d.workloads.iter().filter(|w| w.namespace != d.namespace).count();
-                    let text = match (d.workloads.len(), others) {
-                        (n, 0) => format!("{n} chosen"),
-                        (n, o) => format!("{n} chosen ({o} in other namespaces)"),
-                    };
-                    view! { <p class="muted small">{text}</p> }
-                });
+                let chosen = (d.level == Level::Workloads).then(|| view! { <p class="muted small">{d.chosen_text()}</p> });
                 let pod_note = (d.level == Level::Pod).then(|| view! {
                     <p class="muted small">"A pod's data stops when it's replaced. To follow a workload through restarts and rollouts, trace the workload."</p>
                 });
@@ -643,7 +454,7 @@ fn StartForm(store: Store, close: Callback<()>) -> impl IntoView {
                         }
                     }>
                         {subduer_types::TRACE_PULL_EVERY_CHOICES.map(|secs| view! {
-                            <option value=secs.to_string() selected=move || every.get() == secs>{format!("{} min", secs / 60)}</option>
+                            <option value=secs.to_string() selected=move || every.get() == secs>{every_text(secs)}</option>
                         }).collect_view()}
                     </select>
                 </label>
@@ -669,10 +480,7 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
         let result = store.trace_saved.get()?;
         Some(match result {
             Ok(s) => {
-                let span = match (s.data_start, s.data_end) {
-                    (Some(a), Some(b)) => duration_text(b - a),
-                    _ => "no data".into(),
-                };
+                let span = span_text(s.data_start, s.data_end);
                 let path = s.path.clone();
                 let reveal = move |_| {
                     #[derive(Serialize)]
@@ -686,7 +494,7 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                         }
                     });
                 };
-                let gaps = s.gaps.len();
+                let gaps = saved_gaps_text(s.gaps.len());
                 let review_path = s.path.clone();
                 let review = move |_| {
                     store.trace_saved.set(None);
@@ -702,15 +510,13 @@ pub(crate) fn TraceSavedDialog(store: Store) -> impl IntoView {
                             <dt>"Context"</dt><dd>{s.context.clone()}</dd>
                             <dt>"Traced"</dt><dd>{scope_text(&s.scope)}</dd>
                             <dt>"Data covers"</dt><dd>{span}</dd>
-                            <dt>"Holds"</dt><dd>{format!("{} pods, {} containers", s.pods, s.containers)}</dd>
-                            {(s.pulled_bytes > 0).then(|| view! {
-                                <dt>"Pulled"</dt><dd>{format!("{} from Prometheus", crate::overview::fmt_bytes(s.pulled_bytes as f64))}</dd>
+                            <dt>"Holds"</dt><dd>{holds_text(&s)}</dd>
+                            {pulled_text(&s).map(|pulled| view! {
+                                <dt>"Pulled"</dt><dd>{pulled}</dd>
                             })}
                             <dt>"File"</dt><dd class="mono path">{s.path.clone()}</dd>
                         </dl>
-                        {(gaps > 0).then(|| view! {
-                            <p class="warn-text">{if gaps == 1 { "1 gap with no data.".to_owned() } else { format!("{gaps} gaps with no data.") }}</p>
-                        })}
+                        {gaps.map(|g| view! { <p class="warn-text">{g}</p> })}
                         <div class="modal-actions">
                             <button on:click=reveal>{crate::prefs::reveal_label()}</button>
                             <button on:click=review>"Review"</button>
@@ -747,15 +553,7 @@ pub(crate) fn TraceQuitDialog(store: Store) -> impl IntoView {
     move || {
         let quit = store.trace_quit.get()?;
         let status = store.trace.get_untracked();
-        let what = status.as_ref().map(|s| {
-            let now = store.now.get_untracked() / 1000.0;
-            let gaps = match s.gaps {
-                0 => String::new(),
-                1 => ", 1 gap".into(),
-                n => format!(", {n} gaps"),
-            };
-            format!("{} of {} ({}{gaps})", scope_text(&s.scope), s.context, duration_text(now - s.started))
-        });
+        let what = status.as_ref().map(|s| quit_what(s, store.now.get_untracked() / 1000.0));
         let dirty = store.dirty.get_untracked();
         let confirm = move |_| {
             #[derive(Serialize)]
@@ -771,12 +569,12 @@ pub(crate) fn TraceQuitDialog(store: Store) -> impl IntoView {
                 store.trace_quit.set(None);
             });
         };
-        let action = if quit { "Stop trace and quit" } else { "Stop trace and close" };
+        let (note, action) = quit_texts(quit);
         Some(view! {
             <Modal on_cancel=on_cancel busy=busy>
                 <h2>"A trace is running"</h2>
                 <p>"Tracing "<strong>{what}</strong>"."</p>
-                <p>{if quit { "Quitting stops it. The file is saved first." } else { "Closing the window stops it. The file is saved first." }}</p>
+                <p>{note}</p>
                 {dirty.map(|d| view! { <p class="warn-text">"Your unsaved edits to "<strong class="mono">{d}</strong>" will be lost."</p> })}
                 <div class="modal-actions">
                     <button prop:disabled=move || busy.get() on:click=cancel>"Keep tracing"</button>
@@ -826,7 +624,3 @@ pub(crate) fn TraceSwitchDialog(store: Store) -> impl IntoView {
         })
     }
 }
-
-#[cfg(test)]
-#[path = "trace_tests.rs"]
-mod tests;

@@ -621,3 +621,146 @@ fn only_unused_optional_columns_are_dropped() {
     assert_eq!((t.columns.len(), t.mono.clone()), (1, vec![0]));
     assert_eq!(drop_empty_columns(table(vec![]), &[1, 2, 3]).columns.len(), 4, "an empty table keeps its headings");
 }
+
+// ---- Less common settings ----
+
+#[test]
+fn external_secret_policies_sources_and_odd_values() {
+    let mut v = es(
+        "shop",
+        "odd",
+        json!({
+            "secretStoreRef": {"name": "default-store"},
+            "target": {"creationPolicy": "Future", "deletionPolicy": "Delete"},
+            "data": [{"secretKey": "A", "remoteRef": {"key": "eg/a"}, "sourceRef": {"storeRef": {"name": "other-store"}}},
+                     {"secretKey": "B", "remoteRef": {"key": "eg/b"}, "sourceRef": {"storeRef": {"name": "global", "kind": "ClusterSecretStore"}}}],
+            "dataFrom": [{"extract": {"key": "eg/api", "property": "token"}}, {"somethingNew": {}}]
+        }),
+        json!({}),
+    );
+    v["metadata"]["annotations"] = json!({"force-sync": "now please"});
+    let d = describe_object("external-secrets.io/ExternalSecret", &v, now());
+    assert_eq!(row(&d, "Creation"), Some("Future"), "an unknown policy is shown as is");
+    assert_eq!(row(&d, "Deletion"), Some("Delete: the Secret is deleted when the remote secret is gone"));
+    let forced = info(&d, "Forced sync");
+    assert_eq!((forced.value.as_str(), forced.time), ("now please", false));
+    let data = section(&d, "es-data").table.as_ref().unwrap();
+    assert_eq!(cells(data), vec![vec!["A", "eg/a", "SecretStore/other-store"], vec!["B", "eg/b", "ClusterSecretStore/global"]]);
+    let (own, global) = (data.rows[0].link.as_ref().unwrap(), data.rows[1].link.as_ref().unwrap());
+    assert_eq!((own.kind.as_str(), own.namespace.as_deref()), ("external-secrets.io/SecretStore", Some("shop")));
+    assert_eq!((global.kind.as_str(), global.namespace.as_deref()), ("external-secrets.io/ClusterSecretStore", None));
+    assert_eq!(cells(section(&d, "es-data-from").table.as_ref().unwrap()), vec![vec!["Extract", "eg/api · token"], vec!["", ""]]);
+
+    for (policy, text) in [
+        ("Merge", "Merge: only its keys are removed when the remote secret is gone"),
+        ("Someday", "Someday"),
+    ] {
+        let v = es("shop", "p", json!({"target": {"deletionPolicy": policy}}), json!({}));
+        assert_eq!(row(&describe_object("external-secrets.io/ExternalSecret", &v, now()), "Deletion"), Some(text));
+    }
+}
+
+#[test]
+fn cluster_kinds_fall_back_to_their_own_name() {
+    let v = object("external-secrets.io/v1", "ClusterExternalSecret", None, "bare", json!({
+        "spec": {"refreshInterval": "2m", "externalSecretSpec": {}}
+    }));
+    let d = describe_object("external-secrets.io/ClusterExternalSecret", &v, now());
+    assert_eq!(row(&d, "ExternalSecret name"), Some("bare"));
+    assert_eq!(row(&d, "Target secret"), Some("bare"));
+    assert_eq!(row(&d, "Refresh interval"), Some("1h (each ExternalSecret)"));
+    assert_eq!(row(&d, "Namespaces checked"), Some("every 2m"));
+
+    let v = object("external-secrets.io/v1alpha1", "ClusterPushSecret", None, "cps", json!({
+        "spec": {"refreshInterval": "10m", "pushSecretSpec": {
+            "secretStoreRefs": [{"labelSelector": {"matchLabels": {"push": "yes"}}}, {"kind": "SecretStore"}],
+            "updatePolicy": "Sometimes", "deletionPolicy": "Later"
+        }}
+    }));
+    let d = describe_object("external-secrets.io/ClusterPushSecret", &v, now());
+    assert_eq!(row(&d, "PushSecret name"), Some("cps"));
+    assert_eq!(row(&d, "Namespaces checked"), Some("every 10m"));
+    assert_eq!(row(&d, "Stores"), Some("SecretStore labelled push=yes"));
+    assert_eq!(d.info.iter().filter(|r| r.key == "Stores" || r.key == "Store").count(), 1, "a ref naming nothing is left out");
+    assert_eq!(row(&d, "Update"), Some("Sometimes"));
+    assert_eq!(row(&d, "Deletion"), Some("Later"));
+}
+
+#[test]
+fn stores_with_odd_capabilities_and_default_retries() {
+    let mut v = store_value("SecretStore", Some("shop"));
+    v["status"]["capabilities"] = json!("Sideways");
+    v["spec"]["retrySettings"] = json!({"retryInterval": "10s"});
+    let d = describe_object("external-secrets.io/SecretStore", &v, now());
+    assert_eq!(row(&d, "Capabilities"), Some("Sideways"));
+    assert_eq!(row(&d, "Retries"), Some("default, every 10s"));
+}
+
+#[test]
+fn generator_state_names_its_generator_without_metadata() {
+    let v = object("generators.external-secrets.io/v1alpha1", "GeneratorState", Some("shop"), "gs", json!({
+        "spec": {"resource": {"kind": "Password", "name": "pw"}}
+    }));
+    assert_eq!(row(&describe_object("generators.external-secrets.io/GeneratorState", &v, now()), "Generator"), Some("Password/pw"));
+}
+
+#[test]
+fn other_kinds_without_a_ready_condition_are_pending() {
+    let v = object("external-secrets.io/v1alpha1", "SomethingNew", Some("shop"), "x", json!({}));
+    assert_eq!(describe_object("external-secrets.io/SomethingNew", &v, now()).status.as_deref(), Some("Pending"));
+}
+
+#[tokio::test]
+async fn generator_users_are_sorted() {
+    let api = MockApi::new();
+    let uses = json!({"data": [{"secretKey": "k", "sourceRef": {"generatorRef": {"kind": "Password", "name": "pw"}}}]});
+    api.on("GET", SHOP_ES, list("ExternalSecretList", vec![es("shop", "zeta", uses.clone(), json!({})), es("shop", "alpha", uses, json!({}))]));
+    let v = object("generators.external-secrets.io/v1alpha1", "Password", Some("shop"), "pw", json!({"spec": {}}));
+    let mut d = describe_object("generators.external-secrets.io/Password", &v, now());
+    let k = kind("generators.external-secrets.io", "v1alpha1", "Password", "passwords", true);
+    related(&api.client(), &k, "shop", "pw", &v, &mut d).await.unwrap();
+    let t = section(&d, "generator-users").table.as_ref().unwrap();
+    assert_eq!(t.rows.iter().map(|r| r.cells[1].as_str()).collect::<Vec<_>>(), ["alpha", "zeta"]);
+}
+
+#[tokio::test]
+async fn cluster_kinds_show_events_from_every_namespace() {
+    let api = MockApi::new();
+    api.on("GET", ALL_ES, list("ExternalSecretList", vec![]));
+    api.on("GET", ALL_EVENTS, list("EventList", vec![json!({
+        "metadata": {"name": "e1", "namespace": "default", "creationTimestamp": "2026-10-16T11:00:00Z"},
+        "involvedObject": {"kind": "ClusterExternalSecret", "name": "shared"},
+        "type": "Warning", "reason": "Failed", "message": "denied", "count": 2,
+        "lastTimestamp": "2026-10-16T11:00:00Z"
+    })]));
+    let v = ces(json!({}));
+    let mut d = describe_object("external-secrets.io/ClusterExternalSecret", &v, now());
+    related(&api.client(), &ces_kind_ref(), "", "shared", &v, &mut d).await.unwrap();
+    assert_eq!(d.events.len(), 1);
+    assert_eq!((d.events[0].reason.as_str(), d.events[0].object.clone()), ("Failed", None), "one object: not named per event");
+}
+
+#[tokio::test]
+async fn force_sync_finds_the_child_name_in_status_or_uses_its_own() {
+    let api = MockApi::new();
+    let ces_path = "/apis/external-secrets.io/v1/clusterexternalsecrets/shared";
+    let mut v = ces(json!({"externalSecretName": "from-status", "provisionedNamespaces": ["shop"]}));
+    v["spec"]["externalSecretName"] = Value::Null;
+    api.on("PATCH", ces_path, v);
+    api.on("PATCH", "/apis/external-secrets.io/v1/namespaces/shop/externalsecrets/from-status", json!({}));
+    assert_eq!(force_sync(&api.client(), &unlocked(), "acme-uat", &ces_kind_ref(), None, "shared", false).await.unwrap(), 1);
+
+    let api = MockApi::new();
+    let mut v = ces(json!({"provisionedNamespaces": ["shop"]}));
+    v["spec"]["externalSecretName"] = Value::Null;
+    api.on("PATCH", ces_path, v);
+    api.on("PATCH", "/apis/external-secrets.io/v1/namespaces/shop/externalsecrets/shared", json!({}));
+    assert_eq!(force_sync(&api.client(), &unlocked(), "acme-uat", &ces_kind_ref(), None, "shared", false).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn listing_with_no_versions_says_there_is_no_api() {
+    let api = MockApi::new();
+    let err = list_any(&api.client(), "PushSecret", "pushsecrets", &[], None).await.unwrap_err();
+    assert_eq!(err.to_string(), "no PushSecret API");
+}

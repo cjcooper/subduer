@@ -270,3 +270,97 @@ fn comparing_traces_lines_rows_up_oldest_first() {
     std::fs::remove_dir_all(&a).unwrap();
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// Runs `sql` on the trace at `path` (to damage or extend it).
+fn alter(path: &std::path::Path, sql: &str) {
+    rusqlite::Connection::open(path).unwrap().execute_batch(sql).unwrap();
+}
+
+#[test]
+fn two_rollouts_are_counted() {
+    let dir = scratch("rollouts");
+    let path = sample(&dir, 8 * 60);
+    alter(&path, "UPDATE pods SET revision = 'c' WHERE name = 'web-a-2'");
+    let r = review(&path, false).unwrap();
+    let web = r.rows.iter().find(|row| row.key.name == "web").unwrap();
+    assert_eq!(web.rollouts, 2);
+    assert!(web.suggestion.as_ref().unwrap().basis.contains(", 2 rollouts, "));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_empty_trace_reviews_with_no_rows() {
+    let dir = scratch("review-empty");
+    let path = dir.join("empty.trace");
+    TraceFile::create(&path, false, "c", &TraceScope::Cluster, 0.0).unwrap();
+    let r = review(&path, true).unwrap();
+    assert!(r.rows.is_empty() && r.summary.data_start.is_none());
+    assert_eq!(overview(&path, None, None, None, 10).unwrap_err().to_string(), "no usage in this trace");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn overview_without_requests_and_before_the_first_one() {
+    let dir = scratch("overview-requests");
+    let path = sample(&dir, 60);
+    // web's first requests are seen ten minutes in: before that, they count as none.
+    alter(&path, "UPDATE resources SET t = t + 600");
+    let at = |m: i64| (T0 + m * 60) as f64;
+    let zoomed = overview(&path, None, Some(at(5)), Some(at(15)), 600).unwrap();
+    assert_eq!((zoomed.start, zoomed.end), (at(5), at(15)));
+    assert_eq!(zoomed.cpu_request, vec![(at(5), 0.0), (at(10), 1000.0)]);
+    // No requests at all: no request lines.
+    alter(&path, "DELETE FROM resources");
+    let bare = overview(&path, None, None, None, 60).unwrap();
+    assert!(bare.cpu_request.is_empty() && bare.mem_request.is_empty());
+    assert_eq!(bare.cpu_avg.len(), 60);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn daily_keeps_the_latest_month_and_skips_missing_memory() {
+    let dir = scratch("daily-month");
+    let path = sample(&dir, 60);
+    // One CPU-only minute a day for 40 more days.
+    alter(
+        &path,
+        &format!(
+            "WITH RECURSIVE d(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM d WHERE n < 40)
+             INSERT INTO usage (container_id, t, cpu_avg, mem_max, source)
+             SELECT c.id, {T0} + n * 86400, 300000, NULL, 0 FROM d, containers c JOIN pods p ON p.id = c.pod_id WHERE p.name = 'db-0'"
+        ),
+    );
+    let d = daily(&path, &key("StatefulSet", "db", "db"), &jiff::tz::TimeZone::UTC).unwrap();
+    assert_eq!(d.days.len(), MAX_DAYS);
+    let label = |day: i64| jiff::Timestamp::from_second(T0 + day * 86400).unwrap().to_zoned(jiff::tz::TimeZone::UTC).strftime("%a %-d %b").to_string();
+    assert_eq!((d.days[0].label.clone(), d.days[30].label.clone()), (label(10), label(40)));
+    assert_eq!((d.days[30].cpu[0], d.days[30].mem[0]), (Some(300.0), None));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn damaged_files_are_errors_not_panics() {
+    let dir = scratch("damaged");
+    let web = key("Deployment", "web", "app");
+    // Without the pods' namespaces, nothing can be found.
+    let pods = sample(&dir, 60);
+    alter(&pods, "ALTER TABLE pods RENAME COLUMN namespace TO namespace_was");
+    for err in [review(&pods, false).unwrap_err(), series(&pods, &web, None, None, 10).unwrap_err(), overview(&pods, None, None, None, 10).unwrap_err()] {
+        assert!(err.to_string().contains("no such column: p.namespace"), "{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let dir = scratch("damaged-resources");
+    let resources = sample(&dir, 60);
+    alter(&resources, "ALTER TABLE resources RENAME COLUMN cpu_limit TO limit_was");
+    assert!(review(&resources, false).unwrap_err().to_string().contains("no such column: cpu_limit"));
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let dir = scratch("damaged-usage");
+    let usage = sample(&dir, 60);
+    alter(&usage, "ALTER TABLE usage RENAME COLUMN container_id TO id_was");
+    for err in [series(&usage, &web, None, None, 10).unwrap_err(), overview(&usage, None, None, None, 10).unwrap_err()] {
+        assert!(err.to_string().contains("no such column: container_id"), "{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

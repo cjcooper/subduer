@@ -4,13 +4,12 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
 use subduer_types::{DirListing, DownloadResult};
 
-use crate::modal::{Generation, Modal};
 use crate::app::Store;
-use crate::browser::{BrowseMode, FolderBrowser, folder_of, join};
-use crate::overview::fmt_bytes;
+use crate::browser::{BrowseMode, FolderBrowser};
+use crate::logic::download::{self as logic, BrowseArgs, DownloadArgs, Enter, RevealArgs};
+use crate::modal::{Generation, Modal};
 use crate::tauri::invoke;
 
 /// The container the dialog downloads from.
@@ -49,21 +48,13 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
         browsing.set(true);
         let sent = generation.now();
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                namespace: String,
-                pod: String,
-                container: String,
-                path: String,
-                suggest: bool,
-            }
-            let args = Args { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: dir, suggest: false };
+            let args = BrowseArgs { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: dir, suggest: false };
             let result = invoke::<_, DirListing>("browse_dir", &args).await;
             if !generation.still(sent) {
                 return;
             }
             if let Ok(l) = &result {
-                path.set(join(&l.path, ""));
+                path.set(logic::folder_path(&l.path));
             }
             listing.set(Some(result));
             browsing.set(false);
@@ -89,14 +80,7 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
         error.set(None);
         let sent = generation.now();
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                namespace: String,
-                pod: String,
-                container: String,
-                path: String,
-            }
-            let args = Args { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: file };
+            let args = DownloadArgs { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path: file };
             let result = invoke::<_, DownloadResult>("download_file", &args).await;
             if !generation.still(sent) {
                 return;
@@ -112,26 +96,22 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
     };
     let reveal = move |saved: String| {
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                path: String,
-            }
-            if let Err(e) = invoke::<_, ()>("reveal_download", &Args { path: saved }).await {
+            if let Err(e) = invoke::<_, ()>("reveal_download", &RevealArgs { path: saved }).await {
                 error.set(Some(e));
             }
         });
     };
     let close = move || store.download_prompt.set(None);
-    let is_file = move || path.with(|p| p.trim().starts_with('/') && !p.trim().ends_with('/'));
+    let is_file = move || path.with(|p| logic::is_file(p));
 
     move || {
         store.download_prompt.get().map(|prompt| {
-            let source = format!("{} · {}/{}", prompt.container, prompt.namespace, prompt.pod);
+            let source = logic::source(&prompt.container, &prompt.namespace, &prompt.pod);
             let body = move || match phase.get() {
                 Phase::Done(r) => {
                     let saved = r.saved_to.clone();
                     view! {
-                        <p>"Saved "{fmt_bytes(r.bytes as f64)}" to "<strong class="mono">{r.saved_to.clone()}</strong>"."</p>
+                        <p>"Saved "{logic::size(r.bytes)}" to "<strong class="mono">{r.saved_to.clone()}</strong>"."</p>
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
                             <button on:click=move |_| reveal(saved.clone())>{crate::prefs::reveal_label()}</button>
@@ -152,10 +132,9 @@ pub fn DownloadDialog(store: Store) -> impl IntoView {
                                 on:input=move |ev| path.set(event_target_value(&ev))
                                 on:keydown=move |ev: leptos::ev::KeyboardEvent| {
                                     if ev.key() == "Enter" {
-                                        if is_file() {
-                                            download();
-                                        } else {
-                                            browse(folder_of(&path.get_untracked()), false);
+                                        match logic::on_enter(&path.get_untracked()) {
+                                            Enter::Download => download(),
+                                            Enter::Browse(dir) => browse(dir, false),
                                         }
                                     }
                                 }

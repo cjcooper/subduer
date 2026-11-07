@@ -80,7 +80,8 @@ impl ProdMarks {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Error::Message(format!("{}: {e}", dir.display())))?;
         }
-        let text = serde_json::to_string_pretty(&self.marks).map_err(|e| Error::Message(e.to_string()))?;
+        // A map of strings to booleans always serializes; `{:#}` is pretty JSON.
+        let text = format!("{:#}", serde_json::json!(self.marks));
         std::fs::write(path, text).map_err(|e| Error::Message(format!("{}: {e}", path.display())))
     }
 }

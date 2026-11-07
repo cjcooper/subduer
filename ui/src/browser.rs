@@ -4,67 +4,8 @@
 use leptos::prelude::*;
 use subduer_types::{DirEntry, DirListing};
 
-/// `dir` joined with `name`, without doubling the slash.
-pub fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") }
-}
-
-/// The folder part of a path: itself if it ends with `/`, else its parent.
-pub fn folder_of(path: &str) -> String {
-    match path.trim().rsplit_once('/') {
-        Some(("", _)) => "/".into(),
-        Some((dir, _)) => dir.into(),
-        None => "/".into(),
-    }
-}
-
-/// What the browser is for, which changes what entries say and allow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrowseMode {
-    /// Folders show whether they're writable; files can be replaced.
-    Upload,
-    /// Files show whether they're readable; unreadable ones can't be picked.
-    Download,
-}
-
-/// Breadcrumbs for a path as (label, path): `/` first, then each folder.
-fn crumb_paths(path: &str) -> Vec<(String, String)> {
-    let mut acc = String::new();
-    let mut out = vec![("/".to_owned(), "/".to_owned())];
-    for part in path.split('/').filter(|p| !p.is_empty()) {
-        acc.push('/');
-        acc.push_str(part);
-        out.push((part.to_owned(), acc.clone()));
-    }
-    out
-}
-
-/// An entry's note, whether it's dimmed, and whether it can be clicked.
-fn entry_state(mode: BrowseMode, e: &DirEntry) -> (&'static str, bool, bool) {
-    match (mode, e.dir) {
-        (BrowseMode::Upload, true) => (if e.writable { "writable" } else { "read-only" }, !e.writable, true),
-        (BrowseMode::Upload, false) => (if e.writable { "replace" } else { "read-only" }, !e.writable, true),
-        (BrowseMode::Download, true) => (if e.readable { "" } else { "no access" }, !e.readable, e.readable),
-        (BrowseMode::Download, false) => (if e.readable { "download" } else { "can't read" }, !e.readable, e.readable),
-    }
-}
-
-fn entry_title(mode: BrowseMode, dir: bool, full: &str) -> String {
-    match (mode, dir) {
-        (_, true) => format!("Open {full}"),
-        (BrowseMode::Upload, false) => format!("Upload as {full} (asks before replacing)"),
-        (BrowseMode::Download, false) => format!("Download {full}"),
-    }
-}
-
-/// The current folder's status note.
-fn folder_status(mode: BrowseMode, writable: bool) -> &'static str {
-    match (mode, writable) {
-        (BrowseMode::Upload, true) => "✓ writable",
-        (BrowseMode::Upload, false) => "read-only: files can't be saved here",
-        (BrowseMode::Download, _) => "",
-    }
-}
+use crate::logic::browser::{at_root, crumb_paths, entry_state, entry_title, folder_status, show_chips};
+pub(crate) use crate::logic::browser::{BrowseMode, folder_of, join};
 
 /// Writable-place shortcuts, breadcrumbs and the current folder's entries.
 /// Clicking a folder opens it; clicking a file passes it to `pick_file`.
@@ -116,7 +57,7 @@ pub fn FolderBrowser(
 
     view! {
         <div class="browser" class:stale=move || browsing.get()>
-            <Show when=move || mode == BrowseMode::Upload && suggestions.with(|s| !s.is_empty())>
+            <Show when=move || suggestions.with(|s| show_chips(mode, s))>
                 <div class="browser-chips"><span class="muted">"Writable:"</span>{chips}</div>
             </Show>
             {move || match listing.get() {
@@ -124,7 +65,7 @@ pub fn FolderBrowser(
                 Some(Err(e)) => view! { <p class="warn browser-msg">{e}</p> }.into_any(),
                 Some(Ok(l)) => {
                     let parent = folder_of(&l.path);
-                    let at_root = l.path == "/";
+                    let at_root = at_root(&l.path);
                     let status = folder_status(mode, l.writable);
                     let rows = l.entries.iter().cloned().map(|e| entry_row(l.path.clone(), e)).collect_view();
                     view! {
@@ -145,7 +86,3 @@ pub fn FolderBrowser(
         </div>
     }
 }
-
-#[cfg(test)]
-#[path = "browser_tests.rs"]
-mod tests_unit;

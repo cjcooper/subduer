@@ -17,6 +17,11 @@ pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// A core error as the UI shows it.
+pub(crate) fn user(e: subduer_core::Error) -> String {
+    e.user_message()
+}
+
 /// Re-reads the kubeconfig every time so external edits show up.
 #[tauri::command]
 pub fn list_contexts(app_state: tauri::State<'_, crate::AppState>, state: Win) -> CmdResult<ContextList> {
@@ -43,17 +48,19 @@ pub async fn connect<R: Runtime>(app: AppHandle<R>, state: Win, context: String)
     }
     let kubeconfig = contexts::load_kubeconfig().map_err(err)?;
     let client = contexts::client_for(&kubeconfig, &context).await.map_err(err)?;
-    open_session(&app, &state, context, client, attempt).await
+    open_session(&app, &state, context, client, attempt, DISCOVER_TIMEOUT).await
 }
 
-/// Checks that the cluster answers, discovers it, and makes it the window's
-/// session unless a newer connect (attempt) has started since.
+/// Checks that the cluster answers, discovers it (within `discover_timeout`),
+/// and makes it the window's session unless a newer connect (attempt) has
+/// started since.
 pub(crate) async fn open_session<R: Runtime>(
     app: &AppHandle<R>,
     state: &Win,
     context: String,
     client: subduer_core::kube::Client,
     attempt: u64,
+    discover_timeout: std::time::Duration,
 ) -> CmdResult<ClusterInfo> {
     let latest = || state.connect_attempt.load(Ordering::SeqCst) == attempt;
     // One cheap request first, so an unreachable cluster (a VPN that's down)
@@ -74,12 +81,12 @@ pub(crate) async fn open_session<R: Runtime>(
         };
         Ok::<_, subduer_core::Error>((kinds, namespaces))
     };
-    let (kinds, namespaces) = match tokio::time::timeout(DISCOVER_TIMEOUT, discover).await {
+    let (kinds, namespaces) = match tokio::time::timeout(discover_timeout, discover).await {
         Ok(found) => found.map_err(err)?,
         Err(_) => {
             return Err(format!(
                 "the cluster stopped answering while it was being read ({}s); check your network or VPN",
-                DISCOVER_TIMEOUT.as_secs()
+                discover_timeout.as_secs()
             ));
         }
     };
@@ -133,14 +140,8 @@ pub async fn watch_resources<R: Runtime>(
     let client = connected_client(&state).await?;
     let watch_id = state.next_watch_id.fetch_add(1, Ordering::Relaxed) + 1;
     let label = state.label.clone();
-    let handle = tauri::async_runtime::spawn(async move {
-        watch::watch_table(client, kind, namespace, watch_id, |table| {
-            if let Err(e) = app.emit_to(&label, events::RESOURCE_TABLE, table) {
-                tracing::warn!(error = %e, "emit failed");
-            }
-        })
-        .await;
-    });
+    let emit = move |table: subduer_core::types::ResourceTable| crate::log_err(app.emit_to(&label, events::RESOURCE_TABLE, table), "emit failed");
+    let handle = tauri::async_runtime::spawn(watch::watch_table(client, kind, namespace, watch_id, emit));
     if let Some(old) = state.watch.lock().unwrap().replace(handle) {
         old.abort();
     }
@@ -203,7 +204,7 @@ pub async fn workload_details(
     let client = connected_client(&state).await?;
     workload::workload_details(&client, &kind, &namespace, &name)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Last hour of a workload's CPU/memory, summed over its pods; polled every 15 s.
@@ -222,7 +223,7 @@ pub async fn workload_history(
     history
         .workload_history(&client, &kind, &namespace, &name)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Last hour of a node's CPU/memory, every container on it summed; polled every 15 s.
@@ -233,7 +234,7 @@ pub async fn node_history(state: Win, name: String) -> CmdResult<PodHistory> {
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.history.clone())
     };
-    history.node_history(&client, &name).await.map_err(|e| e.user_message())
+    history.node_history(&client, &name).await.map_err(user)
 }
 
 /// Deletes one object. Refused unless the current context is unlocked, and
@@ -249,7 +250,7 @@ pub async fn delete_resource(
     let client = client_for_change(&state, &context, "deleted").await?;
     actions::delete(&client, &state.gate, &context, &kind, namespace.as_deref(), &name, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Desired and current replicas of a Deployment or StatefulSet, for the Scale dialog.
@@ -263,7 +264,7 @@ pub async fn get_replicas(
     let client = connected_client(&state).await?;
     actions::replicas(&client, &kind, &namespace, &name)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Rollout restart, checked like `delete_resource`.
@@ -278,7 +279,7 @@ pub async fn restart_workload(
     let client = client_for_change(&state, &context, "restarted").await?;
     actions::restart(&client, &state.gate, &context, &kind, &namespace, &name, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Sets replicas, checked like `delete_resource`.
@@ -294,7 +295,7 @@ pub async fn scale_workload(
     let client = client_for_change(&state, &context, "scaled").await?;
     actions::scale(&client, &state.gate, &context, &kind, &namespace, &name, replicas, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Suspends or resumes a Job or CronJob, checked like `delete_resource`.
@@ -310,7 +311,7 @@ pub async fn suspend_workload(
     let client = client_for_change(&state, &context, if suspend { "suspended" } else { "resumed" }).await?;
     actions::set_suspended(&client, &state.gate, &context, &kind, &namespace, &name, suspend, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Starts a Job from a CronJob now, checked like `delete_resource`. Returns the Job's name.
@@ -319,7 +320,7 @@ pub async fn run_cron_job(state: Win, context: String, namespace: String, name: 
     let client = client_for_change(&state, &context, "started").await?;
     actions::run_cron_job(&client, &state.gate, &context, &namespace, &name, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// The connected client, provided `context` (what a confirmation dialog
@@ -334,7 +335,7 @@ pub async fn rightsize_preview(
     change: subduer_types::RightsizeChange,
 ) -> CmdResult<subduer_types::RightsizePreview> {
     let client = client_for_change(&state, &context, "previewed").await?;
-    subduer_core::rightsize::preview(&client, &change).await.map_err(|e| e.user_message())
+    subduer_core::rightsize::preview(&client, &change).await.map_err(user)
 }
 
 /// Applies new requests to one workload (one patch, one rollout), checked
@@ -342,7 +343,7 @@ pub async fn rightsize_preview(
 #[tauri::command]
 pub async fn rightsize_apply(state: Win, context: String, change: subduer_types::RightsizeChange) -> CmdResult<()> {
     let client = client_for_change(&state, &context, "changed").await?;
-    subduer_core::rightsize::apply(&client, &state.gate, &context, &change).await.map_err(|e| e.user_message())
+    subduer_core::rightsize::apply(&client, &state.gate, &context, &change).await.map_err(user)
 }
 
 async fn client_for_change(state: &WindowState, context: &str, done: &str) -> CmdResult<subduer_core::kube::Client> {
@@ -365,7 +366,7 @@ pub async fn object_details(
     let client = connected_client(&state).await?;
     config::object_details(&client, &kind, namespace.as_deref(), &name)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Every value of a Secret, when the user starts editing it. Returned to the
@@ -392,7 +393,7 @@ pub async fn save_config_data(
     let client = client_for_change(&state, &context, "saved").await?;
     actions::save_data(&client, &state.gate, &context, &kind, &namespace, &name, &resource_version, &changes, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Sets an HPA's min and max replicas, checked like `delete_resource`.
@@ -409,7 +410,7 @@ pub async fn set_hpa_range(
     let client = client_for_change(&state, &context, "changed").await?;
     actions::set_hpa_range(&client, &state.gate, &context, &kind, &namespace, &name, min, max, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Grows a PersistentVolumeClaim, checked like `delete_resource`.
@@ -424,7 +425,7 @@ pub async fn expand_claim(
     let client = client_for_change(&state, &context, "changed").await?;
     actions::expand_claim(&client, &state.gate, &context, &namespace, &name, &size, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Sets a PersistentVolume's reclaim policy, checked like `delete_resource`.
@@ -433,7 +434,7 @@ pub async fn set_reclaim_policy(state: Win, context: String, name: String, polic
     let client = client_for_change(&state, &context, "changed").await?;
     actions::set_reclaim_policy(&client, &state.gate, &context, &name, &policy, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Annotates an ExternalSecret or ClusterExternalSecret with `force-sync`,
@@ -446,7 +447,7 @@ pub async fn force_sync(state: Win, context: String, kind: KindRef, namespace: S
     let namespace = Some(namespace.as_str()).filter(|n| !n.is_empty());
     subduer_core::external_secrets::force_sync(&client, &state.gate, &context, &kind, namespace, &name, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Pauses (optionally holding a ScaledObject at `replicas`) or resumes a
@@ -464,7 +465,7 @@ pub async fn pause_scaling(
     let client = client_for_change(&state, &context, if paused { "paused" } else { "resumed" }).await?;
     subduer_core::keda::set_paused(&client, &state.gate, &context, &kind, &namespace, &name, paused, replicas, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Sets a ScaledObject's or ScaledJob's min and max replicas, checked like
@@ -482,7 +483,7 @@ pub async fn set_scaling_range(
     let client = client_for_change(&state, &context, "changed").await?;
     subduer_core::keda::set_replica_range(&client, &state.gate, &context, &kind, &namespace, &name, min, max, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Whether a ServiceAccount may do something (a SubjectAccessReview). A
@@ -500,7 +501,7 @@ pub async fn check_access(
     let client = connected_client(&state).await?;
     subduer_core::rbac::check_access(&client, &account_namespace, &account, &verb, &resource, &namespace, &name)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Rolls a Helm release back with the helm CLI, checked like
@@ -517,7 +518,7 @@ pub async fn helm_rollback(
     client_for_change(&state, &context, "rolled back").await?;
     subduer_core::helm::rollback(&state.gate, &context, &namespace, &name, revision, wait, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Deletes a Helm release with `helm uninstall`, checked like
@@ -534,7 +535,7 @@ pub async fn helm_uninstall(
     client_for_change(&state, &context, "deleted").await?;
     subduer_core::helm::uninstall(&state.gate, &context, &namespace, &name, keep_history, wait, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Creates a namespace, checked like `delete_resource`.
@@ -543,33 +544,38 @@ pub async fn create_namespace(state: Win, context: String, name: String) -> CmdR
     let client = client_for_change(&state, &context, "created").await?;
     subduer_core::namespace::create_namespace(&client, &state.gate, &context, &name, false)
         .await
-        .map_err(|e| e.user_message())
+        .map_err(user)
 }
 
 /// Opens an Ingress URL in the browser. Only plain http(s) addresses are
 /// accepted.
 #[tauri::command]
-pub fn open_url(url: String) -> CmdResult<()> {
+pub fn open_url(app_state: tauri::State<'_, crate::AppState>, url: String) -> CmdResult<()> {
     let ok = (url.starts_with("http://") || url.starts_with("https://"))
         && url.len() < 2048
         && !url.chars().any(|c| c.is_whitespace() || c.is_control());
     if !ok {
         return Err(format!("not an http(s) address: {url:?}"));
     }
-    crate::forward::open_in_browser(&url)
+    app_state.launcher.open_in_browser(&url)
 }
 
 /// Sets every window's native appearance (title bar, scroll bars, form
 /// controls): `light`, `dark`, or `auto` to follow the system.
 #[tauri::command]
 pub fn set_app_theme<R: Runtime>(app: AppHandle<R>, theme: String) {
-    let theme = match theme.as_str() {
+    apply_theme(&app, &theme, AppHandle::set_theme);
+}
+
+/// [`set_app_theme`], setting the theme with `set` (Tauri's, in the app).
+pub(crate) fn apply_theme<R: Runtime>(app: &AppHandle<R>, theme: &str, set: fn(&AppHandle<R>, Option<tauri::Theme>)) {
+    let theme = match theme {
         "light" => Some(tauri::Theme::Light),
         "dark" => Some(tauri::Theme::Dark),
         _ => None,
     };
-    app.set_theme(theme);
-    crate::app_icon::refresh(&app);
+    set(app, theme);
+    crate::app_icon::refresh(app);
 }
 
 /// The UI reports whether it holds unsaved edits, so closing the window or
@@ -583,8 +589,8 @@ pub fn set_unsaved(state: Win, unsaved: bool) {
 /// and stop any running trace. The trace's file is closed first.
 #[tauri::command]
 pub async fn close_discarding<R: Runtime>(app: AppHandle<R>, state: Win, quit: bool) -> CmdResult<()> {
-    if let Some(Err(e)) = state.traces.stop(subduer_types::TraceEnd::Quit).await {
-        tracing::warn!(error = %e, "closing the trace on quit failed");
+    if let Some(result) = state.traces.stop(subduer_types::TraceEnd::Quit).await {
+        crate::log_err(result, "closing the trace on quit failed");
     }
     state.unsaved.store(false, Ordering::SeqCst);
     if quit {

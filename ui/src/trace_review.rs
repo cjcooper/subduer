@@ -2,20 +2,25 @@
 //! the right-sizing table (one row per workload container, sortable and
 //! filterable) and, for the selected row, its suggestion, flags, CPU and
 //! memory over the trace, and usage by day and hour. Works without a cluster.
+//!
+//! The logic is in `logic::trace_review`.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{ReviewFlag, ReviewRow, TraceDaily, TraceKey, TraceReview, TraceSeries};
+use subduer_types::{ReviewRow, TraceDaily, TraceKey, TraceReview, TraceSeries};
 
 use crate::app::{Store, guard};
-use crate::prefs::RecentTrace;
+use crate::logic::trace::{recent, scope_text, span_text};
+use crate::logic::trace_review::{
+    CHART_POINTS, Filter, OverviewArgs, SeriesArgs, SortBy, add_note_text, all_checked, apply_note, apply_selected_text, apply_selected_title,
+    applicable_keys, basis_text, check_title, checked_rows, compare_pair, compare_text, detail_subtitle, facts_text, file_name, find_row, flag_class,
+    flag_explain, flag_level, flag_text, gaps_text, keeps_selection, key_subtitle, more_text, namespace_choice, namespaces, next_sort, note_dirty, note_what,
+    overview_title, pods_text, quick_active, quick_zoom, recent_text, recording, recording_text, report_error_text, rows_text, save_note, shown_flags,
+    sort_arrow, source_text, spare, state_text, suggest_line, suggestion_text, toggle, toggle_all, toggle_ordered, visible_rows,
+};
 use crate::tauri::{NoArgs, invoke};
-use crate::trace::{duration_text, scope_text};
 use crate::trace_chart::{Measure, TraceChart, TraceHeat};
-
-/// Buckets asked for per chart: about one per two pixels.
-const CHART_POINTS: u32 = 400;
 
 /// Shows the Traces page.
 pub(crate) fn open_page(store: Store) {
@@ -55,11 +60,10 @@ fn load(store: Store) {
             return;
         }
         if let Ok(r) = &result {
-            let recent = RecentTrace { path, context: r.summary.context.clone(), what: scope_text(&r.summary.scope), at: js_sys::Date::now() };
-            store.recent_traces.set(crate::prefs::remember_trace(recent));
+            store.recent_traces.set(crate::prefs::remember_trace(recent(path, &r.summary, js_sys::Date::now())));
             // Keep the selection if the row is still there.
             if let Some(sel) = store.review_sel.get_untracked()
-                && !r.rows.iter().any(|row| row.key == sel)
+                && !keeps_selection(r, &sel)
             {
                 store.review_sel.set(None);
             }
@@ -78,218 +82,26 @@ fn choose_and_open(store: Store) {
     });
 }
 
-/// The file's name without its folder.
-pub(crate) fn file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-// --- Flags ----------------------------------------------------------------------
-
-/// Severity for a flag's badge: critical, serious, warning, or info.
-pub(crate) fn flag_level(f: &ReviewFlag) -> &'static str {
-    match f {
-        ReviewFlag::OomKilled { .. } | ReviewFlag::OomEvents { .. } => "critical",
-        ReviewFlag::Throttled { .. } | ReviewFlag::NearMemoryLimit { .. } | ReviewFlag::AboveMemoryLimit => "serious",
-        ReviewFlag::Restarts { .. } | ReviewFlag::NoCpuRequest | ReviewFlag::NoMemoryRequest => "warning",
-        ReviewFlag::RequestsChanged | ReviewFlag::ShortData { .. } | ReviewFlag::TooLittleData { .. } => "info",
-    }
-}
-
-fn pct(v: f64) -> String {
-    format!("{:.0}%", v * 100.0)
-}
-
-fn times(n: u32) -> String {
-    format!("×{n}")
-}
-
-/// A short label for a badge.
-pub(crate) fn flag_text(f: &ReviewFlag) -> String {
-    match f {
-        ReviewFlag::Throttled { worst } => format!("Throttled {}", pct(*worst)),
-        ReviewFlag::NearMemoryLimit { share } => format!("Memory {} of limit", pct(*share)),
-        ReviewFlag::OomKilled { count } => format!("OOMKilled {}", times(*count)),
-        ReviewFlag::OomEvents { count } => format!("OOM {}", times(*count)),
-        ReviewFlag::Restarts { count } => format!("Restarts {}", times(*count)),
-        ReviewFlag::NoCpuRequest => "No CPU request".into(),
-        ReviewFlag::NoMemoryRequest => "No memory request".into(),
-        ReviewFlag::RequestsChanged => "Requests changed".into(),
-        ReviewFlag::ShortData { hours } => format!("{} of data", duration_text(hours * 3600.0)),
-        ReviewFlag::TooLittleData { hours } => format!("Only {} of data", duration_text(hours * 3600.0)),
-        ReviewFlag::AboveMemoryLimit => "Above the memory limit".into(),
-    }
-}
-
-/// What a flag means, for the detail panel.
-pub(crate) fn flag_explain(f: &ReviewFlag) -> String {
-    match f {
-        ReviewFlag::Throttled { worst } => format!(
-            "CPU was throttled by its limit: in the worst minute {} of scheduling periods were held back. Raising or removing the CPU limit helps more than the request.",
-            pct(*worst)
-        ),
-        ReviewFlag::NearMemoryLimit { share } => format!("Peak memory reached {} of the limit. Close to an OOM kill.", pct(*share)),
-        ReviewFlag::OomKilled { count } => format!(
-            "The container was OOM-killed and restarted {}: it needs more memory than its limit.",
-            plural(u64::from(*count), "time", "times")
-        ),
-        ReviewFlag::OomEvents { count } => {
-            format!("The kernel killed a process for memory {} without the container restarting.", plural(u64::from(*count), "time", "times"))
-        }
-        ReviewFlag::Restarts { count } => format!("The container restarted {} for reasons other than memory.", plural(u64::from(*count), "time", "times")),
-        ReviewFlag::NoCpuRequest => "No CPU request is set, so the scheduler assumes it needs none.".into(),
-        ReviewFlag::NoMemoryRequest => "No memory request is set, so the scheduler assumes it needs none and it's evicted first under pressure.".into(),
-        ReviewFlag::RequestsChanged => "Requests changed during the trace; the figures cover both settings. The current values are shown.".into(),
-        ReviewFlag::ShortData { hours } => format!("Only {} of data: daily or weekly peaks may be missing.", duration_text(hours * 3600.0)),
-        ReviewFlag::TooLittleData { hours } => {
-            format!("Only {} of data, too little to suggest anything. Keep tracing for at least 6 hours, ideally a few days.", duration_text(hours * 3600.0))
-        }
-        ReviewFlag::AboveMemoryLimit => "The suggested memory request is above the memory limit; the limit must be raised with it.".into(),
-    }
-}
-
 /// Whether suggestions from this review can be applied now: only while
 /// connected to the cluster it was recorded on. The reason when not.
 pub(crate) fn apply_blocked(store: Store) -> Option<String> {
-    let trace_context = store.review.with(|r| r.as_ref()?.as_ref().ok().map(|r| r.summary.context.clone()))?;
     let connected = store.cluster.with(Option::is_some) && store.disconnected.with(Option::is_none);
-    match store.context.get() {
-        Some(c) if c == trace_context && connected => None,
-        _ => Some(format!("Connect to {trace_context} to apply suggestions.")),
-    }
-}
-
-/// Sort key: critical first.
-/// Flags weighed by severity: one critical outweighs any number of lesser ones.
-pub(crate) fn flag_score(r: &ReviewRow) -> f64 {
-    r.flags
-        .iter()
-        .map(|f| match severity(f) {
-            0 => 1e6,
-            1 => 1e4,
-            2 => 1e2,
-            _ => 1.0,
-        })
-        .sum()
-}
-
-fn severity(f: &ReviewFlag) -> u8 {
-    match flag_level(f) {
-        "critical" => 0,
-        "serious" => 1,
-        "warning" => 2,
-        _ => 3,
-    }
-}
-
-/// `1 pod`, `3 pods`.
-pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
-/// Rows worth attention: anything but the data-length notes.
-fn flagged(row: &ReviewRow) -> bool {
-    row.flags.iter().any(|f| flag_level(f) != "info") || row.cpu_spare.is_some_and(|s| s < 0.0) || row.mem_spare.is_some_and(|s| s < 0.0)
-}
-
-// --- Sorting and filtering ------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SortBy {
-    Workload,
-    Pods,
-    CpuRequest,
-    CpuP95,
-    CpuSpare,
-    MemRequest,
-    MemPeak,
-    MemSpare,
-    /// The suggested CPU request, then memory.
-    Suggested,
-    /// The most severe flags first when descending.
-    Flags,
-}
-
-/// Sorts rows; numbers descending by default, names ascending. Missing values go last.
-pub(crate) fn sort_rows(rows: &mut [ReviewRow], by: SortBy, descending: bool) {
-    let num = |r: &ReviewRow| -> Option<f64> {
-        match by {
-            SortBy::Workload => None,
-            SortBy::Pods => Some(r.avg_pods),
-            SortBy::CpuRequest => r.cpu_request,
-            SortBy::CpuP95 => Some(r.cpu_p95),
-            SortBy::CpuSpare => r.cpu_spare,
-            SortBy::MemRequest => r.mem_request,
-            SortBy::MemPeak => Some(r.mem_max),
-            SortBy::MemSpare => r.mem_spare,
-            SortBy::Suggested => r.suggestion.as_ref().map(|s| s.cpu_request * 1e12 + s.mem_request / 1e6),
-            SortBy::Flags => Some(flag_score(r)),
-        }
-    };
-    rows.sort_by(|a, b| {
-        if by == SortBy::Workload {
-            let ord = (&a.key.name, &a.key.container, &a.key.namespace).cmp(&(&b.key.name, &b.key.container, &b.key.namespace));
-            return if descending { ord.reverse() } else { ord };
-        }
-        match (num(a), num(b)) {
-            (Some(x), Some(y)) => {
-                let ord = x.total_cmp(&y);
-                if descending { ord.reverse() } else { ord }
-            }
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-    });
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct Filter {
-    pub(crate) namespace: Option<String>,
-    pub(crate) text: String,
-    pub(crate) flagged_only: bool,
-}
-
-pub(crate) fn filter_rows(rows: &[ReviewRow], f: &Filter) -> Vec<ReviewRow> {
-    let text = f.text.trim().to_lowercase();
-    rows.iter()
-        .filter(|r| f.namespace.as_ref().is_none_or(|ns| *ns == r.key.namespace))
-        .filter(|r| {
-            text.is_empty() || [&r.key.name, &r.key.container, &r.key.namespace, &r.key.kind].iter().any(|s| s.to_lowercase().contains(&text))
-        })
-        .filter(|r| !f.flagged_only || flagged(r))
-        .cloned()
-        .collect()
-}
-
-/// `−99%`, `+12%`: the change from `from` to `to`.
-pub(crate) fn change_text(from: f64, to: f64) -> String {
-    if from <= 0.0 {
-        return String::new();
-    }
-    let p = (to - from) / from * 100.0;
-    if p.abs() < 0.5 { "no change".into() } else if p < 0.0 { format!("−{:.0}%", -p) } else { format!("+{p:.0}%") }
+    let context = store.context.get();
+    store.review.with(|r| crate::logic::trace_review::apply_blocked(r.as_ref(), connected, context.as_deref()))
 }
 
 /// Spare capacity: blank without a request, "short" (in the danger ink) when usage is above it.
 fn spare_cell(v: Option<f64>, measure: Measure) -> impl IntoView {
-    match v {
+    match spare(v, measure) {
         None => view! { <td class="num muted">"—"</td> }.into_any(),
-        Some(v) if v < 0.0 => view! { <td class="num short" title="Usage above the request">{format!("short {}", measure.fmt(-v))}</td> }.into_any(),
-        Some(v) => view! { <td class="num">{measure.fmt(v)}</td> }.into_any(),
+        Some((true, text)) => view! { <td class="num short" title="Usage above the request">{text}</td> }.into_any(),
+        Some((false, text)) => view! { <td class="num">{text}</td> }.into_any(),
     }
-}
-
-fn opt(v: Option<f64>, measure: Measure) -> String {
-    v.map_or("—".into(), |v| measure.fmt(v))
 }
 
 /// Apply… for one row, or why it can't be applied.
 fn apply_row(store: Store, row: &ReviewRow) -> impl IntoView + use<> {
-    let note = if !crate::rightsize::applicable_kind(&row.key.kind) {
-        Some(format!("A {}'s requests can't be changed here.", row.key.kind))
-    } else {
-        apply_blocked(store)
-    };
+    let note = apply_note(&row.key.kind, apply_blocked(store));
     let row = row.clone();
     match note {
         Some(n) => view! { <p class="muted small apply-note">{n}</p> }.into_any(),
@@ -308,8 +120,10 @@ fn compare_with(store: Store) {
     let Some(current) = store.review_path.get_untracked() else { return };
     spawn_local(async move {
         match invoke::<_, Option<String>>("choose_trace_to_open", &NoArgs {}).await {
-            Ok(Some(other)) if other != current => crate::compare::open(store, vec![current, other]),
-            Ok(Some(_)) => store.error.set(Some("Choose a different trace to compare with.".into())),
+            Ok(Some(other)) => match compare_pair(current, other) {
+                Ok(paths) => crate::compare::open(store, paths),
+                Err(e) => store.error.set(Some(e.into())),
+            },
             Ok(None) => {}
             Err(e) => store.error.set(Some(e)),
         }
@@ -343,6 +157,19 @@ fn export_report(store: Store) {
     });
 }
 
+/// Shows a file in Finder (or the system's file manager).
+fn reveal(store: Store, path: String) {
+    #[derive(Serialize)]
+    struct Args {
+        path: String,
+    }
+    spawn_local(async move {
+        if let Err(e) = invoke::<_, ()>("reveal_trace", &Args { path }).await {
+            store.error.set(Some(e));
+        }
+    });
+}
+
 /// "Report saved to …" with Show in Finder, after Export report….
 fn report_line(store: Store) -> impl IntoView {
     move || {
@@ -353,43 +180,15 @@ fn report_line(store: Store) -> impl IntoView {
                     <div class="report-line">
                         <span class="ok-text">"✓ Report saved: "</span>
                         <span class="mono">{file_name(&out).to_owned()}</span>
-                        <button class="btn small" on:click=move |_| {
-                            #[derive(Serialize)]
-                            struct Args {
-                                path: String,
-                            }
-                            let path = reveal_path.clone();
-                            spawn_local(async move {
-                                if let Err(e) = invoke::<_, ()>("reveal_trace", &Args { path }).await {
-                                    store.error.set(Some(e));
-                                }
-                            });
-                        }>{crate::prefs::reveal_label()}</button>
+                        <button class="btn small" on:click=move |_| reveal(store, reveal_path.clone())>{crate::prefs::reveal_label()}</button>
                         <button class="close" title="Dismiss" aria-label="Dismiss" on:click=move |_| store.report_saved.set(None)>"×"</button>
                     </div>
                 }
                 .into_any()
             }
-            Err(e) => view! { <div class="report-line warn-text">{format!("The report wasn't saved: {e}")}</div> }.into_any(),
+            Err(e) => view! { <div class="report-line warn-text">{report_error_text(&e)}</div> }.into_any(),
         })
     }
-}
-
-/// Puts a saved note into the open review: on the trace, or on every row of the workload.
-fn note_saved(store: Store, key: Option<&TraceKey>, text: &str) {
-    let note = (!text.trim().is_empty()).then(|| text.trim().to_owned());
-    store.review.update(|r| {
-        if let Some(Ok(r)) = r {
-            match key {
-                None => r.note = note.clone(),
-                Some(k) => {
-                    for row in r.rows.iter_mut().filter(|row| row.key.namespace == k.namespace && row.key.kind == k.kind && row.key.name == k.name) {
-                        row.note = note.clone();
-                    }
-                }
-            }
-        }
-    });
 }
 
 /// A note shown as text with Edit, or being edited. Saved into the trace
@@ -401,10 +200,7 @@ fn NoteBox(store: Store, key: Option<TraceKey>, text: Option<String>, label: &'s
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let original = StoredValue::new(text.clone().unwrap_or_default());
-    let what = match &key {
-        None => "the note on this trace".to_owned(),
-        Some(k) => format!("the note on {}", k.name),
-    };
+    let what = note_what(key.as_ref());
     let stop = move || {
         editing.set(false);
         store.dirty.set(None);
@@ -426,7 +222,11 @@ fn NoteBox(store: Store, key: Option<TraceKey>, text: Option<String>, label: &'s
                     Ok(()) => {
                         original.set_value(text.trim().to_owned());
                         stop();
-                        note_saved(store, key.as_ref(), &text);
+                        store.review.update(|r| {
+                            if let Some(Ok(r)) = r {
+                                save_note(r, key.as_ref(), &text);
+                            }
+                        });
                     }
                     Err(e) => error.set(Some(e)),
                 }
@@ -446,8 +246,7 @@ fn NoteBox(store: Store, key: Option<TraceKey>, text: Option<String>, label: &'s
                         prop:value=move || draft.get()
                         on:input=move |ev| {
                             draft.set(event_target_value(&ev));
-                            let changed = draft.get_untracked().trim() != original.get_value().trim();
-                            store.dirty.set(changed.then(|| what.clone()));
+                            store.dirty.set(note_dirty(&draft.get_untracked(), &original.get_value(), &what));
                         }
                     ></textarea>
                     {move || error.get().map(|e| view! { <p class="warn-text small">{e}</p> })}
@@ -467,7 +266,7 @@ fn NoteBox(store: Store, key: Option<TraceKey>, text: Option<String>, label: &'s
         } else {
             let current = original.get_value();
             if current.is_empty() {
-                view! { <button class="btn small note-add" on:click=move |_| editing.set(true)>{format!("Add a {}…", label.to_lowercase())}</button> }.into_any()
+                view! { <button class="btn small note-add" on:click=move |_| editing.set(true)>{add_note_text(label)}</button> }.into_any()
             } else {
                 view! {
                     <div class="note-box">
@@ -508,7 +307,7 @@ fn TraceList(store: Store) -> impl IntoView {
                     <span class="rec-dot" aria-hidden="true"></span>
                     <div class="trace-card-text">
                         <strong>{file_name(&s.path).to_owned()}</strong>
-                        <span class="muted small">{format!("Recording {} of {}", scope_text(&s.scope), s.context)}</span>
+                        <span class="muted small">{recording_text(&s)}</span>
                     </div>
                     <button class="btn small" on:click=move |_| open_file(store, path.clone())>"Review so far"</button>
                 </div>
@@ -532,11 +331,11 @@ fn TraceList(store: Store) -> impl IntoView {
                             title="Choose for Compare"
                             aria-label="Choose for Compare"
                             prop:checked=is_picked
-                            on:change=move |_| picked.update(|s| if !s.remove(&pick_path) { s.insert(pick_path.clone()); })
+                            on:change=move |_| picked.update(|s| toggle_ordered(s, &pick_path))
                         />
                         <button class="trace-card-open" title=t.path.clone() on:click=move |_| open_file(store, path.clone())>
                             <strong>{file_name(&t.path).to_owned()}</strong>
-                            <span class="muted small">{format!("{} · {} · {when}", t.context, t.what)}</span>
+                            <span class="muted small">{recent_text(&t, &when)}</span>
                         </button>
                         <button class="close" title="Remove from this list (the file stays)" aria-label="Remove from the list"
                             on:click=move |_| store.recent_traces.set(crate::prefs::forget_trace(&forget_path))>"×"</button>
@@ -555,7 +354,7 @@ fn TraceList(store: Store) -> impl IntoView {
                     let n = picked.with(|s| s.len());
                     (n >= 2).then(|| view! {
                         <button class="btn" on:click=move |_| crate::compare::open(store, picked.get_untracked().into_iter().collect())>
-                            {format!("Compare {n}…")}
+                            {compare_text(n)}
                         </button>
                     })
                 }}
@@ -582,87 +381,37 @@ fn ReviewView(store: Store) -> impl IntoView {
             store.report_saved.set(None);
         })
     };
-    let reveal = move |_| {
-        #[derive(Serialize)]
-        struct Args {
-            path: String,
+    let reveal_file = move |_| {
+        if let Some(path) = store.review_path.get_untracked() {
+            reveal(store, path);
         }
-        let Some(path) = store.review_path.get_untracked() else { return };
-        spawn_local(async move {
-            if let Err(e) = invoke::<_, ()>("reveal_trace", &Args { path }).await {
-                store.error.set(Some(e));
-            }
-        });
     };
-    let recording = move || store.review.with(|r| matches!(r, Some(Ok(r)) if r.summary.ended.is_none() && !r.summary.unfinished));
+    let recording = move || store.review.with(|r| recording(r.as_ref()));
 
     let header = move || {
         let r = store.review.get()?.ok()?;
         let s = &r.summary;
-        let span = match (s.data_start, s.data_end) {
-            (Some(a), Some(b)) => duration_text(b - a),
-            _ => "no data".into(),
-        };
-        let state = if s.unfinished {
-            "Ended unexpectedly (data up to the last pull is intact)".to_owned()
-        } else if s.ended.is_none() {
-            "Still recording".to_owned()
-        } else {
-            match s.end_reason {
-                Some(subduer_types::TraceEnd::Quit) => "Stopped when the app quit".into(),
-                Some(subduer_types::TraceEnd::ContextChanged) => "Stopped on a context switch".into(),
-                Some(subduer_types::TraceEnd::ConnectionLost) => "Stopped: connection lost".into(),
-                _ => "Stopped".into(),
-            }
-        };
-        let local = s.local_samples as f64 / (s.local_samples + s.prometheus_samples).max(1) as f64;
-        let source = if s.prometheus.is_none() {
-            "Sampled by the app (no Prometheus)".to_owned()
-        } else if local > 0.0 {
-            format!("Prometheus, {} sampled by the app", if local < 0.01 { "<1%".into() } else { format!("{:.0}%", local * 100.0) })
-        } else {
-            "Prometheus".to_owned()
-        };
         let gaps = s.gaps.len();
         Some(view! {
             <dl class="review-facts">
                 <div><dt>"Context"</dt><dd>{s.context.clone()}</dd></div>
                 <div><dt>"Traced"</dt><dd>{scope_text(&s.scope)}</dd></div>
-                <div><dt>"Covers"</dt><dd>{span}</dd></div>
-                <div><dt>"State"</dt><dd class:warn-text=s.unfinished>{state}</dd></div>
-                <div><dt>"Data from"</dt><dd>{source}</dd></div>
-                <div><dt>"Gaps"</dt><dd class:warn-text={gaps > 0}>{if gaps == 0 { "None".to_owned() } else { gaps.to_string() }}</dd></div>
+                <div><dt>"Covers"</dt><dd>{span_text(s.data_start, s.data_end)}</dd></div>
+                <div><dt>"State"</dt><dd class:warn-text=s.unfinished>{state_text(s)}</dd></div>
+                <div><dt>"Data from"</dt><dd>{source_text(s)}</dd></div>
+                <div><dt>"Gaps"</dt><dd class:warn-text={gaps > 0}>{gaps_text(gaps)}</dd></div>
             </dl>
         })
     };
 
-    let namespaces = move || {
-        store.review.with(|r| {
-            let mut ns: Vec<String> = r.iter().flatten().flat_map(|r| r.rows.iter().map(|row| row.key.namespace.clone())).collect();
-            ns.sort();
-            ns.dedup();
-            ns
-        })
-    };
-    let rows = move || {
-        store.review.with(|r| match r {
-            Some(Ok(r)) => {
-                let mut rows = filter_rows(&r.rows, &filter.get());
-                let (by, desc) = sort.get();
-                sort_rows(&mut rows, by, desc);
-                rows
-            }
-            _ => vec![],
-        })
-    };
+    let namespaces = move || store.review.with(|r| namespaces(r.as_ref()));
+    let rows = move || store.review.with(|r| visible_rows(r.as_ref(), &filter.get(), sort.get()));
     let th = move |label: &'static str, by: SortBy, num: bool| {
         let active = move || sort.get().0 == by;
-        let arrow = move || if !active() { "" } else if sort.get().1 { " ↓" } else { " ↑" };
+        let arrow = move || sort_arrow(sort.get(), by);
         view! {
             <th class:num=num>
-                <button class="th-sort" class:on=active on:click=move |_| sort.update(|(b, d)| {
-                    if *b == by { *d = !*d } else { *b = by; *d = by != SortBy::Workload }
-                })>{label}{arrow}</button>
+                <button class="th-sort" class:on=active on:click=move |_| sort.update(|s| *s = next_sort(*s, by))>{label}{arrow}</button>
             </th>
         }
     };
@@ -677,19 +426,13 @@ fn ReviewView(store: Store) -> impl IntoView {
                 let key = row.key.clone();
                 let selected = { let key = key.clone(); move || store.review_sel.with(|s| s.as_ref() == Some(&key)) };
                 // The two most severe; the detail panel lists them all.
-                let mut shown: Vec<&ReviewFlag> = row.flags.iter().filter(|f| flag_level(f) != "info").collect();
-                shown.sort_by_key(|f| severity(f));
-                let more = shown.len().saturating_sub(2);
+                let (shown, more) = shown_flags(&row);
                 let flags = shown
                     .into_iter()
-                    .take(2)
-                    .map(|f| view! { <span class=format!("flag {}", flag_level(f)) title=flag_explain(f)><span class="flag-dot" aria-hidden="true"></span>{flag_text(f)}</span> })
+                    .map(|f| view! { <span class=flag_class(f) title=flag_explain(f)><span class="flag-dot" aria-hidden="true"></span>{flag_text(f)}</span> })
                     .collect_view();
-                let more = (more > 0).then(|| view! { <span class="flag more" title="Select the row to see them all">{format!("+{more}")}</span> });
-                let suggestion = match &row.suggestion {
-                    Some(s) => format!("{} · {}", Measure::Cpu.fmt(s.cpu_request), Measure::Memory.fmt(s.mem_request)),
-                    None => "—".into(),
-                };
+                let more = more_text(more).map(|more| view! { <span class="flag more" title="Select the row to see them all">{more}</span> });
+                let suggestion = suggestion_text(&row);
                 let can = crate::rightsize::applicable(&row);
                 let check_key = row.key.clone();
                 let checked = { let k = row.key.clone(); move || store.review_checked.with(|c| c.contains(&k)) };
@@ -699,10 +442,10 @@ fn ReviewView(store: Store) -> impl IntoView {
                             <input
                                 type="checkbox"
                                 aria-label="Choose for Apply selected"
-                                title=if can { "Choose for Apply selected" } else { "No suggestion that can be applied" }
+                                title=check_title(can)
                                 prop:disabled=!can
                                 prop:checked=checked
-                                on:change=move |_| store.review_checked.update(|c| if !c.remove(&check_key) { c.insert(check_key.clone()); })
+                                on:change=move |_| store.review_checked.update(|c| toggle(c, &check_key))
                             />
                         </td>
                         <td>
@@ -710,13 +453,13 @@ fn ReviewView(store: Store) -> impl IntoView {
                                 <span class="review-name">{row.key.name.clone()}</span>
                                 {row.note.clone().map(|n| view! { <span class="note-mark" title=n aria-label="Has a note">"✎"</span> })}
                             </div>
-                            <div class="muted small">{format!("{} · {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
+                            <div class="muted small">{key_subtitle(&row.key)}</div>
                         </td>
-                        <td class="num">{format!("{:.1}", row.avg_pods).trim_end_matches(".0").to_owned()}</td>
-                        <td class="num">{opt(row.cpu_request, Measure::Cpu)}</td>
+                        <td class="num">{pods_text(&row)}</td>
+                        <td class="num">{Measure::Cpu.opt(row.cpu_request)}</td>
                         <td class="num">{Measure::Cpu.fmt(row.cpu_p95)}</td>
                         {spare_cell(row.cpu_spare, Measure::Cpu)}
-                        <td class="num">{opt(row.mem_request, Measure::Memory)}</td>
+                        <td class="num">{Measure::Memory.opt(row.mem_request)}</td>
                         <td class="num">{Measure::Memory.fmt(row.mem_max)}</td>
                         {spare_cell(row.mem_spare, Measure::Memory)}
                         <td class="num">{suggestion}</td>
@@ -735,18 +478,12 @@ fn ReviewView(store: Store) -> impl IntoView {
                                 aria-label="Choose every row shown"
                                 title="Choose every row shown that has a suggestion"
                                 prop:checked=move || {
-                                    let shown: Vec<_> = rows().into_iter().filter(crate::rightsize::applicable).map(|r| r.key).collect();
-                                    !shown.is_empty() && store.review_checked.with(|c| shown.iter().all(|k| c.contains(k)))
+                                    let shown = applicable_keys(rows());
+                                    store.review_checked.with(|c| all_checked(&shown, c))
                                 }
                                 on:change=move |_| {
-                                    let shown: Vec<_> = rows().into_iter().filter(crate::rightsize::applicable).map(|r| r.key).collect();
-                                    store.review_checked.update(|c| {
-                                        if shown.iter().all(|k| c.contains(k)) {
-                                            for k in &shown { c.remove(k); }
-                                        } else {
-                                            c.extend(shown);
-                                        }
-                                    });
+                                    let shown = applicable_keys(rows());
+                                    store.review_checked.update(|c| toggle_all(c, shown));
                                 }
                             />
                         </th>
@@ -780,7 +517,7 @@ fn ReviewView(store: Store) -> impl IntoView {
                 <button class="btn small" on:click=move |_| load(store) title="Read the file again">"Reload"</button>
                 <button class="btn small" on:click=move |_| compare_with(store) title="Pick another trace to put beside this one">"Compare with…"</button>
                 <button class="btn small" on:click=move |_| export_report(store) title="Save this review as a web page to share">"Export report…"</button>
-                <button class="btn small" on:click=reveal>{crate::prefs::reveal_label()}</button>
+                <button class="btn small" on:click=reveal_file>{crate::prefs::reveal_label()}</button>
             </div>
             {move || match store.review.get() {
                 None => view! { <p class="muted pad">"Reading the trace…"</p> }.into_any(),
@@ -796,7 +533,7 @@ fn ReviewView(store: Store) -> impl IntoView {
                             "Namespace"
                             <select on:change=move |ev| {
                                 let v = event_target_value(&ev);
-                                filter.update(|f| f.namespace = (!v.is_empty()).then_some(v));
+                                filter.update(|f| f.namespace = namespace_choice(v));
                             }>
                                 <option value="">"All"</option>
                                 {move || namespaces().into_iter().map(|ns| view! { <option value=ns.clone()>{ns.clone()}</option> }).collect_view()}
@@ -818,23 +555,16 @@ fn ReviewView(store: Store) -> impl IntoView {
                                 <button
                                     class="btn small primary"
                                     prop:disabled=blocked.is_some()
-                                    title=blocked.clone().unwrap_or_else(|| "Preview, then apply the suggested requests".into())
+                                    title=apply_selected_title(blocked.clone())
                                     on:click=move |_| {
                                         let checked = store.review_checked.get_untracked();
-                                        let rows: Vec<ReviewRow> = store.review.with_untracked(|r| match r {
-                                            Some(Ok(r)) => r.rows.iter().filter(|row| checked.contains(&row.key)).cloned().collect(),
-                                            _ => vec![],
-                                        });
+                                        let rows = store.review.with_untracked(|r| checked_rows(r.as_ref(), &checked));
                                         crate::rightsize::ask(store, &rows);
                                     }
-                                >{format!("Apply selected ({n})…")}</button>
+                                >{apply_selected_text(n)}</button>
                             })
                         }}
-                        <span class="muted small">{move || {
-                            let n = rows().len();
-                            let hint = if store.review_sel.with(Option::is_none) && n > 0 { " · select one for its charts" } else { "" };
-                            format!("{}{hint}", plural(n as u64, "row", "rows"))
-                        }}</span>
+                        <span class="muted small">{move || rows_text(rows().len(), store.review_sel.with(Option::is_none))}</span>
                     </div>
                     <ReviewOverview store=store namespace=Signal::derive(move || filter.get().namespace) />
                     <div class="review-split">
@@ -868,16 +598,7 @@ fn ReviewOverview(store: Store, #[prop(into)] namespace: Signal<Option<String>>)
         let (ns, range) = (namespace.get(), zoom.get());
         series.set(None);
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                path: String,
-                namespace: Option<String>,
-                start: Option<f64>,
-                end: Option<f64>,
-                points: u32,
-            }
-            let args = Args { path: path.clone(), namespace: ns.clone(), start: range.map(|r| r.0), end: range.map(|r| r.1), points: CHART_POINTS };
-            let result = invoke::<_, TraceSeries>("trace_overview", &args).await;
+            let result = invoke::<_, TraceSeries>("trace_overview", &OverviewArgs::new(path.clone(), ns.clone(), range)).await;
             if store.review_path.get_untracked().as_ref() == Some(&path) && namespace.get_untracked() == ns && zoom.get_untracked() == range {
                 series.set(Some(result));
             }
@@ -885,10 +606,7 @@ fn ReviewOverview(store: Store, #[prop(into)] namespace: Signal<Option<String>>)
     });
     let data = Signal::derive(move || series.get().and_then(Result::ok));
     let on_zoom = Callback::new(move |range: (f64, f64)| zoom.set(Some(range)));
-    let title = move || match namespace.get() {
-        Some(ns) => format!("Overview of {ns}"),
-        None => "Overview of the whole trace".into(),
-    };
+    let title = move || namespace.with(|ns| overview_title(ns.as_deref()));
     view! {
         <section class="review-overview">
             <div class="overview-head">
@@ -928,7 +646,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
     let heat = RwSignal::new(Measure::Cpu);
     let row = move || {
         let sel = store.review_sel.get()?;
-        store.review.with(|r| r.as_ref()?.as_ref().ok()?.rows.iter().find(|row| row.key == sel).cloned())
+        store.review.with(|r| find_row(r.as_ref(), &sel))
     };
     // A new selection starts zoomed out.
     Effect::new(move |_| {
@@ -954,16 +672,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
         let range = zoom.get();
         series.set(None);
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                path: String,
-                key: TraceKey,
-                start: Option<f64>,
-                end: Option<f64>,
-                points: u32,
-            }
-            let args = Args { path, key: key.clone(), start: range.map(|r| r.0), end: range.map(|r| r.1), points: CHART_POINTS };
-            let result = invoke::<_, TraceSeries>("trace_series", &args).await;
+            let result = invoke::<_, TraceSeries>("trace_series", &SeriesArgs::new(path, key.clone(), range, CHART_POINTS)).await;
             if store.review_sel.get_untracked().as_ref() == Some(&key) && zoom.get_untracked() == range {
                 series.set(Some(result));
             }
@@ -972,17 +681,11 @@ fn ReviewDetail(store: Store) -> impl IntoView {
     let chart_data = Signal::derive(move || series.get().and_then(Result::ok));
     let on_zoom = Callback::new(move |(a, b): (f64, f64)| zoom.set(Some((a, b))));
     let quick = move |label: &'static str, hours: Option<f64>| {
-        let active = move || match (hours, zoom.get(), chart_data.get()) {
-            (None, None, _) => true,
-            (Some(h), Some((a, b)), Some(s)) => (b - s.full_end).abs() < 1.0 && (b - a - h * 3600.0).abs() < 1.0,
-            _ => false,
-        };
+        let active = move || chart_data.with(|s| quick_active(hours, zoom.get(), s.as_ref()));
         view! {
             <button class="btn small toggle" class:on=active on:click=move |_| {
-                match (hours, chart_data.get_untracked()) {
-                    (None, _) => zoom.set(None),
-                    (Some(h), Some(s)) => zoom.set(Some(((s.full_end - h * 3600.0).max(s.full_start), s.full_end))),
-                    _ => {}
+                if let Some(to) = chart_data.with_untracked(|s| quick_zoom(hours, s.as_ref())) {
+                    zoom.set(to);
                 }
             }>{label}</button>
         }
@@ -996,14 +699,14 @@ fn ReviewDetail(store: Store) -> impl IntoView {
         let suggestion = match &row.suggestion {
             Some(s) => {
                 let line = |m: Measure, now: Option<f64>, to: f64| {
-                    let change = now.map(|n| change_text(n, to)).unwrap_or_default();
+                    let (what, from, to, change) = suggest_line(m, now, to);
                     view! {
                         <div class=format!("suggest-line {}", m.class())>
                             <span class="res-dot" aria-hidden="true"></span>
-                            <span class="suggest-what">{format!("{} request", m.label())}</span>
-                            <span class="suggest-from">{opt(now, m)}</span>
+                            <span class="suggest-what">{what}</span>
+                            <span class="suggest-from">{from}</span>
                             <span class="muted">"→"</span>
-                            <strong>{m.fmt(to)}</strong>
+                            <strong>{to}</strong>
                             <span class="muted small">{change}</span>
                         </div>
                     }
@@ -1013,7 +716,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                         <h3>"Suggested requests"</h3>
                         {line(Measure::Cpu, row.cpu_request, s.cpu_request)}
                         {line(Measure::Memory, row.mem_request, s.mem_request)}
-                        <p class="muted small">{format!("Based on {}.", s.basis)}</p>
+                        <p class="muted small">{basis_text(&s.basis)}</p>
                         {apply_row(store, &row)}
                     </div>
                 }
@@ -1026,26 +729,19 @@ fn ReviewDetail(store: Store) -> impl IntoView {
             .iter()
             .map(|f| view! {
                 <li class=format!("flag-line {}", flag_level(f))>
-                    <span class=format!("flag {}", flag_level(f))><span class="flag-dot" aria-hidden="true"></span>{flag_text(f)}</span>
+                    <span class=flag_class(f)><span class="flag-dot" aria-hidden="true"></span>{flag_text(f)}</span>
                     <span>{flag_explain(f)}</span>
                 </li>
             })
             .collect_view();
-        let facts = format!(
-            "{} seen, {:.1} running on average · {} of data · {}{}",
-            plural(u64::from(row.pods), "pod", "pods"),
-            row.avg_pods,
-            duration_text(row.minutes as f64 * 60.0),
-            plural(u64::from(row.rollouts), "rollout", "rollouts"),
-            if row.local_share > 0.0 { format!(" · {:.0}% sampled by the app", row.local_share * 100.0) } else { String::new() },
-        );
+        let facts = facts_text(&row);
         let figures = view! {
             <table class="figures">
                 <tr><th></th><th class="num">"Request"</th><th class="num">"Limit"</th><th class="num">"p50"</th><th class="num">"p95"</th><th class="num">"p99"</th><th class="num">"Peak"</th></tr>
                 <tr class="res-cpu">
                     <th><span class="res-dot" aria-hidden="true"></span>"CPU"</th>
-                    <td class="num">{opt(row.cpu_request, Measure::Cpu)}</td>
-                    <td class="num">{opt(row.cpu_limit, Measure::Cpu)}</td>
+                    <td class="num">{Measure::Cpu.opt(row.cpu_request)}</td>
+                    <td class="num">{Measure::Cpu.opt(row.cpu_limit)}</td>
                     <td class="num">{Measure::Cpu.fmt(row.cpu_p50)}</td>
                     <td class="num">{Measure::Cpu.fmt(row.cpu_p95)}</td>
                     <td class="num">{Measure::Cpu.fmt(row.cpu_p99)}</td>
@@ -1053,8 +749,8 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                 </tr>
                 <tr class="res-memory">
                     <th><span class="res-dot" aria-hidden="true"></span>"Memory"</th>
-                    <td class="num">{opt(row.mem_request, Measure::Memory)}</td>
-                    <td class="num">{opt(row.mem_limit, Measure::Memory)}</td>
+                    <td class="num">{Measure::Memory.opt(row.mem_request)}</td>
+                    <td class="num">{Measure::Memory.opt(row.mem_limit)}</td>
                     <td class="num muted">"—"</td>
                     <td class="num">{Measure::Memory.fmt(row.mem_p95)}</td>
                     <td class="num muted">"—"</td>
@@ -1067,7 +763,7 @@ fn ReviewDetail(store: Store) -> impl IntoView {
                 <div class="modal-head">
                     <div>
                         <h2>{row.key.name.clone()}</h2>
-                        <div class="muted small">{format!("{} · container {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
+                        <div class="muted small">{detail_subtitle(&row.key)}</div>
                     </div>
                     <span class="spacer"></span>
                     <crate::find::FindButton store=store />
@@ -1106,7 +802,3 @@ fn ReviewDetail(store: Store) -> impl IntoView {
         .into_any()
     }
 }
-
-#[cfg(test)]
-#[path = "trace_review_tests.rs"]
-mod tests;

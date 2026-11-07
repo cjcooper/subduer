@@ -4,26 +4,19 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use subduer_types::{
-    ClusterHistory, ClusterOverview, NamespaceRequests, NodeSummary, PodCounts, ResourceRow, ResourceTotals, Series, UsageSource,
-};
+use subduer_types::{ClusterHistory, ClusterOverview, NodeSummary, PodCounts, ResourceRow, ResourceTotals, Series, UsageSource};
 
 use crate::app::{Store, format_age, select_row};
 use crate::chart::{ChartData, LineChart, Scale};
 use crate::columns::ResizableTh;
+use crate::logic::overview as logic;
+pub use crate::logic::overview::{fmt_bytes, fmt_cpu};
 use crate::tauri::{NoArgs, invoke};
 
 const REFRESH: Duration = Duration::from_secs(30);
-/// Failed refreshes in a row before polling stops; Refresh starts it again.
-pub(crate) const MAX_FAILURES: u32 = 3;
-/// Bars shown per namespace chart; the rest fold into "Other".
-const TOP_NAMESPACES: usize = 8;
-
-/// Data younger than this is reused when switching between the Cluster and Node pages.
-const FRESH_MS: f64 = 10_000.0;
 
 /// Fetches when a page that needs it opens or the cluster changes, then every
-/// 30s while one is open, until [`MAX_FAILURES`] fetches in a row fail.
+/// 30s while one is open, until [`logic::MAX_FAILURES`] fetches in a row fail.
 pub fn start_refresh(store: Store) {
     Effect::new(move |_| {
         if store.needs_overview() && store.cluster.with(Option::is_some) {
@@ -32,8 +25,8 @@ pub fn start_refresh(store: Store) {
     });
     set_interval(
         move || {
-            let failing = store.overview_failures.get_untracked() >= MAX_FAILURES;
-            if !failing && untrack(|| store.needs_overview() && store.cluster.with(Option::is_some)) {
+            let polling = logic::keep_polling(store.overview_failures.get_untracked());
+            if polling && untrack(|| store.needs_overview() && store.cluster.with(Option::is_some)) {
                 refresh(store, true);
             }
         },
@@ -42,12 +35,8 @@ pub fn start_refresh(store: Store) {
 }
 
 fn refresh(store: Store, force: bool) {
-    if store.overview_loading.get_untracked() {
-        return;
-    }
-    let fresh = store.overview.with_untracked(Option::is_some)
-        && js_sys::Date::now() - store.overview_at.get_untracked() < FRESH_MS;
-    if fresh && !force {
+    let age = js_sys::Date::now() - store.overview_at.get_untracked();
+    if !logic::needs_fetch(store.overview_loading.get_untracked(), store.overview.with_untracked(Option::is_some), age, force) {
         return;
     }
     store.overview_loading.set(true);
@@ -68,11 +57,10 @@ fn refresh(store: Store, force: bool) {
             }
             Err(e) => {
                 store.overview_failures.update(|n| *n += 1);
-                if store.overview_failures.get_untracked() >= MAX_FAILURES {
-                    store.overview_error.set(Some(format!("Stopped refreshing after repeated failures: {e}")));
+                let (message, gave_up) = logic::failure(store.overview_failures.get_untracked(), e);
+                store.overview_error.set(Some(message));
+                if gave_up {
                     store.gave_up();
-                } else {
-                    store.overview_error.set(Some(e));
                 }
             }
         }
@@ -84,10 +72,7 @@ fn refresh(store: Store, force: bool) {
 pub fn Overview(store: Store) -> impl IntoView {
     let subtitle = move || {
         let context = store.context.get().unwrap_or_default();
-        match store.overview.with(|o| o.as_ref().and_then(|o| o.server_version.clone())) {
-            Some(v) => format!("{context} · {v}"),
-            None => context,
-        }
+        logic::subtitle(context, store.overview.with(|o| o.as_ref().and_then(|o| o.server_version.clone())))
     };
     view! {
         <div class="resource-header">
@@ -113,10 +98,7 @@ pub fn Overview(store: Store) -> impl IntoView {
 /// "Updated Ns ago" plus a Refresh button for overview-backed pages.
 #[component]
 pub fn RefreshStatus(store: Store) -> impl IntoView {
-    let updated = move || {
-        let at = store.overview_at.get();
-        (at > 0.0).then(|| format!("Updated {} ago", age_ms(store.now.get() - at)))
-    };
+    let updated = move || logic::updated(store.overview_at.get(), store.now.get());
     view! {
         <span class="muted">{updated}</span>
         <button
@@ -137,15 +119,11 @@ pub fn NodePage(store: Store) -> impl IntoView {
     view! {
         <div class:stale=move || store.overview_loading.get() && store.overview.with(Option::is_some) class="fade">
             {move || {
-                let filter = store.row_filter.get().to_lowercase();
+                let filter = store.row_filter.get();
                 match store.overview.get() {
                     None => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
                     Some(o) => {
-                        let nodes = o
-                            .nodes
-                            .into_iter()
-                            .filter(|n| filter.is_empty() || n.name.to_lowercase().contains(&filter))
-                            .collect();
+                        let nodes = logic::filter_nodes(o.nodes, &filter);
                         view! { <NodeTable nodes=nodes metrics=o.metrics_available store=store selectable=true /> }.into_any()
                     }
                 }
@@ -156,34 +134,20 @@ pub fn NodePage(store: Store) -> impl IntoView {
 
 #[component]
 fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl IntoView {
-    let ready = o.nodes.iter().filter(|n| n.ready).count();
+    let t = logic::tiles(&o);
     let node_count = o.nodes.len();
-    let nodes_note = if ready == node_count {
-        "all ready".to_owned()
-    } else {
-        format!("⚠ {} not ready", node_count - ready)
-    };
     let pods = o.pods;
-    let pods_note = format!("{} pending · {} failed", pods.pending, pods.failed);
-    let (warnings, warnings_note, warnings_tone) = match o.warnings_last_hour {
-        Some(0) => ("0".to_owned(), "none".to_owned(), "good"),
-        Some(n) => (n.to_string(), "⚠ see Events".to_owned(), "warning"),
-        None => ("–".to_owned(), "can't read events".to_owned(), ""),
-    };
-    let nodes_tone = if ready == node_count { "good" } else { "critical" };
-    let pods_tone = if pods.failed > 0 { "critical" } else if pods.pending > 0 { "warning" } else { "good" };
     let metrics = o.metrics_available;
     let source = o.usage_source;
     let history = o.history.clone();
-    let mut by_cpu = o.namespaces.clone();
-    by_cpu.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+    let by_cpu = logic::by_cpu(&o.namespaces);
 
     view! {
         <div class="kpi-row">
-            <StatTile label="Nodes" value=node_count.to_string() note=nodes_note tone=nodes_tone />
-            <StatTile label="Running pods" value=pods.running.to_string() note=pods_note tone=pods_tone />
+            <StatTile label="Nodes" value=t.nodes note=t.nodes_note tone=t.nodes_tone />
+            <StatTile label="Running pods" value=t.pods note=t.pods_note tone=t.pods_tone />
             <StatTile label="Namespaces" value=namespaces.to_string() note=String::new() />
-            <StatTile label="Warning events, last hour" value=warnings note=warnings_note tone=warnings_tone />
+            <StatTile label="Warning events, last hour" value=t.warnings note=t.warnings_note tone=t.warnings_tone />
         </div>
 
         <div class="card-row">
@@ -219,11 +183,11 @@ fn OverviewBody(o: ClusterOverview, namespaces: usize, store: Store) -> impl Int
         <div class="card-row">
             <section class="card res-memory">
                 <h2 class="card-title"><span class="res-dot"></span>"Memory requested by namespace"</h2>
-                <NamespaceBars rows=namespace_rows(&o.namespaces, |n| n.memory) fmt=fmt_bytes />
+                <NamespaceBars rows=logic::namespace_rows(&o.namespaces, |n| n.memory) fmt=fmt_bytes />
             </section>
             <section class="card res-cpu">
                 <h2 class="card-title"><span class="res-dot"></span>"CPU requested by namespace"</h2>
-                <NamespaceBars rows=namespace_rows(&by_cpu, |n| n.cpu) fmt=fmt_cpu />
+                <NamespaceBars rows=logic::namespace_rows(&by_cpu, |n| n.cpu) fmt=fmt_cpu />
             </section>
         </div>
 
@@ -268,7 +232,7 @@ fn ResourceCard(
     scale: Scale,
 ) -> impl IntoView {
     let alloc = totals.allocatable;
-    let sub = format!("allocatable across {nodes} nodes · {} capacity", fmt(totals.capacity));
+    let sub = logic::card_subtitle(nodes, totals.capacity, fmt);
     let used = match totals.used {
         Some(used) => view! { <Meter label="Used" value=used total=alloc fmt=fmt /> }.into_any(),
         None => view! {
@@ -292,60 +256,33 @@ fn ResourceCard(
             {history.map(|(h, points)| {
                 // No request/allocatable lines: at cluster scale they dwarf usage
                 // and flatten the trend; the meters above carry them.
-                let peak = points.iter().map(|p| p.1).fold(0.0, f64::max);
+                let peak = logic::peak(&points, fmt);
                 let data = ChartData { start: h.start, end: h.end, step: h.step, points, refs: vec![] };
                 view! {
                     <div class="card-chart">
                         <div class="meter-row">
                             <span class="meter-label">"Used, last hour"</span>
-                            <span class="meter-value">{format!("peak {}", fmt(peak))}</span>
+                            <span class="meter-value">{peak}</span>
                         </div>
                         <LineChart label=title data=Signal::derive(move || Some(data.clone())) fmt=fmt scale=scale />
                     </div>
                 }
             })}
-            <p class="note">{usage_note(source)}</p>
+            <p class="note">{logic::usage_note(source)}</p>
         </section>
-    }
-}
-
-fn usage_note(source: Option<UsageSource>) -> &'static str {
-    match source {
-        Some(UsageSource::MetricsServer) => "Usage from metrics-server.",
-        Some(UsageSource::Prometheus) => {
-            "Usage from Prometheus (container working set), with kubelet stats for nodes it doesn't cover."
-        }
-        Some(UsageSource::Kubelet) => "Usage from kubelet stats on each node. No metrics-server or Prometheus found.",
-        None => "Live usage needs metrics-server, Prometheus, or access to kubelet stats (nodes/proxy).",
-    }
-}
-
-/// Severity class and marker for a fraction of capacity. Colour is never the
-/// only signal: warning levels also get an icon in the value text.
-fn severity(fraction: f64) -> (&'static str, &'static str) {
-    if fraction >= 0.9 {
-        ("critical", "⚠ ")
-    } else if fraction >= 0.75 {
-        ("warning", "⚠ ")
-    } else {
-        ("normal", "")
     }
 }
 
 #[component]
 pub(crate) fn Meter(label: &'static str, value: f64, total: f64, fmt: fn(f64) -> String) -> impl IntoView {
-    let fraction = if total > 0.0 { value / total } else { 0.0 };
-    let (sev, icon) = severity(fraction);
-    let over = if fraction > 1.0 { " · overcommitted" } else { "" };
-    let text = format!("{icon}{} · {}{over}", fmt(value), pct(fraction));
-    let width = format!("width: {:.1}%", (fraction * 100.0).clamp(0.0, 100.0));
+    let m = logic::meter(label, value, total, fmt);
     view! {
         <div class="meter-row">
             <span class="meter-label">{label}</span>
-            <span class="meter-value">{text}</span>
+            <span class="meter-value">{m.text}</span>
         </div>
-        <div class="meter" title=format!("{label}: {} of {}", fmt(value), fmt(total))>
-            <div class=format!("meter-fill {sev}") style=width></div>
+        <div class="meter" title=m.title>
+            <div class=m.fill_class style=m.width></div>
         </div>
     }
 }
@@ -353,13 +290,7 @@ pub(crate) fn Meter(label: &'static str, value: f64, total: f64, fmt: fn(f64) ->
 #[component]
 fn PodStatusBar(pods: PodCounts) -> impl IntoView {
     let total = pods.total();
-    let segments: Vec<(&str, &str, usize)> = vec![
-        ("Running", "good", pods.running),
-        ("Pending", "warning", pods.pending),
-        ("Failed", "critical", pods.failed),
-        ("Unknown", "serious", pods.unknown),
-        ("Succeeded", "done", pods.succeeded),
-    ];
+    let segments = logic::pod_segments(pods);
     if total == 0 {
         return view! { <p class="muted">"No pods."</p> }.into_any();
     }
@@ -367,8 +298,7 @@ fn PodStatusBar(pods: PodCounts) -> impl IntoView {
         .iter()
         .filter(|(_, _, n)| *n > 0)
         .map(|(label, class, n)| {
-            let style = format!("flex-grow: {n}");
-            let title = format!("{label}: {n} ({})", pct(*n as f64 / total as f64));
+            let (style, title) = logic::segment(label, *n, total);
             view! { <div class=format!("segment {class}") style=style title=title></div> }
         })
         .collect_view();
@@ -391,32 +321,15 @@ fn PodStatusBar(pods: PodCounts) -> impl IntoView {
     .into_any()
 }
 
-/// Top namespaces by `value`, with the rest folded into one "Other" bar.
-fn namespace_rows(sorted: &[NamespaceRequests], value: fn(&NamespaceRequests) -> f64) -> Vec<(String, f64, usize)> {
-    let mut rows: Vec<(String, f64, usize)> = sorted
-        .iter()
-        .filter(|n| value(n) > 0.0)
-        .take(TOP_NAMESPACES)
-        .map(|n| (n.namespace.clone(), value(n), n.pods))
-        .collect();
-    let rest: Vec<&NamespaceRequests> = sorted.iter().filter(|n| value(n) > 0.0).skip(TOP_NAMESPACES).collect();
-    if !rest.is_empty() {
-        let label = format!("Other ({} namespaces)", rest.len());
-        rows.push((label, rest.iter().map(|n| value(n)).sum(), rest.iter().map(|n| n.pods).sum()));
-    }
-    rows
-}
-
 #[component]
 fn NamespaceBars(rows: Vec<(String, f64, usize)>, fmt: fn(f64) -> String) -> impl IntoView {
-    let max = rows.iter().map(|r| r.1).fold(0.0, f64::max);
+    let max = logic::bar_max(&rows);
     if rows.is_empty() {
         return view! { <p class="muted">"No requests set."</p> }.into_any();
     }
     rows.into_iter()
         .map(|(name, value, pods)| {
-            let width = format!("width: {:.1}%", if max > 0.0 { value / max * 100.0 } else { 0.0 });
-            let title = format!("{name}: {} across {pods} pods", fmt(value));
+            let (width, title) = logic::bar(&name, value, pods, max, fmt);
             view! {
                 <div class="hbar-row" title=title>
                     <span class="hbar-label">{name}</span>
@@ -434,35 +347,16 @@ fn NamespaceBars(rows: Vec<(String, f64, usize)>, fmt: fn(f64) -> String) -> imp
 #[component]
 fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: bool) -> impl IntoView {
     const TABLE: &str = "nodes";
-    let mut headers: Vec<(&str, &'static str)> = vec![
-        ("Name", ""),
-        ("Status", ""),
-        ("Type", ""),
-        ("Pods", "num"),
-        ("CPU requested", ""),
-        ("Memory requested", ""),
-    ];
-    if metrics {
-        headers.extend([("CPU used", ""), ("Memory used", "")]);
-    }
-    headers.extend([("CPU", "num"), ("Memory", "num"), ("Version", ""), ("Age", "")]);
+    let headers = logic::node_headers(metrics);
     let names: Vec<&'static str> = headers.iter().map(|(h, _)| *h).collect();
     let rows = move || {
         let mut nodes = nodes.clone();
         let by = store.sorts.by(TABLE, &names);
-        crate::sort::sort(&mut nodes, by, |n, i| node_key(n, names[i]));
+        crate::sort::sort(&mut nodes, by, |n, i| logic::node_key(n, names[i]));
         nodes
         .into_iter()
         .map(|n| {
-            let mut status = if n.ready { "Ready".to_owned() } else { "NotReady".to_owned() };
-            if !n.schedulable {
-                status.push_str(" · Cordoned");
-            }
-            let badge = match (n.ready, n.schedulable) {
-                (false, _) => "badge badge-notready",
-                (true, false) => "badge badge-pending",
-                (true, true) => "badge badge-ready",
-            };
+            let (status, badge) = logic::node_status(&n);
             let created = n.created.clone().unwrap_or_default();
             let age = move || format_age(store.now.get(), &created);
             let name = n.name.clone();
@@ -488,7 +382,7 @@ fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: b
                     <td class="name">{n.name.clone()}</td>
                     <td><span class=badge>{status}</span></td>
                     <td>{n.instance_type.clone().unwrap_or_default()}</td>
-                    <td class="num">{format!("{}/{}", n.pods, n.pod_capacity)}</td>
+                    <td class="num">{logic::node_pods(&n)}</td>
                     <td class="res-cpu"><MiniMeter value=n.cpu.requests total=n.cpu.allocatable /></td>
                     <td class="res-memory"><MiniMeter value=n.memory.requests total=n.memory.allocatable /></td>
                     {metrics.then(|| view! {
@@ -520,77 +414,13 @@ fn NodeTable(nodes: Vec<NodeSummary>, metrics: bool, store: Store, selectable: b
     }
 }
 
-/// How a node sorts under one heading: meters by their share, sizes by value.
-pub(crate) fn node_key(n: &NodeSummary, header: &str) -> crate::sort::Key {
-    use crate::sort::Key;
-    let share = |v: f64, total: f64| if total > 0.0 { Key::num(v / total) } else { Key::Missing };
-    match header {
-        "Name" => Key::text(&n.name),
-        // Not ready first, then cordoned.
-        "Status" => Key::num(f64::from(u8::from(n.ready)) * 2.0 + f64::from(u8::from(n.schedulable))),
-        "Type" => Key::text(n.instance_type.as_deref().unwrap_or_default()),
-        "Pods" => Key::num(n.pods as f64),
-        "CPU requested" => share(n.cpu.requests, n.cpu.allocatable),
-        "Memory requested" => share(n.memory.requests, n.memory.allocatable),
-        "CPU used" => n.cpu.used.map_or(Key::Missing, |u| share(u, n.cpu.allocatable)),
-        "Memory used" => n.memory.used.map_or(Key::Missing, |u| share(u, n.memory.allocatable)),
-        "CPU" => Key::num(n.cpu.allocatable),
-        "Memory" => Key::num(n.memory.allocatable),
-        "Version" => Key::text(&n.kubelet_version),
-        "Age" => Key::age(n.created.as_deref().unwrap_or_default()),
-        _ => Key::Missing,
-    }
-}
-
 #[component]
 fn MiniMeter(value: f64, total: f64) -> impl IntoView {
-    let fraction = if total > 0.0 { value / total } else { 0.0 };
-    let (sev, icon) = severity(fraction);
-    let width = format!("width: {:.1}%", (fraction * 100.0).clamp(0.0, 100.0));
+    let (fill, width, text) = logic::mini_meter(value, total);
     view! {
         <span class="mini-meter">
-            <span class="meter small"><span class=format!("meter-fill {sev}") style=width></span></span>
-            <span class="mini-value">{format!("{icon}{}", pct(fraction))}</span>
+            <span class="meter small"><span class=fill style=width></span></span>
+            <span class="mini-value">{text}</span>
         </span>
     }
 }
-
-fn pct(fraction: f64) -> String {
-    let p = fraction * 100.0;
-    if p > 0.0 && p < 1.0 { "<1%".to_owned() } else { format!("{p:.0}%") }
-}
-
-pub fn fmt_bytes(b: f64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = b;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 { format!("{v:.0} B") } else { format!("{v:.1} {}", UNITS[unit]) }
-}
-
-pub fn fmt_cpu(millicores: f64) -> String {
-    if millicores > 0.0 && millicores < 10.0 {
-        format!("{millicores:.1}m")
-    } else if millicores < 1000.0 {
-        format!("{millicores:.0}m")
-    } else {
-        let cores = millicores / 1000.0;
-        match cores {
-            1.0 => "1 core".to_owned(),
-            c if c.fract() == 0.0 => format!("{c:.0} cores"),
-            c => format!("{c:.1} cores"),
-        }
-    }
-}
-
-fn age_ms(ms: f64) -> String {
-    let secs = (ms / 1000.0).max(0.0) as u64;
-    if secs < 60 { format!("{secs}s") } else { format!("{}m", secs / 60) }
-}
-
-#[cfg(test)]
-#[path = "overview_tests.rs"]
-mod tests_unit;

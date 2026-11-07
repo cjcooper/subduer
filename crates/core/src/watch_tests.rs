@@ -15,12 +15,19 @@ fn event(kind: &str, obj: Value) -> Value {
     json!({"type": kind, "object": obj})
 }
 
+/// Runs the watch, sending each table to `tx`. Every test goes through here,
+/// so they all exercise the same instantiation of `watch_table`.
+async fn watch_into(client: kube::Client, kind: KindRef, namespace: Option<&str>, tx: tokio::sync::mpsc::UnboundedSender<ResourceTable>) {
+    watch_table(client, kind, namespace.map(str::to_owned), 42, move |t| {
+        let _ = tx.send(t);
+    })
+    .await;
+}
+
 /// Runs the watch until it has emitted `n` tables (or fails the test after 10s).
 async fn tables(client: kube::Client, kind: KindRef, namespace: Option<&str>, n: usize) -> Vec<ResourceTable> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let watch = watch_table(client, kind, namespace.map(str::to_owned), 42, move |t| {
-        let _ = tx.send(t);
-    });
+    let watch = watch_into(client, kind, namespace, tx);
     let collect = async {
         let mut out = vec![];
         while out.len() < n {
@@ -91,9 +98,13 @@ async fn errors_are_reported_with_the_last_rows() {
 
 /// Runs the watch to its end and returns every table it emitted.
 async fn all_tables(client: kube::Client, kind: KindRef) -> Vec<ResourceTable> {
-    let out = std::sync::Mutex::new(vec![]);
-    watch_table(client, kind, Some("shop".into()), 42, |t| out.lock().unwrap().push(t)).await;
-    out.into_inner().unwrap()
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    watch_into(client, kind, Some("shop"), tx).await;
+    let mut out = vec![];
+    while let Ok(t) = rx.try_recv() {
+        out.push(t);
+    }
+    out
 }
 
 #[tokio::test(start_paused = true)]

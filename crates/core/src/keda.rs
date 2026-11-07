@@ -652,10 +652,11 @@ fn cluster_auth_links(d: &mut ObjectDetails, keda_namespace: Option<&str>) {
             }
         }
     };
-    d.info.iter_mut().for_each(|r| fix(&mut r.link));
-    for s in &mut d.sections {
-        s.rows.iter_mut().for_each(|r| fix(&mut r.link));
-        s.table.iter_mut().flat_map(|t| t.rows.iter_mut()).for_each(|r| fix(&mut r.link));
+    for r in d.info.iter_mut().chain(d.sections.iter_mut().flat_map(|s| s.rows.iter_mut())) {
+        fix(&mut r.link);
+    }
+    for r in d.sections.iter_mut().flat_map(|s| s.table.iter_mut()).flat_map(|t| t.rows.iter_mut()) {
+        fix(&mut r.link);
     }
     if let Some(ns) = keda_namespace {
         d.info.push(InfoRow::new("Secrets from", format!("{ns} (KEDA's namespace)")));
@@ -810,7 +811,7 @@ pub async fn set_replica_range(
     }
     let api = dynamic_api(client, kind, Some(namespace));
     if kind.kind == "ScaledObject" {
-        let current = serde_json::to_value(api.get(name).await?).map_err(|e| Error::Message(e.to_string()))?;
+        let current = api.get(name).await?.data;
         if let Some(idle) = int_at(&current["spec"], "idleReplicaCount")
             && i64::from(min) <= idle
         {

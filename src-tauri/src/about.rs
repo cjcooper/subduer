@@ -48,5 +48,7 @@ pub fn close_about<R: Runtime>(window: WebviewWindow<R>) -> Result<(), String> {
     if window.label() != LABEL {
         return Err(format!("not the About window: {}", window.label()));
     }
-    window.close().map_err(|e| e.to_string())
+    // As the other windows do: a close that fails leaves it open, nothing more.
+    let _ = window.close();
+    Ok(())
 }

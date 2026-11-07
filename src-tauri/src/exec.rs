@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use subduer_core::kube::Client;
 use subduer_core::types::{ExecOutput, ExecSession, ExecTarget};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Runtime};
+use tauri::{AppHandle, Emitter, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{AppState, Win};
@@ -34,7 +34,8 @@ pub struct ShellWindows {
 }
 
 impl ShellWindows {
-    fn stop(&self, label: &str) {
+    /// The window closed: end its session.
+    pub(crate) fn stop(&self, label: &str) {
         if let Some(w) = self.windows.lock().unwrap().remove(label)
             && let Some(task) = w.task
         {
@@ -52,7 +53,7 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
         let session = session.as_ref().ok_or("not connected to a cluster")?;
         (session.client.clone(), session.context.clone())
     };
-    win.gate.ensure_writable(&context).map_err(|e| e.to_string())?;
+    win.gate.ensure_writable(&context).map_err(crate::commands::err)?;
     let id = state.shells.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let label = format!("{LABEL_PREFIX}{id}");
     let mut title = target.title(&context);
@@ -67,7 +68,8 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
     );
     state.adopt(&label, &win.label);
     tracing::info!(%context, %label, "shell window opened");
-    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?exec={label}").into()))
+    // Closing it ends the session (`ShellWindows::stop`).
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html?exec={label}").into()))
         .title(&title)
         .inner_size(960.0, 600.0)
         .min_inner_size(420.0, 240.0)
@@ -78,14 +80,6 @@ pub async fn open_exec<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>
             state.forget(&label);
             e.to_string()
         })?;
-    let handle = app.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Destroyed = event {
-            let state = handle.state::<AppState>();
-            state.shells.stop(&label);
-            state.forget(&label);
-        }
-    });
     Ok(())
 }
 
@@ -96,7 +90,7 @@ pub fn exec_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppStat
     let label = window.label().to_owned();
     let mut windows = state.shells.windows.lock().unwrap();
     let w = windows.get_mut(&label).ok_or("this shell window is no longer connected")?;
-    win.gate.ensure_writable(&w.context).map_err(|e| e.to_string())?;
+    win.gate.ensure_writable(&w.context).map_err(crate::commands::err)?;
     if let Some(old) = w.task.take() {
         old.abort();
     }
@@ -109,11 +103,7 @@ pub fn exec_start<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppStat
     let (client, target, emit_event) = (w.client.clone(), w.target.clone(), event.clone());
     w.task = Some(tauri::async_runtime::spawn(async move {
         let emitter = window.clone();
-        let send = move |out: ExecOutput| {
-            if let Err(e) = emitter.emit_to(emitter.label(), &emit_event, out) {
-                tracing::warn!(error = %e, "shell emit failed");
-            }
-        };
+        let send = move |out: ExecOutput| crate::log_err(emitter.emit_to(emitter.label(), &emit_event, out), "shell emit failed");
         match subduer_core::exec::run(client, &target, (cols, rows), input_rx, resize_rx, &send).await {
             // The user left the shell: close the window, like a terminal tab.
             Ok(subduer_core::exec::Ended::Exited) => {

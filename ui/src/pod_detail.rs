@@ -4,15 +4,12 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{
-    ContainerDetails, EnvValue, EnvVar, EventSummary, ExecTarget, HistorySource, LogSource, LogTarget, PodDetails, PodHistory,
-    ResourceTotals, Usage, UsageHistory,
-};
+use subduer_types::{ContainerDetails, EnvValue, EnvVar, EventSummary, ExecTarget, PodDetails, PodHistory, ResourceTotals, Usage};
 
 use crate::app::{ContainerIcon, Store, format_age};
-use crate::chart::{ChartData, LineChart, RefLine, Scale, clock};
-use crate::overview::{fmt_bytes, fmt_cpu};
+use crate::chart::{ChartData, LineChart, clock};
+use crate::logic::pod_detail::{self as logic, EnvShown, HistoryArgs, PodArgs, SecretArgs, container_groups, group_summary};
+pub(crate) use crate::logic::pod_detail::{Resource, node_header, section_open};
 use crate::tauri::invoke;
 
 /// Re-fetches the selected object's Details tab: a pod's, a workload's, or a
@@ -29,11 +26,6 @@ pub fn load(store: Store, quiet: bool) {
 
 /// Re-fetches the selected pod's details (metrics, state, events).
 fn load_pod(store: Store, quiet: bool) {
-    #[derive(Serialize)]
-    struct Args {
-        namespace: String,
-        name: String,
-    }
     load_history(store, quiet, "pod_history", None);
     let Some(row) = store.selected.get_untracked() else { return };
     let Some(namespace) = row.namespace.clone() else { return };
@@ -45,10 +37,10 @@ fn load_pod(store: Store, quiet: bool) {
     }
     store.pod_loading.set(true);
     spawn_local(async move {
-        let result = invoke::<_, PodDetails>("pod_details", &Args { namespace, name: row.name.clone() }).await;
+        let result = invoke::<_, PodDetails>("pod_details", &PodArgs { namespace, name: row.name.clone() }).await;
         if store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == row.id)) {
             // A failed background refresh keeps the last good render.
-            if !(quiet && result.is_err() && store.pod.with_untracked(|p| matches!(p, Some(Ok(_))))) {
+            if logic::replaces(quiet, result.is_err(), store.pod.with_untracked(|p| matches!(p, Some(Ok(_))))) {
                 store.pod.set(Some(result));
             }
         }
@@ -60,15 +52,6 @@ fn load_pod(store: Store, quiet: bool) {
 /// refreshes skip while one is in flight, so the cadence stays one request
 /// per tick.
 pub(crate) fn load_history(store: Store, quiet: bool, command: &'static str, kind: Option<subduer_types::KindRef>) {
-    #[derive(Serialize)]
-    struct Args {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        kind: Option<subduer_types::KindRef>,
-        // Not for cluster-scoped objects (nodes).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-        name: String,
-    }
     let Some(row) = store.selected.get_untracked() else { return };
     let namespace = row.namespace.clone();
     if quiet && store.history_loading.get_untracked() {
@@ -76,10 +59,10 @@ pub(crate) fn load_history(store: Store, quiet: bool, command: &'static str, kin
     }
     store.history_loading.set(true);
     spawn_local(async move {
-        let result = invoke::<_, PodHistory>(command, &Args { kind, namespace, name: row.name.clone() }).await;
+        let result = invoke::<_, PodHistory>(command, &HistoryArgs { kind, namespace, name: row.name.clone() }).await;
         if store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == row.id)) {
             // A failed refresh keeps the last good chart.
-            if result.is_ok() || !store.pod_history.with_untracked(|h| matches!(h, Some(Ok(_)))) {
+            if logic::history_replaces(result.is_ok(), store.pod_history.with_untracked(|h| matches!(h, Some(Ok(_))))) {
                 store.pod_history.set(Some(result));
             }
         }
@@ -100,39 +83,6 @@ pub fn PodDetailView(store: Store) -> impl IntoView {
     }
 }
 
-/// A group of a pod's containers in the Details tab.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Group {
-    pub(crate) id: &'static str,
-    pub(crate) title: &'static str,
-    /// Starts closed.
-    pub(crate) closed: bool,
-    pub(crate) containers: Vec<ContainerDetails>,
-}
-
-/// The pod's containers by group, top to bottom: running (app containers,
-/// and sidecars, which run alongside them), init, ephemeral. Only running
-/// starts open; empty groups are left out.
-pub(crate) fn container_groups(all: &[ContainerDetails]) -> Vec<Group> {
-    let pick = |f: fn(&ContainerDetails) -> bool| all.iter().filter(|c| f(c)).cloned().collect::<Vec<_>>();
-    [
-        Group { id: "containers:running", title: "Running containers", closed: false, containers: pick(|c| !c.ephemeral && (!c.init || c.sidecar)) },
-        Group { id: "containers:init", title: "Init containers", closed: true, containers: pick(|c| c.init && !c.sidecar) },
-        Group { id: "containers:ephemeral", title: "Ephemeral containers", closed: true, containers: pick(|c| c.ephemeral) },
-    ]
-    .into_iter()
-    .filter(|g| !g.containers.is_empty())
-    .collect()
-}
-
-/// "3", or "3 · 1 failed".
-pub(crate) fn group_summary(containers: &[ContainerDetails]) -> String {
-    match containers.iter().filter(|c| c.state == subduer_types::containers::State::Failed).count() {
-        0 => containers.len().to_string(),
-        failed => format!("{} · {failed} failed", containers.len()),
-    }
-}
-
 #[component]
 fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
     let namespace = d.namespace.clone();
@@ -149,13 +99,7 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
         })
         .collect_view();
     let events = d.events.clone();
-    let event_count = events.len();
-    let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
-    let events_summary = match (event_count, warnings) {
-        (0, _) => "none".to_owned(),
-        (n, 0) => format!("{n}"),
-        (n, w) => format!("{n} · ⚠ {w} warning{}", if w == 1 { "" } else { "s" }),
-    };
+    let events_summary = logic::events_summary(&events);
     let cpu = d.cpu;
     let memory = d.memory;
     let info = d.clone();
@@ -174,17 +118,6 @@ fn PodSections(store: Store, d: PodDetails) -> impl IntoView {
             <EventList store=store events=events.clone() empty="No events for this pod." />
         </Section>
     }
-}
-
-/// Whether a section is open, given the remembered toggles: one that starts
-/// closed is open once toggled, the others until toggled.
-pub(crate) fn section_open(toggled: &std::collections::HashSet<String>, id: &str, closed: bool) -> bool {
-    toggled.contains(&toggle_key(id, closed)) == closed
-}
-
-/// The remembered key: sections that start closed remember being opened.
-fn toggle_key(id: &str, closed: bool) -> String {
-    if closed { format!("+{id}") } else { id.to_owned() }
 }
 
 /// A collapsible section. `id` is remembered so the same section stays
@@ -209,14 +142,8 @@ pub(crate) fn Section(
         let id = id.clone();
         move || store.detail_collapsed.with(|c| section_open(c, &id, closed))
     };
-    let key = toggle_key(&id, closed);
-    let toggle = move |_| {
-        store.detail_collapsed.update(|c| {
-            if !c.remove(&key) {
-                c.insert(key.clone());
-            }
-        })
-    };
+    let key = logic::toggle_key(&id, closed);
+    let toggle = move |_| store.detail_collapsed.update(|c| logic::toggle(c, &key));
     let expanded = {
         let open = open.clone();
         move || open().to_string()
@@ -237,7 +164,7 @@ pub(crate) fn Section(
             // them; going to a match there opens the section.
             {
                 let shown = open.clone();
-                let finding = move || store.find_open.get() && store.find_query.with(|q| !q.trim().is_empty());
+                let finding = move || store.find_query.with(|q| logic::finding(store.find_open.get(), q));
                 view! {
                     <Show when=move || shown() || finding()>
                         <div class="dsection-body" class:find-hidden={let open = open.clone(); move || !open()}>{children()}</div>
@@ -246,75 +173,6 @@ pub(crate) fn Section(
             }
         </section>
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Resource {
-    Cpu,
-    Memory,
-}
-
-impl Resource {
-    /// The class that colours its charts: CPU and memory each have a colour.
-    pub(crate) fn css(self) -> &'static str {
-        match self {
-            Self::Cpu => "res-cpu",
-            Self::Memory => "res-memory",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Cpu => "CPU",
-            Self::Memory => "Memory",
-        }
-    }
-
-    fn fmt(self) -> fn(f64) -> String {
-        match self {
-            Self::Cpu => fmt_cpu,
-            Self::Memory => fmt_bytes,
-        }
-    }
-
-    fn scale(self) -> Scale {
-        match self {
-            Self::Cpu => Scale::Decimal,
-            Self::Memory => Scale::Binary,
-        }
-    }
-
-    fn series(self, h: &UsageHistory) -> &[(f64, f64)] {
-        match self {
-            Self::Cpu => &h.cpu,
-            Self::Memory => &h.memory,
-        }
-    }
-}
-
-/// The chart's header: usage now (`used`), its share of the limit (or the
-/// node without one), the request and the limit.
-fn usage_header(u: Usage, fmt: fn(f64) -> String) -> String {
-    let Usage { requests, limits, used: now, node } = u;
-    let ceiling = limits.or(node);
-    let share = now.zip(ceiling).filter(|(_, c)| *c > 0.0).map(|(u, c)| u / c);
-    let icon = if share.is_some_and(|s| s >= 0.75) { "⚠ " } else { "" };
-    let of = if limits.is_some() { "limit" } else { "node" };
-    let share_text = match share {
-        Some(s) if s > 0.0 && s < 0.01 => format!(" · <1% of {of}"),
-        Some(s) => format!(" · {:.0}% of {of}", s * 100.0),
-        None => String::new(),
-    };
-    let limit_text = match (limits, node) {
-        (Some(l), _) => fmt(l),
-        (None, Some(n)) => format!("unlimited (node {})", fmt(n)),
-        (None, None) => "unlimited".to_owned(),
-    };
-    format!(
-        "{icon}now {}{share_text} · req {} · limit {limit_text}",
-        now.map_or_else(|| "—".to_owned(), fmt),
-        requests.map_or_else(|| "not set".to_owned(), fmt),
-    )
 }
 
 /// Last-hour line chart for the pod (`container: None`) or one container,
@@ -326,8 +184,8 @@ pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, contain
     let refs = [("request", requests, true), ("limit", limits, false)];
     let (points, data) = history_chart(store, resource, container, refs);
     let header = move || {
-        let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(used);
-        usage_header(Usage { requests, limits, used: now, node }, fmt)
+        let now = points.with(|p| logic::latest(p.as_deref(), used));
+        logic::usage_header(Usage { requests, limits, used: now, node }, fmt)
     };
     view! {
         <div class=format!("usage-chart {}", resource.css())>
@@ -340,29 +198,6 @@ pub(crate) fn UsageChart(store: Store, resource: Resource, usage: Usage, contain
     }
 }
 
-/// A node's chart header: usage now and its share of allocatable, what its
-/// pods request (and that share), their limits, and allocatable.
-pub(crate) fn node_header(now: Option<f64>, t: ResourceTotals, fmt: fn(f64) -> String) -> String {
-    let share = |v: f64| if t.allocatable > 0.0 { Some(v / t.allocatable) } else { None };
-    let pct = |s: Option<f64>| match s {
-        Some(s) if s > 0.0 && s < 0.01 => " (<1%)".to_owned(),
-        Some(s) => format!(" ({:.0}%)", s * 100.0),
-        None => String::new(),
-    };
-    let (used_share, req_share) = (now.and_then(share), share(t.requests));
-    let warn = used_share.is_some_and(|s| s >= 0.75) || req_share.is_some_and(|s| s >= 0.9);
-    format!(
-        "{}now {}{} · req {}{} · limits {} · allocatable {}",
-        if warn { "⚠ " } else { "" },
-        now.map_or_else(|| "—".to_owned(), fmt),
-        pct(used_share),
-        fmt(t.requests),
-        pct(req_share),
-        if t.limits > 0.0 { fmt(t.limits) } else { "none".to_owned() },
-        fmt(t.allocatable),
-    )
-}
-
 /// Last-hour line chart for a node, with requested and allocatable lines.
 #[component]
 pub(crate) fn NodeUsageChart(store: Store, resource: Resource, totals: ResourceTotals) -> impl IntoView {
@@ -370,7 +205,7 @@ pub(crate) fn NodeUsageChart(store: Store, resource: Resource, totals: ResourceT
     let refs = [("requested", Some(totals.requests), true), ("allocatable", Some(totals.allocatable), false)];
     let (points, data) = history_chart(store, resource, None, refs);
     let header = move || {
-        let now = points.with(|p| p.as_ref().and_then(|p| p.last()).map(|p| p.1)).or(totals.used);
+        let now = points.with(|p| logic::latest(p.as_deref(), totals.used));
         node_header(now, totals, fmt)
     };
     view! {
@@ -394,32 +229,10 @@ fn history_chart(
     container: Option<String>,
     refs: [(&'static str, Option<f64>, bool); 2],
 ) -> (Points, Signal<Option<ChartData>>) {
-    let points = Memo::new(move |_| {
-        store.pod_history.with(|h| match h {
-            None => None,
-            Some(Err(_)) => Some(vec![]),
-            Some(Ok(h)) => Some(match &container {
-                None => resource.series(&h.pod).to_vec(),
-                Some(name) => h
-                    .containers
-                    .iter()
-                    .find(|c| &c.name == name)
-                    .map(|c| resource.series(&c.usage).to_vec())
-                    .unwrap_or_default(),
-            }),
-        })
-    });
+    let points = Memo::new(move |_| store.pod_history.with(|h| logic::series_points(h.as_ref(), resource, container.as_deref())));
     let data = Signal::derive(move || {
         let points = points.get()?;
-        let (start, end, step) = store.pod_history.with(|h| match h {
-            Some(Ok(h)) => (h.start, h.end, h.step),
-            _ => (0.0, 1.0, 1.0),
-        });
-        let refs = refs
-            .into_iter()
-            .filter_map(|(name, value, dashed)| Some(RefLine { name, value: value?, dashed }))
-            .collect();
-        Some(ChartData { start, end, step, points, refs })
+        Some(store.pod_history.with(|h| logic::chart_data(points, h.as_ref(), refs)))
     });
     (points, data)
 }
@@ -430,20 +243,8 @@ pub(crate) fn HistoryNote(store: Store, subject: &'static str) -> impl IntoView 
     move || {
         store.pod_history.with(|h| match h {
             None => view! { <p class="legend small"></p> }.into_any(),
-            Some(Err(e)) => view! { <p class="legend small warn-text">{format!("Can't load usage history: {e}")}</p> }.into_any(),
-            Some(Ok(h)) => {
-                let text = match h.source {
-                    HistorySource::Prometheus => "Last hour from Prometheus · updates every 15 s".to_owned(),
-                    HistorySource::Local => match h.pod.memory.first().or(h.pod.cpu.first()) {
-                        Some(&(t, _)) => format!(
-                            "No Prometheus data for {subject}, so the app records usage itself: since {} · updates every 15 s",
-                            clock(t)
-                        ),
-                        None => "No usage source: needs Prometheus, metrics-server or kubelet stats.".to_owned(),
-                    },
-                };
-                view! { <p class="legend small">{text}</p> }.into_any()
-            }
+            Some(Err(e)) => view! { <p class="legend small warn-text">{logic::history_error(e)}</p> }.into_any(),
+            Some(Ok(h)) => view! { <p class="legend small">{logic::history_note(h, subject, clock)}</p> }.into_any(),
         })
     }
 }
@@ -453,36 +254,19 @@ fn PodInfo(store: Store, d: PodDetails) -> impl IntoView {
     let created = d.created.clone().unwrap_or_default();
     let created_text = {
         let created = created.clone();
-        move || format!("{} ago · {}", format_age(store.now.get(), &created), created)
+        move || logic::ago_at(&format_age(store.now.get(), &created), &created)
     };
-    let row = |k: &'static str, v: Option<String>| {
-        v.filter(|v| !v.is_empty()).map(|v| view! { <dt>{k}</dt><dd>{v}</dd> })
-    };
-    let badge_slug = d
-        .status
-        .to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let rows = logic::pod_rows(&d).into_iter().map(|(k, v)| view! { <dt>{k}</dt><dd>{v}</dd> }).collect_view();
     let labels = d
         .labels
         .iter()
-        .map(|(k, v)| view! { <span class="chip">{format!("{k}={v}")}</span> })
+        .map(|(k, v)| view! { <span class="chip">{logic::label_chip(k, v)}</span> })
         .collect_view();
     view! {
         <dl class="kv">
             <dt>"Status"</dt>
-            <dd><span class=format!("badge badge-{badge_slug}")>{d.status.clone()}</span></dd>
-            {row("Namespace", Some(d.namespace.clone()))}
-            {row("Node", d.node.clone())}
-            {row("Pod IP", d.pod_ip.clone())}
-            {row("Host IP", d.host_ip.clone())}
-            {row("QoS class", d.qos_class.clone())}
-            {row("Service account", d.service_account.clone())}
-            {row("Controlled by", d.owner.clone())}
-            {row("Restart policy", d.restart_policy.clone())}
-            {row("Priority class", d.priority_class.clone())}
+            <dd><span class=crate::logic::workload_detail::badge_class(&d.status)>{d.status.clone()}</span></dd>
+            {rows}
             {(!created.is_empty()).then(|| view! { <dt>"Created"</dt><dd>{created_text}</dd> })}
             {(!d.labels.is_empty()).then(|| view! { <dt>"Labels"</dt><dd class="chips">{labels}</dd> })}
         </dl>
@@ -491,31 +275,21 @@ fn PodInfo(store: Store, d: PodDetails) -> impl IntoView {
 
 #[component]
 fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: String) -> impl IntoView {
-    // The group says init or ephemeral; sidecars sit with the running ones.
-    let kind = if c.sidecar { "Sidecar · " } else { "" };
-    let summary = match c.restarts {
-        0 => format!("{kind}{}", c.detail),
-        1 => format!("{kind}{} · 1 restart", c.detail),
-        n => format!("{kind}{} · {n} restarts", c.detail),
-    };
+    let summary = logic::container_summary(&c);
     let id = format!("container:{}", c.name);
     let env_id = format!("env:{}", c.name);
-    let env_count = c.env.iter().filter(|e| !e.name.is_empty()).count();
+    let env_summary = logic::env_summary(&c.env);
     let icon = view! { <ContainerIcon c=subduer_types::containers::Container {
         name: c.name.clone(), state: c.state, detail: c.detail.clone(), init: c.init,
     } /> }
     .into_any();
     let started = c.started.clone();
     let info = c.clone();
-    let logs_target = LogTarget {
-        namespace: namespace.clone(),
-        source: LogSource::Container { pod: pod.clone(), container: c.name.clone() },
-        filter: None,
-    };
+    let logs_target = logic::logs_target(&namespace, &pod, &c.name);
     // A shell needs a running container.
-    let running = c.state == subduer_types::containers::State::Running;
+    let acts = logic::container_actions(&c);
+    let running = acts.running;
     let exec_target = ExecTarget { namespace: namespace.clone(), pod: pod.clone(), container: c.name.clone() };
-    let has_ports = !c.ports.is_empty();
     let (upload_ns, upload_pod, upload_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let (download_ns, download_pod, download_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let forward_ns = namespace.clone();
@@ -524,20 +298,20 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
         <div class="dsection-actions">
             <button
                 class="btn small"
-                title=format!("Open {} logs in a new window", c.name)
+                title=acts.logs
                 on:click=move |_| crate::logs::open(logs_target.clone(), move |e| store.error.set(Some(e)))
             >"Logs"</button>
             {running.then(|| view! {
                 <button
                     class="btn small"
-                    title=format!("Open a shell in {} in a new window (needs changes allowed)", c.name)
+                    title=acts.shell
                     on:click=move |_| crate::exec::request(store, exec_target.clone())
                 >"Shell"</button>
             })}
             {running.then(|| view! {
                 <button
                     class="btn small"
-                    title=format!("Upload a file into {} (needs changes allowed)", c.name)
+                    title=acts.upload
                     on:click=move |_| crate::upload::request(
                         store, upload_ns.clone(), upload_pod.clone(), upload_container.clone(),
                     )
@@ -546,13 +320,13 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
             {running.then(|| view! {
                 <button
                     class="btn small"
-                    title=format!("Download a file from {}", c.name)
+                    title=acts.download
                     on:click=move |_| crate::download::request(
                         store, download_ns.clone(), download_pod.clone(), download_container.clone(),
                     )
                 >"Download"</button>
             })}
-            {(running && has_ports).then(|| view! {
+            {acts.forward.then(|| view! {
                 <button
                     class="btn small"
                     title="Forward a local port to this pod"
@@ -571,10 +345,10 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
             })}
             <dl class="kv">
                 <dt>"Image"</dt><dd class="mono">{info.image.clone()}</dd>
-                <dt>"State"</dt><dd>{info.detail.clone()}{(!info.init && !info.ready && info.state == subduer_types::containers::State::Running).then_some(" (not ready)")}</dd>
+                <dt>"State"</dt><dd>{info.detail.clone()}{logic::not_ready(&info)}</dd>
                 {started.clone().map(|s| {
                     let at = s.clone();
-                    view! { <dt>"Started"</dt><dd>{move || format!("{} ago · {}", format_age(store.now.get(), &at), s)}</dd> }
+                    view! { <dt>"Started"</dt><dd>{move || logic::ago_at(&format_age(store.now.get(), &at), &s)}</dd> }
                 })}
                 {info.last_termination.clone().map(|t| view! { <dt>"Last termination"</dt><dd>{t}</dd> })}
                 {(!info.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{info.ports.join(", ")}</dd> })}
@@ -588,7 +362,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                         store=store
                         id=env_id.clone()
                         title="Environment".to_owned()
-                        summary=if env_count == 0 { "none".to_owned() } else { env_count.to_string() }
+                        summary=env_summary.clone()
                         nested=true
                     >
                         <EnvTable store=store vars=env.clone() namespace=ns.clone() />
@@ -629,25 +403,21 @@ pub(crate) fn EnvTable(store: Store, vars: Vec<EnvVar>, namespace: String) -> im
 }
 
 fn env_value(store: Store, value: &EnvValue, namespace: &str) -> AnyView {
-    match value.clone() {
-        EnvValue::Literal(v) if v.is_empty() => view! { <span class="muted">"(empty)"</span> }.into_any(),
-        EnvValue::Literal(v) => view! { <span class="mono">{v}</span> }.into_any(),
-        EnvValue::ConfigMap { name, key, value } => {
-            let source = format!("ConfigMap {name} · {key}");
-            match value {
-                Some(v) => view! { <span class="mono">{v}</span><span class="env-ref">{source}</span> }.into_any(),
-                None => view! { <span class="warn-text">"not found"</span><span class="env-ref">{source}</span> }.into_any(),
-            }
+    match logic::env_shown(value) {
+        EnvShown::Empty => view! { <span class="muted">"(empty)"</span> }.into_any(),
+        EnvShown::Literal(v) => view! { <span class="mono">{v}</span> }.into_any(),
+        EnvShown::ConfigMap { value: Some(v), source } => {
+            view! { <span class="mono">{v}</span><span class="env-ref">{source}</span> }.into_any()
         }
-        EnvValue::Secret { name, key } => view! {
+        EnvShown::ConfigMap { value: None, source } => {
+            view! { <span class="warn-text">"not found"</span><span class="env-ref">{source}</span> }.into_any()
+        }
+        EnvShown::Secret { name, key } => view! {
             <SecretValue store=store namespace=namespace.to_owned() secret=name key=key />
         }
         .into_any(),
-        EnvValue::Field(path) => view! { <span class="env-ref">{format!("field {path}")}</span> }.into_any(),
-        EnvValue::Resource(r) => view! { <span class="env-ref">{format!("resource {r}")}</span> }.into_any(),
-        EnvValue::Unreadable { source, error } => {
-            view! { <span class="warn-text">{format!("Can't read {source}: {error}")}</span> }.into_any()
-        }
+        EnvShown::Reference(r) => view! { <span class="env-ref">{r}</span> }.into_any(),
+        EnvShown::Warning(w) => view! { <span class="warn-text">{w}</span> }.into_any(),
     }
 }
 
@@ -662,14 +432,8 @@ pub(crate) fn SecretValue(
     #[prop(optional)]
     bare: bool,
 ) -> impl IntoView {
-    #[derive(Serialize)]
-    struct Args {
-        namespace: String,
-        secret: String,
-        key: String,
-    }
     let cache_key = (secret.clone(), key.clone());
-    let source = format!("Secret {secret} · {key}");
+    let source = logic::secret_source(&secret, &key);
     let revealed = {
         let k = cache_key.clone();
         move || store.revealed.with(|r| r.get(&k).cloned())
@@ -678,7 +442,7 @@ pub(crate) fn SecretValue(
     let show = {
         let k = cache_key.clone();
         move |_| {
-            let args = Args {
+            let args = SecretArgs {
                 namespace: namespace.clone(),
                 secret: secret.clone(),
                 key: key.clone(),
@@ -734,12 +498,9 @@ pub(crate) fn EventList(store: Store, events: Vec<EventSummary>, empty: &'static
     events
         .into_iter()
         .map(|e| {
-            let badge = if e.type_ == "Warning" { "badge badge-warning" } else { "badge" };
+            let badge = logic::event_badge(&e.type_);
             let last = e.last_seen.clone();
-            let when = move || {
-                let age = format_age(store.now.get(), &last);
-                if e.count > 1 { format!("×{} · last {age} ago", e.count) } else { format!("{age} ago") }
-            };
+            let when = move || logic::event_when(e.count, &format_age(store.now.get(), &last));
             view! {
                 <div class="event">
                     <div class="event-head">
@@ -756,7 +517,3 @@ pub(crate) fn EventList(store: Store, events: Vec<EventSummary>, empty: &'static
         .collect_view()
         .into_any()
 }
-
-#[cfg(test)]
-#[path = "pod_detail_tests.rs"]
-mod tests_unit;

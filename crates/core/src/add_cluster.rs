@@ -6,39 +6,70 @@
 //! The file is edited as plain YAML, so fields this app doesn't know about
 //! are kept. Comments are lost, as they are when kubectl writes the file.
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use kube::config::Kubeconfig;
 use serde_norway::{Mapping, Value};
 
 use crate::types::{ClusterAuth, NewCluster};
 use crate::{Error, Result};
 
-/// The file kubectl writes new entries to (client-go's default filename):
-/// with one file in `$KUBECONFIG`, that file; with several, the first that
-/// exists, else the last; without `$KUBECONFIG`, `~/.kube/config`.
-pub fn kubeconfig_path() -> Result<PathBuf> {
-    let env = std::env::var_os("KUBECONFIG");
-    let home = std::env::home_dir();
-    destination(env.as_deref(), home.as_deref(), |p| p.exists())
+/// What decides where kubeconfigs are: `$KUBECONFIG` and the home folder.
+/// [`KubeconfigEnv::current`] in the app; tests point it at a scratch folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KubeconfigEnv {
+    /// `$KUBECONFIG`, if set.
+    pub kubeconfig: Option<OsString>,
+    /// The user's home folder.
+    pub home: Option<PathBuf>,
 }
 
-/// Every kubeconfig file kubectl reads, in order: those in `$KUBECONFIG`,
-/// else `~/.kube/config`. Some may not exist.
-pub fn kubeconfig_files() -> Result<Vec<PathBuf>> {
-    let env = std::env::var_os("KUBECONFIG");
-    let files: Vec<PathBuf> = env.map(|v| std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default();
-    if !files.is_empty() {
-        return Ok(files);
+impl KubeconfigEnv {
+    /// This process's environment.
+    pub fn current() -> Self {
+        Self { kubeconfig: std::env::var_os("KUBECONFIG"), home: std::env::home_dir() }
     }
-    Ok(vec![kubeconfig_path()?])
+
+    /// The file kubectl writes new entries to (client-go's default filename):
+    /// with one file in `$KUBECONFIG`, that file; with several, the first that
+    /// exists, else the last; without `$KUBECONFIG`, `~/.kube/config`.
+    pub fn path(&self) -> Result<PathBuf> {
+        destination(self.kubeconfig.as_deref(), self.home.as_deref(), |p| p.exists())
+    }
+
+    /// Every kubeconfig file kubectl reads, in order: those in `$KUBECONFIG`,
+    /// else `~/.kube/config`. Some may not exist.
+    pub fn files(&self) -> Result<Vec<PathBuf>> {
+        let files = split(self.kubeconfig.as_deref());
+        if !files.is_empty() {
+            return Ok(files);
+        }
+        Ok(vec![self.path()?])
+    }
 }
 
-fn destination(env: Option<&std::ffi::OsStr>, home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Result<PathBuf> {
-    let files: Vec<PathBuf> = env.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default();
+/// [`KubeconfigEnv::path`] for this process.
+pub fn kubeconfig_path() -> Result<PathBuf> {
+    KubeconfigEnv::current().path()
+}
+
+/// [`KubeconfigEnv::files`] for this process.
+pub fn kubeconfig_files() -> Result<Vec<PathBuf>> {
+    KubeconfigEnv::current().files()
+}
+
+/// The paths in a `$KUBECONFIG` value, skipping empty ones.
+fn split(env: Option<&OsStr>) -> Vec<PathBuf> {
+    env.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
+}
+
+fn destination(env: Option<&OsStr>, home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Result<PathBuf> {
+    let files = split(env);
     if let Some(last) = files.last() {
         return Ok(files.iter().find(|p| exists(p)).unwrap_or(last).clone());
     }
@@ -55,12 +86,19 @@ pub struct TakenNames {
 }
 
 impl TakenNames {
+    /// [`TakenNames::read_in`] this process's environment.
     pub fn read() -> Result<Self> {
+        Self::read_in(&KubeconfigEnv::current())
+    }
+
+    /// The names in the kubeconfig files `env` points to, merged the way
+    /// kubectl (and `Kubeconfig::read`) merges them.
+    pub fn read_in(env: &KubeconfigEnv) -> Result<Self> {
         // No kubeconfig at all yet is fine: this makes the first one.
-        if std::env::var_os("KUBECONFIG").is_none() && !kubeconfig_path()?.exists() {
+        if env.kubeconfig.is_none() && !env.path()?.exists() {
             return Ok(Self::default());
         }
-        let config = crate::contexts::load_kubeconfig()?;
+        let config = env.files()?.iter().try_fold(Kubeconfig::default(), |merged, path| merged.merge(Kubeconfig::read_from(path)?))?;
         Ok(Self {
             contexts: config.contexts.into_iter().map(|c| c.name).collect(),
             clusters: config.clusters.into_iter().map(|c| c.name).collect(),

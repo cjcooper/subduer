@@ -8,7 +8,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
 use kube::api::{Api, AttachParams};
 
-use crate::upload::{exit_code, friendly, read_all};
+use crate::upload::{EXEC_STREAMS, exit_code, friendly, opened, read_all};
 use crate::{Error, Result};
 
 /// $1 = file. Exit 21: missing; 19: not a regular file; 20: not readable.
@@ -35,10 +35,7 @@ pub async fn download(
     let pods: Api<Pod> = Api::namespaced(client, namespace);
     let params = AttachParams::default().container(container.to_owned()).stdout(true).stderr(true);
     let mut process = pods.exec(pod, ["sh", "-c", SCRIPT, "sh", path], &params).await?;
-    let (Some(mut stdout), Some(mut stderr), Some(status)) = (process.stdout(), process.stderr(), process.take_status())
-    else {
-        return Err(Error::Message("The API server didn't open the exec streams.".into()));
-    };
+    let ((mut stdout, mut stderr), status) = opened(process.stdout().zip(process.stderr()).zip(process.take_status()), EXEC_STREAMS)?;
     let part = dest.with_extension(match dest.extension() {
         Some(ext) => format!("{}.part", ext.to_string_lossy()),
         None => "part".into(),

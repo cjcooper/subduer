@@ -193,6 +193,23 @@ async fn failing_pod_list_is_an_error() {
 }
 
 #[tokio::test]
+async fn a_node_that_doesnt_parse_still_gets_its_rows() {
+    let mut v = node_json();
+    v["status"]["capacity"] = json!("lots");
+    v["status"]["addresses"] = json!([{"type": "InternalIP", "address": "10.0.1.5"}, {"type": "Tunnel", "address": "fd00::5"}]);
+    let mut d = crate::config::describe("core/Node", &v, now());
+    assert_eq!(d.status.as_deref(), Some("Ready"));
+    assert_eq!(row(&d, "Roles"), None, "roles come from the typed Node");
+    assert_eq!(row(&d, "Zone"), Some("us-east-1a · us-east-1"));
+    assert_eq!(row(&d, "Tunnel"), Some("fd00::5"), "an address type of its own keeps its name");
+    let api = MockApi::new();
+    api.on("GET", "/api/v1/pods", list("PodList", vec![pod("kube-system", "coredns-1", "n1", json!({}))]));
+    related(&api.client(), "core/Node", "n1", &v, &mut d).await.unwrap();
+    assert!(d.node.is_none(), "no resources without a typed Node");
+    assert!(d.sections.iter().any(|s| s.table.as_ref().is_some_and(|t| t.rows.len() == 1)), "its pods are still listed");
+}
+
+#[tokio::test]
 async fn fargate_runs_one_pod_per_node_by_design() {
     let api = MockApi::new();
     api.on("GET", "/api/v1/pods", list("PodList", vec![pod("kube-system", "coredns-1", "n1", json!({}))]));

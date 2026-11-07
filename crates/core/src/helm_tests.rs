@@ -505,3 +505,136 @@ async fn rollback_and_uninstall_refuse_before_running_helm() {
     let err = uninstall(&gate, "acme-prd", "shop", "web", true, true, false).await.unwrap_err();
     assert!(matches!(&err, Error::Locked(c) if c == "acme-prd"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_release_watch_gives_up() {
+    let api = MockApi::new();
+    api.on_error("GET", SHOP_SECRETS, 401, "Unauthorized", "Unauthorized");
+    // Long enough (in paused time) for every retry.
+    let seen = watch_for(api.client(), Some("shop"), 600_000).await;
+    assert_eq!(seen.len(), crate::watch::MAX_ATTEMPTS as usize);
+    assert!(seen[..seen.len() - 1].iter().all(|t| !t.stopped && t.error.is_some()));
+    assert!(seen.last().unwrap().stopped);
+}
+
+#[test]
+fn the_installed_helm_is_found_on_path() {
+    assert_eq!(HelmCli::INSTALLED.program, "helm");
+    assert_eq!(HelmCli::INSTALLED.limit, Duration::from_secs(6 * 60));
+}
+
+/// A stand-in `helm`: a shell script in a scratch folder that records its
+/// arguments (one line per run) and answers `version` with `version`, and
+/// anything else by running `body`.
+#[cfg(unix)]
+struct FakeHelm(std::path::PathBuf, String);
+
+#[cfg(unix)]
+impl FakeHelm {
+    fn new(test: &str, version: &str, body: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        // The log lines after each run are part of what's checked.
+        crate::testing::record_all_traces();
+        let dir = std::env::temp_dir().join(format!("subduer-helm-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = version ]; then\n{version}\nexit 0\nfi\n{body}\n",
+            calls.display()
+        );
+        let program = dir.join("helm");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = program.to_str().unwrap().to_owned();
+        Self(dir, program)
+    }
+
+    fn cli(&self, limit: Duration) -> HelmCli<'_> {
+        HelmCli { program: &self.1, limit }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.0.join("calls")).unwrap_or_default().lines().map(str::to_owned).collect()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeHelm {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+const MINUTE: Duration = Duration::from_secs(60);
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rollback_runs_helm_4_with_a_server_dry_run() {
+    let helm = FakeHelm::new("rollback4", "echo v4.0.1+g1234", "echo 'Rollback was a success! Happy Helming!'\necho 'note: dry run' >&2");
+    let gate = SafetyGate::default();
+    // A dry run needs no unlocking.
+    let out = helm.cli(MINUTE).rollback(&gate, "acme-uat", "shop", "web", 2, true, true).await.unwrap();
+    assert_eq!(out, "Rollback was a success! Happy Helming!\nnote: dry run");
+    assert_eq!(
+        helm.calls(),
+        ["version --short", "rollback web 2 --namespace=shop --kube-context=acme-uat --wait --timeout 5m0s --dry-run=server"]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn helm_3_and_unknown_versions_get_a_plain_dry_run() {
+    for (test, version) in [("rollback3", "echo v3.16.2+g13654a5"), ("rollback-odd", "echo weird")] {
+        let helm = FakeHelm::new(test, version, "echo done");
+        let out = helm.cli(MINUTE).rollback(&SafetyGate::default(), "acme-uat", "shop", "web", 1, false, true).await.unwrap();
+        assert_eq!(out, "done");
+        assert_eq!(helm.calls()[1], "rollback web 1 --namespace=shop --kube-context=acme-uat --dry-run");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_runs_helm_once_unlocked_and_reports_its_errors() {
+    let helm = FakeHelm::new("uninstall", "echo v3.16.2", "echo 'Error: uninstall: Release not loaded: web: release: not found' >&2\nexit 1");
+    let gate = SafetyGate::default();
+    gate.set_unlocked("acme-uat", true);
+    let err = helm.cli(MINUTE).uninstall(&gate, "acme-uat", "shop", "web", true, false, false).await.unwrap_err();
+    assert_eq!(err.to_string(), "Error: uninstall: Release not loaded: web: release: not found");
+    assert_eq!(helm.calls(), ["version --short", "uninstall web --namespace=shop --kube-context=acme-uat --keep-history"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_silent_failure_names_the_command_and_exit_status() {
+    let helm = FakeHelm::new("silent", "echo v3.16.2", "exit 3");
+    let err = helm.cli(MINUTE).uninstall(&SafetyGate::default(), "acme-uat", "shop", "web", false, false, true).await.unwrap_err();
+    assert_eq!(err.to_string(), "helm uninstall failed (exit status: 3)");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn helm_that_cannot_be_run() {
+    // Not installed at all.
+    let missing = HelmCli { program: "/nonexistent/subduer-test/helm", limit: MINUTE };
+    let err = missing.uninstall(&SafetyGate::default(), "acme-uat", "shop", "web", false, false, true).await.unwrap_err();
+    assert!(err.to_string().starts_with("The helm command isn't installed"), "{err}");
+
+    // Gone between the version check and the command itself.
+    let helm = FakeHelm::new("vanishing", "echo v3.16.2\nrm -f \"$0\"", "echo never");
+    let err = helm.cli(MINUTE).rollback(&SafetyGate::default(), "acme-uat", "shop", "web", 1, false, true).await.unwrap_err();
+    assert!(err.to_string().starts_with("couldn't run helm: "), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn helm_that_hangs_is_given_up_on() {
+    let helm = FakeHelm::new("hangs", "echo v3.16.2", "exec sleep 30");
+    let err = helm
+        .cli(Duration::from_millis(300))
+        .rollback(&SafetyGate::default(), "acme-uat", "shop", "web", 1, false, true)
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "helm rollback took more than 0 minutes; check the release's history");
+}

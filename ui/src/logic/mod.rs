@@ -1,0 +1,36 @@
+//! Host-testable logic behind the UI modules: plain data in, plain data out.
+
+pub mod about;
+pub mod add_cluster;
+pub mod app;
+pub mod browser;
+pub mod capture;
+pub mod chart;
+pub mod clusters;
+pub mod columns;
+pub mod compare;
+pub mod context_picker;
+pub mod delete;
+pub mod download;
+pub mod editor;
+pub mod exec;
+pub mod find;
+pub mod forward;
+pub mod icons;
+pub mod logs;
+pub mod modal;
+pub mod namespace;
+pub mod object_detail;
+pub mod overview;
+pub mod pod_detail;
+pub mod prefs;
+pub mod rightsize;
+pub mod sort;
+pub mod tauri;
+pub mod trace;
+pub mod trace_chart;
+pub mod trace_overlay;
+pub mod trace_review;
+pub mod upload;
+pub mod workload;
+pub mod workload_detail;

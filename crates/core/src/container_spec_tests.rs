@@ -54,6 +54,32 @@ fn common_fields_come_first_in_order() {
 }
 
 #[test]
+fn rarer_handlers_mounts_and_devices() {
+    let r = rows(json!({
+        "name": "app", "image": "acme/app:1",
+        "livenessProbe": {"httpGet": {"scheme": "HTTPS", "host": "10.0.0.1", "port": 8443,
+                                      "httpHeaders": [{"name": "X-Probe", "value": "1"}, {"name": "Host", "value": "a"}]},
+                          "terminationGracePeriodSeconds": 15},
+        "readinessProbe": {"grpc": {"port": 9000, "service": "health"}},
+        "startupProbe": {"someFutureAction": {"x": 1}},
+        "lifecycle": {"stopSignal": "SIGUSR1"},
+        "volumeMounts": [{"name": "data", "mountPath": "/data", "readOnly": true, "recursiveReadOnly": "Enabled"}],
+        "volumeDevices": [{"name": "disk", "devicePath": "/dev/xvda"}, {"name": "raw", "devicePath": "/dev/sdb"}],
+        "unknownField": {"list": [[1, 2], {}, {"a": true}], "empty": {}},
+    }));
+    assert_eq!(
+        get(&r, "Liveness probe"),
+        "http-get https://10.0.0.1:8443/ [X-Probe: 1, Host: a] delay=0s timeout=1s period=10s #success=1 #failure=3 grace=15s"
+    );
+    assert!(get(&r, "Readiness probe").starts_with("grpc :9000 health "));
+    assert!(get(&r, "Startup probe").starts_with("someFutureAction.x=1 "));
+    assert_eq!(get(&r, "lifecycle.stopSignal"), "SIGUSR1");
+    assert_eq!(get(&r, "Mounts"), "data → /data (ro, recursiveReadOnly Enabled)");
+    assert_eq!(get(&r, "Devices"), "disk → /dev/xvda\nraw → /dev/sdb");
+    assert_eq!(get(&r, "Unknown field"),"empty={}, list=[[1, 2], {}, a=true]");
+}
+
+#[test]
 fn a_bare_container_has_nothing_extra() {
     assert!(rows(json!({"name": "app", "image": "acme/app:1",
         "terminationMessagePath": "/dev/termination-log", "terminationMessagePolicy": "File"})).is_empty());

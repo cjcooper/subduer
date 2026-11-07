@@ -205,7 +205,7 @@ impl TraceFile {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
         let file = Self { conn, path: path.to_owned(), pod_ids: HashMap::new(), container_ids: HashMap::new() };
-        let scope = serde_json::to_string(scope).map_err(|e| Error::Message(e.to_string()))?;
+        let scope = serde_json::to_string(scope).map_err(json_error)?;
         for (key, value) in [
             ("format", FORMAT.to_string()),
             ("context", context.to_owned()),
@@ -222,8 +222,7 @@ impl TraceFile {
     /// Opens a trace read-only, refusing files that aren't traces or are
     /// from a newer version of the app.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .map_err(|e| Error::Message(format!("can't open {}: {e}", path.display())))?;
+        let conn = connect(path, OpenFlags::SQLITE_OPEN_READ_ONLY, "can't open")?;
         let not_a_trace = || Error::Message(format!("{} isn't a trace file", path.display()));
         let id: i32 = conn.pragma_query_value(None, "application_id", |r| r.get(0)).map_err(|_| not_a_trace())?;
         if id != APPLICATION_ID {
@@ -337,7 +336,7 @@ impl TraceFile {
     /// Records the end and turns WAL off, leaving one self-contained file.
     pub fn finish(&self, ended: f64, reason: TraceEnd) -> Result<()> {
         self.set_meta("ended", &ended.to_string())?;
-        let reason = serde_json::to_string(&reason).map_err(|e| Error::Message(e.to_string()))?;
+        let reason = serde_json::to_string(&reason).map_err(json_error)?;
         self.set_meta("end_reason", &reason)?;
         self.conn.pragma_update(None, "journal_mode", "DELETE")?;
         Ok(())
@@ -356,11 +355,10 @@ impl TraceFile {
         let (data_start, data_end): (Option<i64>, Option<i64>) =
             self.conn.query_row("SELECT MIN(t), MAX(t) FROM usage", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let mut gaps = self.conn.prepare("SELECT start, end, reason FROM gaps ORDER BY start")?;
-        let gaps = gaps
-            .query_map([], |r| {
-                Ok(TraceGap { start: r.get::<_, i64>(0)? as f64, end: r.get::<_, i64>(1)? as f64, reason: r.get(2)? })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let gap = |r: &rusqlite::Row<'_>| -> rusqlite::Result<TraceGap> {
+            Ok(TraceGap { start: r.get::<_, i64>(0)? as f64, end: r.get::<_, i64>(1)? as f64, reason: r.get(2)? })
+        };
+        let gaps = gaps.query_map([], gap)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let file_bytes = ["", "-wal"]
             .iter()
             .filter_map(|s| std::fs::metadata(sidecar(&self.path, s)).ok())
@@ -426,8 +424,7 @@ pub fn note_key(namespace: &str, kind: &str, name: &str) -> String {
 /// being recorded by this app at the same time.
 pub fn set_note(path: &Path, key: &str, text: &str, now: f64) -> Result<()> {
     TraceFile::open(path)?;
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .map_err(|e| Error::Message(format!("can't write to {}: {e}", path.display())))?;
+    let conn = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE, "can't write to")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(NOTES)?;
     let text = text.trim();
@@ -440,6 +437,18 @@ pub fn set_note(path: &Path, key: &str, text: &str, now: f64) -> Result<()> {
 }
 
 /// `path` with `suffix` added to the file name (SQLite's `-wal`, `-shm`).
+/// Opens an existing trace file with `flags`; `failed` starts the error
+/// (`can't open <path>: …`).
+fn connect(path: &Path, flags: OpenFlags, failed: &str) -> Result<Connection> {
+    Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(|e| Error::Message(format!("{failed} {}: {e}", path.display())))
+}
+
+/// A value this module wrote couldn't be turned into JSON.
+fn json_error(e: serde_json::Error) -> Error {
+    Error::Message(e.to_string())
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);

@@ -1,21 +1,117 @@
 //! Command tests: the Tauri commands called on a mock app (Tauri's test
 //! runtime) whose session talks to a fake Kubernetes API
-//! (`subduer_core::testing`). Nothing here contacts a cluster, opens a
-//! browser or runs `helm` for real.
+//! (`subduer_core::testing`, or `fake` where a real connection is needed).
+//! Nothing here contacts a cluster, opens a browser, a dialog or Finder, or
+//! runs `helm` for real: the launcher and dialogs are stand-ins.
+
+pub(crate) mod fake;
+mod ipc;
+mod lifecycle;
+mod sessions;
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::json;
 use subduer_core::testing::{MockApi, kind, list, object, pod};
 use subduer_core::types::{DataChange, ExecTarget, ForwardRequest, ForwardSource, LogSource, LogTarget};
-use tauri::test::{MockRuntime, mock_app};
+use tauri::test::MockRuntime;
 use tauri::{App, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::{FileDialogBuilder, FilePath};
 
+use crate::system::{Dialogs, Launcher, Reply};
 use crate::{AppState, MAIN_LABEL, Session, Win, commands};
 
 const CTX: &str = "acme-uat";
 
+/// Every program the stand-in launcher was asked to start, as `program arg…`.
+static LAUNCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn record_launch(cmd: &mut Command) -> std::io::Result<()> {
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    LAUNCHED.lock().unwrap().push(format!("{} {}", cmd.get_program().to_string_lossy(), args.join(" ")));
+    Ok(())
+}
+
+/// Whether a program was started with `arg` among its arguments.
+fn launched_with(arg: &str) -> bool {
+    LAUNCHED.lock().unwrap().iter().any(|l| l.split(' ').any(|a| a == arg))
+}
+
+/// App state that records programs instead of starting them.
+fn app_state() -> AppState {
+    AppState { launcher: Launcher(record_launch), ..Default::default() }
+}
+
+/// The path the stand-in dialogs answer with.
+fn chosen() -> PathBuf {
+    std::env::temp_dir().join("subduer-dialog").join("chosen")
+}
+
+fn answer(_: FileDialogBuilder<MockRuntime>, reply: Reply) {
+    reply(Some(FilePath::Path(chosen())));
+}
+
+fn cancel(_: FileDialogBuilder<MockRuntime>, reply: Reply) {
+    reply(None);
+}
+
+/// A web address, which isn't a local path.
+fn answer_url(_: FileDialogBuilder<MockRuntime>, reply: Reply) {
+    reply(Some(FilePath::Url("https://acme.io/file".parse().unwrap())));
+}
+
+/// One test's turn with the shared kubeconfig, until dropped. (Not a mutex
+/// guard: tests hold it across awaits, on whichever thread.)
+struct Turn;
+
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Turn {
+    fn take() -> Turn {
+        use std::sync::atomic::Ordering::SeqCst;
+        while BUSY.compare_exchange(false, true, SeqCst, SeqCst).is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The kubeconfig the app reads in these tests (`KUBECONFIG`, set once for
+/// the whole run), holding `text` until the guard is dropped. Tests that read
+/// or write it take turns.
+fn kubeconfig_file(text: &str) -> (Turn, PathBuf) {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    let turn = Turn::take();
+    let path = PATH.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("subduer-tauri-kubeconfig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        // SAFETY: set once, before any test reads it (they all come here first).
+        unsafe { std::env::set_var("KUBECONFIG", &path) };
+        path
+    });
+    std::fs::write(path, text).unwrap();
+    (turn, path.clone())
+}
+
+/// A mock app with the dialog plugin, whose dialogs are `dialogs`.
+fn dialog_app(dialogs: Dialogs<MockRuntime>) -> App<MockRuntime> {
+    let app = tauri::test::mock_builder().plugin(tauri_plugin_dialog::init()).build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    app.manage(dialogs);
+    app
+}
+
 fn app() -> App<MockRuntime> {
-    let app = mock_app();
-    app.manage(AppState::default());
+    let app = dialog_app(Dialogs { save: answer, open: answer });
+    app.manage(app_state());
     app.state::<AppState>().add_window(MAIN_LABEL);
     app
 }
@@ -270,8 +366,6 @@ async fn small_commands() {
     // No main window in the mock: closing just clears the flag.
     commands::close_discarding(app.handle().clone(), s(), false).await.unwrap();
     assert!(!s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
-    // `set_app_theme` isn't called: Tauri's mock runtime doesn't implement
-    // `set_theme`. The headless UI suite checks the requests it gets.
     // Transparency is remembered for later windows; the mock has no real
     // window to set effects on.
     let state = app.state::<crate::AppState>();
@@ -286,19 +380,60 @@ async fn small_commands() {
     assert!(!state.opaque.load(std::sync::atomic::Ordering::SeqCst));
     commands::stop_watch(s());
     for bad in ["file:///etc/passwd", "javascript:alert(1)", "https://acme.io/a b", "ftp://acme.io", "https://acme.io/\n"] {
-        assert!(commands::open_url(bad.into()).is_err(), "{bad}");
+        assert!(commands::open_url(app.state(), bad.into()).is_err(), "{bad}");
     }
-    assert!(crate::forward::open_forward(s(), 99).is_err());
+    commands::open_url(app.state(), "https://acme.io/small-commands".into()).unwrap();
+    assert!(launched_with("https://acme.io/small-commands"));
+    assert!(crate::forward::open_forward(app.state(), s(), 99).is_err());
     assert!(crate::forward::list_forwards(s()).is_empty());
     assert!(crate::upload::reveal_download(app.handle().clone(), "/etc/hosts".into()).is_err());
+    let download = app.path().download_dir().unwrap().join("small-commands.txt");
+    crate::upload::reveal_download(app.handle().clone(), download.display().to_string()).unwrap();
+    assert!(LAUNCHED.lock().unwrap().iter().any(|l| l.contains("small-commands.txt")));
     let cmd = &mut std::process::Command::new("true");
     let _ = crate::shell_env::hide_console(cmd);
+    // With a main window, closing discards and closes it (the mock just forgets it).
+    WebviewWindowBuilder::new(&app, MAIN_LABEL, WebviewUrl::default()).build().unwrap();
+    commands::set_unsaved(s(), true);
+    commands::close_discarding(app.handle().clone(), s(), false).await.unwrap();
+    assert!(!s().unsaved.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn themes_go_to_the_runtime_and_the_icons_follow() {
+    let app = app();
+    static SET: Mutex<Vec<Option<tauri::Theme>>> = Mutex::new(Vec::new());
+    for theme in ["light", "dark", "auto"] {
+        commands::apply_theme(app.handle(), theme, |_, t| SET.lock().unwrap().push(t));
+    }
+    assert_eq!(*SET.lock().unwrap(), [Some(tauri::Theme::Light), Some(tauri::Theme::Dark), None]);
+    // The real command asks Tauri's runtime, which the mock leaves unimplemented.
+    let handle = app.handle().clone();
+    let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| commands::set_app_theme(handle, "dark".into())));
+    assert!(panic_text(asked.unwrap_err()).contains("not implemented"));
+}
+
+/// What a caught panic said.
+fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned())).unwrap_or_default()
+}
+
+#[test]
+fn failures_the_app_carries_on_after_are_logged() {
+    crate::log_err(Ok::<(), String>(()), "nothing to log");
+    crate::log_err(Err::<(), _>(tauri::Error::WindowNotFound), "setting the window icon failed");
 }
 
 #[tokio::test]
 async fn connect_refuses_an_unknown_context() {
+    let (_turn, path) = kubeconfig_file("apiVersion: v1\nkind: Config\ncontexts: []\n");
     let err = commands::connect(app().handle().clone(), w(&app()), "no-such-context-anywhere".into()).await.unwrap_err();
-    assert!(err.contains("no-such-context-anywhere") || err.contains("kubeconfig"), "{err}");
+    assert!(err.contains("no-such-context-anywhere"), "{err}");
+    // An unreadable kubeconfig says so.
+    std::fs::write(&path, "contexts: [").unwrap();
+    let app = app();
+    assert!(commands::connect(app.handle().clone(), w(&app), CTX.into()).await.is_err());
+    assert!(commands::list_contexts(app.state(), w(&app)).is_err());
 }
 
 /// A cluster with only Pods, just enough for discovery to succeed.
@@ -317,7 +452,7 @@ fn empty_cluster() -> MockApi {
 async fn opening_a_session_connects_the_window() {
     let app = app();
     let api = empty_cluster();
-    let info = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0).await.unwrap();
+    let info = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0, commands::DISCOVER_TIMEOUT).await.unwrap();
     assert_eq!(info.context, CTX);
     assert_eq!(w(&app).session.read().await.as_ref().unwrap().context, CTX);
 }
@@ -327,7 +462,7 @@ async fn a_cluster_that_does_not_answer_fails_before_discovery() {
     let app = app();
     let api = MockApi::new();
     api.on_error("GET", "/version", 401, "Unauthorized", "token expired");
-    let err = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0).await.unwrap_err();
+    let err = commands::open_session(app.handle(), &w(&app), CTX.into(), api.client(), 0, commands::DISCOVER_TIMEOUT).await.unwrap_err();
     assert!(err.contains("Unauthorized"), "{err}");
     assert!(api.calls_to("GET", "/apis").is_empty());
     assert!(w(&app).session.read().await.is_none());
@@ -339,7 +474,7 @@ async fn an_older_connect_does_not_replace_a_newer_one() {
     // Another context was chosen while attempt 1 was still connecting.
     w(&app).connect_attempt.store(2, std::sync::atomic::Ordering::SeqCst);
     let api = empty_cluster();
-    let err = commands::open_session(app.handle(), &w(&app), "acme-dev".into(), api.client(), 1).await.unwrap_err();
+    let err = commands::open_session(app.handle(), &w(&app), "acme-dev".into(), api.client(), 1, commands::DISCOVER_TIMEOUT).await.unwrap_err();
     assert_eq!(err, commands::SUPERSEDED);
     assert!(api.calls_to("GET", "/apis").is_empty());
     assert_eq!(w(&app).session.read().await.as_ref().unwrap().context, CTX);
@@ -477,25 +612,17 @@ async fn container_files_report_api_errors() {
     assert!(!err.is_empty());
 }
 
-// `menu::install` isn't covered here: macOS only builds native menu items on
-// the main thread, and test threads aren't it.
+// `menu::install` is covered by `tests/app.rs`: macOS only builds native
+// menu items on the main thread, and only that test runs there.
 
 #[test]
 fn contexts_come_from_the_kubeconfig() {
-    let dir = std::env::temp_dir().join(format!("subduer-kubeconfig-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config");
-    std::fs::write(
-        &path,
+    let _kubeconfig = kubeconfig_file(
         "apiVersion: v1\nkind: Config\ncurrent-context: acme-uat\n\
          clusters:\n- name: acme-uat\n  cluster: {server: 'https://127.0.0.1:1'}\n- name: acme-prd\n  cluster: {server: 'https://127.0.0.1:2'}\n\
          contexts:\n- name: acme-uat\n  context: {cluster: acme-uat, user: me, namespace: shop}\n- name: acme-prd\n  context: {cluster: acme-prd, user: me}\n\
          users:\n- name: me\n  user: {token: fake}\n",
-    )
-    .unwrap();
-    // SAFETY: no other test reads or writes KUBECONFIG concurrently with a
-    // different expectation; connect_refuses_an_unknown_context fails either way.
-    unsafe { std::env::set_var("KUBECONFIG", &path) };
+    );
     let app = app();
     commands::set_unlocked(w(&app), "acme-uat".into(), true);
     let list = commands::list_contexts(app.state(), w(&app)).unwrap();
@@ -559,7 +686,23 @@ async fn edit_windows_load_save_and_guard_unsaved_edits() {
     assert_eq!(labels.len(), 1);
     let window = app.get_webview_window(&labels[0]).unwrap();
 
-    let session = crate::editor::editor_start(window.clone(), app.state(), w(&app)).await.unwrap();
+    let session = {
+        // Whether it looks like production comes from the kubeconfig.
+        let _kubeconfig = kubeconfig_file(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: 'https://127.0.0.1:1'}\n\
+             contexts:\n- name: other\n  context: {cluster: c, user: me}\n- name: acme-uat\n  context: {cluster: c, user: me}\n\
+             users:\n- name: me\n  user: {token: t}\n",
+        );
+        crate::editor::editor_start(window.clone(), app.state(), w(&app)).await.unwrap()
+    };
+    assert!(!session.prod_like);
+    // A context that's gone from the kubeconfig goes by its production mark.
+    {
+        let _kubeconfig = kubeconfig_file("apiVersion: v1\nkind: Config\ncontexts: []\n");
+        app.state::<AppState>().prod.lock().unwrap().set(CTX, None, true).unwrap();
+        assert!(crate::editor::editor_start(window.clone(), app.state(), w(&app)).await.unwrap().prod_like);
+        app.state::<AppState>().prod.lock().unwrap().set(CTX, None, false).unwrap();
+    }
     assert_eq!(session.title, "ConfigMap shop/app · acme-uat · Edit");
     assert!(!session.unlocked && session.yaml.contains("a: '1'"));
     let edited = session.yaml.replace("a: '1'", "a: '2'");
@@ -652,7 +795,18 @@ async fn traces_start_report_and_stop() {
     assert!(!w2.must_ask());
     assert_eq!(trace::trace_status(s()).await.unwrap().unwrap().path, status.path);
     // Only files this app recorded can be revealed.
-    assert!(trace::reveal_trace(s(), "/etc/hosts".into()).unwrap_err().contains("only traces recorded"));
+    assert!(trace::reveal_trace(app.state(), s(), "/etc/hosts".into()).unwrap_err().contains("only traces recorded"));
+    trace::reveal_trace(app.state(), s(), status.path.clone()).unwrap();
+    let folder = dir.display().to_string();
+    assert!(LAUNCHED.lock().unwrap().iter().any(|l| l.contains(&folder)));
+    // The trace being recorded can be read, compared and reported on meanwhile.
+    let review = trace::trace_review(s(), status.path.clone()).await.unwrap();
+    assert!(review.summary.end_reason.is_none());
+    let _ = trace::trace_compare(s(), vec![status.path.clone(), status.path.clone()]).await;
+    let live = dir.join("live.html").display().to_string();
+    assert_eq!(trace::export_trace_report(s(), status.path.clone(), live.clone()).await.unwrap(), live);
+    let nowhere = dir.join("missing").join("r.html").display().to_string();
+    assert!(trace::export_trace_report(s(), status.path.clone(), nowhere).await.unwrap_err().starts_with("can't write"));
 
     let summary = trace::stop_trace(app.handle().clone(), s(), TraceEnd::Stopped).await.unwrap();
     assert_eq!(summary.end_reason, Some(TraceEnd::Stopped));
@@ -773,7 +927,7 @@ async fn captures_are_gated_checked_and_dry_run_first() {
     }
     let nowhere = CaptureRequest { path: " ".into(), ..request(60, all()) };
     assert_eq!(start(nowhere).await.unwrap_err(), "choose where to save the capture");
-    assert!(api.calls().iter().all(|c| c.method != "PATCH"), "nothing asked of the cluster yet");
+    assert!(api.calls_to("PATCH", "/api/v1/namespaces/shop/pods/api-1/ephemeralcontainers").is_empty(), "nothing asked of the cluster yet");
 
     // The server refuses the dry run (here: RBAC): nothing is attached and no window opens.
     let path = "/api/v1/namespaces/shop/pods/api-1/ephemeralcontainers";
@@ -783,7 +937,7 @@ async fn captures_are_gated_checked_and_dry_run_first() {
     let patches = api.calls_to("PATCH", path);
     assert_eq!(patches.len(), 1);
     assert!(patches[0].query.contains("dryRun=All"));
-    assert!(app.webview_windows().keys().all(|l| !l.starts_with(crate::capture::LABEL_PREFIX)));
+    assert!(app.get_webview_window(&format!("{}1", crate::capture::LABEL_PREFIX)).is_none());
     assert!(!file.exists(), "no file is made when the cluster refuses");
 
     // The dry run passes but the real attach is refused: the file made for it goes again.

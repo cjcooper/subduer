@@ -9,6 +9,8 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::logic::modal as logic;
+
 struct Open {
     id: u64,
     on_cancel: Callback<()>,
@@ -49,14 +51,14 @@ pub fn Modal(
     let backdrop = NodeRef::<html::Div>::new();
     let outside = move |ev: leptos::ev::MouseEvent| {
         let on_backdrop = ev.target().is_some_and(|t| backdrop.get_untracked().is_some_and(|b| b.is_same_node(t.dyn_ref())));
-        if dismiss_outside && on_backdrop && !busy.get_untracked() {
+        if logic::click_cancels(dismiss_outside, on_backdrop, busy.get_untracked()) {
             on_cancel.run(());
         }
     };
     view! {
         // Newer dialogs draw over older ones (the stylesheet's base is 10).
-        <div class="modal-backdrop" style:z-index=(10 + depth).to_string() node_ref=backdrop on:click=outside>
-            <div class=format!("modal {class}") class:prod=prod class:wide=wide>
+        <div class="modal-backdrop" style:z-index=logic::backdrop_z(depth) node_ref=backdrop on:click=outside>
+            <div class=logic::card_class(class) class:prod=prod class:wide=wide>
                 {children()}
             </div>
         </div>
@@ -68,11 +70,9 @@ pub fn any_open() -> bool {
     OPEN.with(|o| !o.borrow().is_empty())
 }
 
-/// One Esc press for us to act on: not a held key's repeat, not already
-/// handled, not ending an input-method composition (that Esc belongs to the
-/// text field; WebKit reports some of those as not composing, with key code 229).
+/// One Esc press for us to act on: see [`logic::is_plain_esc`].
 pub fn is_plain_esc(ev: &web_sys::KeyboardEvent) -> bool {
-    ev.key() == "Escape" && !ev.repeat() && !ev.default_prevented() && !ev.is_composing() && ev.key_code() != 229
+    logic::is_plain_esc(&ev.key(), ev.repeat(), ev.default_prevented(), ev.is_composing(), ev.key_code())
 }
 
 /// One keydown listener per window, for whichever dialog is on top.
@@ -109,7 +109,7 @@ impl Generation {
     }
 
     pub fn next(self) {
-        self.0.update_value(|g| *g += 1);
+        self.0.update_value(|g| *g = logic::next_generation(*g));
     }
 
     pub fn now(self) -> u64 {
@@ -117,6 +117,6 @@ impl Generation {
     }
 
     pub fn still(self, then: u64) -> bool {
-        self.now() == then
+        logic::still(self.now(), then)
     }
 }

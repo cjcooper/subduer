@@ -100,6 +100,21 @@ fn busy_pod() -> Value {
     }))
 }
 
+#[test]
+fn a_restarted_ephemeral_container_says_how_it_last_ended() {
+    let pod = json!({
+        "spec": {"ephemeralContainers": [{"name": "debugger", "image": "busybox"}, {"name": "probe", "image": "busybox"}]},
+        "status": {"ephemeralContainerStatuses": [
+            {"name": "debugger", "restartCount": 1, "state": {"running": {"startedAt": "2026-10-10T12:05:00Z"}},
+             "lastState": {"terminated": {"exitCode": 2, "reason": "Error", "finishedAt": "2026-10-10T12:04:00Z"}}},
+            {"name": "probe", "state": {"running": {}}, "lastState": {"terminated": {"exitCode": 0, "finishedAt": "2026-10-10T12:00:00Z"}}}
+        ]}
+    });
+    let c = ephemeral_containers(&pod);
+    assert_eq!((c[0].restarts, c[0].last_termination.as_deref()), (1, Some("Error (exit 2) at 2026-10-10T12:04:00Z")));
+    assert_eq!(c[1].last_termination.as_deref(), Some("Terminated (exit 0) at 2026-10-10T12:00:00Z"));
+}
+
 fn fake_sources(api: &MockApi) {
     api.on("GET", "/api/v1/namespaces/shop/configmaps/cfg", object("v1", "ConfigMap", Some("shop"), "cfg", json!({"data": {"mode": "fast", "level": "debug"}})));
     api.on_error("GET", "/api/v1/namespaces/shop/configmaps/locked-cfg", 403, "Forbidden", "configmaps \"locked-cfg\" is forbidden");

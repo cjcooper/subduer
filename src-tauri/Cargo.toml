@@ -40,3 +40,10 @@ winreg = "0.56"
 subduer-core = { workspace = true, features = ["test-support"] }
 tauri = { version = "2.12", features = ["image-png", "test"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
+
+# The app as `main` starts it (setup, menus, quitting), on the mock runtime.
+# No test harness: it runs on the process's main thread, the only one macOS
+# builds menus on.
+[[test]]
+name = "app"
+harness = false

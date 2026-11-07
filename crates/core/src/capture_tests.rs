@@ -102,3 +102,127 @@ async fn waiting_reports_the_image_or_why_not() {
     let err = wait_running(&api.client(), "shop", "web-1", "c", Duration::ZERO).await.unwrap_err();
     assert!(err.to_string().contains("didn't start"), "{err}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn waiting_asks_again_every_two_seconds() {
+    let api = MockApi::new();
+    let starting = pod("shop", "web-1", "n1", json!({"status": {"ephemeralContainerStatuses": [
+        {"name": "c", "state": {"waiting": {"reason": "ContainerCreating"}}}
+    ]}}));
+    api.on("GET", "/api/v1/namespaces/shop/pods/web-1", starting);
+    let started = tokio::time::Instant::now();
+    let err = wait_running(&api.client(), "shop", "web-1", "c", Duration::from_secs(3)).await.unwrap_err();
+    assert_eq!(err.to_string(), "the capture container didn't start within 3 s");
+    assert_eq!(api.calls().len(), 3);
+    assert!(started.elapsed() >= Duration::from_secs(4));
+}
+
+#[tokio::test]
+async fn pod_addresses_of_every_family() {
+    let api = MockApi::new();
+    let path = "/api/v1/namespaces/shop/pods/web-1";
+    api.on("GET", path, pod("shop", "web-1", "n1", json!({"status": {"podIP": "10.0.1.9", "podIPs": [{"ip": "10.0.1.9"}, {"ip": "fd00::9"}]}})));
+    assert_eq!(pod_ips(&api.client(), "shop", "web-1").await.unwrap(), ["10.0.1.9", "fd00::9"]);
+    // Older clusters give only `podIP`.
+    api.on("GET", path, pod("shop", "web-1", "n1", json!({"status": {"podIP": "10.0.1.9"}})));
+    assert_eq!(pod_ips(&api.client(), "shop", "web-1").await.unwrap(), ["10.0.1.9"]);
+    api.on("GET", path, json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "web-1", "namespace": "shop"}}));
+    assert!(pod_ips(&api.client(), "shop", "web-1").await.unwrap().is_empty());
+    assert!(pod_ips(&api.client(), "shop", "gone").await.is_err());
+}
+
+#[test]
+fn missing_streams_are_an_error() {
+    let err = crate::upload::opened::<()>(None, "the API server didn't open the capture's streams").unwrap_err();
+    assert_eq!(err.to_string(), "the API server didn't open the capture's streams");
+    assert_eq!(crate::upload::opened(Some(1), "unused").unwrap(), 1);
+}
+
+use crate::coverage_tests::ws_fake::{self, Step, err, out, success};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Where the pcap goes: kept in memory, or failing on write or flush.
+#[derive(Default)]
+struct Sink {
+    data: Vec<u8>,
+    fail_write: bool,
+    fail_flush: bool,
+}
+
+impl AsyncWrite for Sink {
+    fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        if self.fail_write {
+            return Poll::Ready(Err(std::io::Error::other("disk full")));
+        }
+        self.data.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(if self.fail_flush { Err(std::io::Error::other("flush failed")) } else { Ok(()) })
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Runs a capture against the fake's `steps` into `sink`; also returns the
+/// pieces `run` showed as they arrived.
+async fn capture(steps: Vec<Step>, mut sink: Sink) -> (ws_fake::Fake, Result<Captured>, Sink, usize) {
+    let fake = ws_fake::start(steps).await;
+    let mut pieces = 0;
+    let result = run(&fake.client, "shop", "web-1", "subduer-capture-1", "tcp port 443", 60, &mut sink, |_| pieces += 1).await;
+    (fake, result, sink, pieces)
+}
+
+#[tokio::test]
+async fn captures_stream_pcap_and_keep_tcpdumps_messages() {
+    let steps = vec![
+        err("tcpdump: listening on eth0\n"),
+        Step::Out(1, vec![0xd4, 0xc3, 0xb2, 0xa1]),
+        Step::Out(1, vec![1, 2, 3]),
+        err("2 packets captured\n"),
+        success(),
+    ];
+    let (fake, result, sink, pieces) = capture(steps, Sink::default()).await;
+    let captured = result.unwrap();
+    assert_eq!(captured, Captured { bytes: 7, messages: "tcpdump: listening on eth0\n2 packets captured".into() });
+    assert_eq!(sink.data, [0xd4, 0xc3, 0xb2, 0xa1, 1, 2, 3]);
+    assert!(pieces >= 1);
+    let request = fake.requests.lock().unwrap()[0].clone();
+    for part in ["container=subduer-capture-1", "command=tcpdump", "command=tcp+port+443", "stdout=true", "stderr=true"] {
+        assert!(request.contains(part), "{request} lacks {part}");
+    }
+    assert!(!request.contains("stdin=true"), "{request}");
+}
+
+#[tokio::test]
+async fn capture_output_that_cannot_be_written_is_an_error() {
+    let (_, result, _, pieces) = capture(vec![out("pcap"), success()], Sink { fail_write: true, ..Sink::default() }).await;
+    assert_eq!(result.unwrap_err().to_string(), "disk full");
+    assert_eq!(pieces, 0);
+    let (_, result, sink, _) = capture(vec![out("pcap"), success()], Sink { fail_flush: true, ..Sink::default() }).await;
+    assert_eq!(result.unwrap_err().to_string(), "flush failed");
+    assert_eq!(sink.data, b"pcap");
+}
+
+#[tokio::test]
+async fn a_capture_that_cannot_start_is_an_error() {
+    let api = MockApi::new();
+    let mut sink = Sink::default();
+    let err = run(&api.client(), "shop", "web-1", "c", "", 60, &mut sink, |_| {}).await.unwrap_err();
+    assert!(matches!(err, Error::Kube(_)), "{err:?}");
+    assert!(api.calls()[0].path.ends_with("/pods/web-1/exec"));
+}
+
+#[tokio::test]
+async fn stopping_interrupts_tcpdump() {
+    let fake = ws_fake::start(vec![success()]).await;
+    stop(&fake.client, "shop", "web-1", "subduer-capture-1").await.unwrap();
+    let request = fake.requests.lock().unwrap()[0].clone();
+    for part in ["container=subduer-capture-1", "command=pkill", "command=-INT", "command=tcpdump", "stderr=true"] {
+        assert!(request.contains(part), "{request} lacks {part}");
+    }
+    let api = MockApi::new();
+    assert!(stop(&api.client(), "shop", "web-1", "c").await.is_err());
+}
