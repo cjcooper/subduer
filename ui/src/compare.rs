@@ -2,21 +2,27 @@
 //! rows matched by workload and container, with each trace's requests and
 //! usage and the change from the first to the last. For checking a resize:
 //! requests should drop while usage stays put and no OOM kills appear.
+//!
+//! The logic is in `logic::compare`.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{CompareCell, CompareRow, TraceComparison, TraceKey, TraceSeries, TraceSummary};
+use subduer_types::{TraceComparison, TraceKey, TraceSeries, TraceSummary};
 
 use crate::app::{Store, guard};
+use crate::logic::compare::{
+    OVERLAY_POINTS, cell_flags, cell_lines, change_heading, change_lines, count_text_of, data_start, ends, errors, filter, head_text, headers, legend_text,
+    lines, only_text, overlaid, pick, shown_text, sorted, title, trace_header,
+};
+use crate::logic::trace::scope_text;
 use crate::tauri::invoke;
-use crate::trace::{duration_text, scope_text};
+use crate::logic::trace_overlay::{Align, picked, trace_slot, trace_var};
+use crate::logic::trace_review::{SeriesArgs, file_name, key_subtitle};
 use crate::trace_chart::Measure;
-use crate::trace_overlay::{Align, Line, MAX_TRACES, OverlayChart, local_offset, picked, shift, trace_slot};
-use crate::trace_review::{change_text, file_name};
+use crate::trace_overlay::{OverlayChart, local_offset};
 
-/// Buckets per trace on an overlay.
-const OVERLAY_POINTS: u32 = 400;
+const TABLE: &str = "compare";
 
 /// Shows the comparison of these files.
 pub(crate) fn open(store: Store, paths: Vec<String>) {
@@ -39,68 +45,12 @@ pub(crate) fn open(store: Store, paths: Vec<String>) {
     });
 }
 
-/// The first and last traces that have the row.
-fn ends(row: &CompareRow) -> Option<(&CompareCell, &CompareCell)> {
-    let mut present = row.cells.iter().flatten();
-    let first = present.next()?;
-    Some((first, present.last().unwrap_or(first)))
-}
-
-const TABLE: &str = "compare";
-
-/// The sortable headings: `Workload`, `Trace 1` … `Trace n`, `Change`.
-pub(crate) fn headers(n: usize) -> Vec<String> {
-    std::iter::once("Workload".to_owned()).chain((1..=n).map(|i| format!("Trace {i}"))).chain(["Change".to_owned()]).collect()
-}
-
-/// How a row sorts under column `i` of `n` traces: the workload by name, a
-/// trace by its CPU request, Change by how much the request changed.
-pub(crate) fn row_key(row: &CompareRow, i: usize, n: usize) -> crate::sort::Key {
-    use crate::sort::Key;
-    match i {
-        0 => Key::text(&format!("{} {} {}", row.key.name, row.key.container, row.key.namespace)),
-        i if i <= n => row.cells.get(i - 1).and_then(Option::as_ref).map_or(Key::Missing, |c| Key::opt(c.cpu_request.or(Some(c.cpu_p95)))),
-        _ => {
-            let Some((a, b)) = ends(row) else { return Key::Missing };
-            let ratio = |x: Option<f64>, y: Option<f64>| match (x, y) {
-                (Some(x), Some(y)) if x > 0.0 => Some((y - x) / x),
-                _ => None,
-            };
-            Key::opt(ratio(a.cpu_request, b.cpu_request).or_else(|| ratio(a.mem_request, b.mem_request)))
-        }
-    }
-}
-
-/// A request or limit differs between the traces that have the row.
-pub(crate) fn requests_changed(row: &CompareRow) -> bool {
-    let mut cells = row.cells.iter().flatten();
-    let Some(first) = cells.next() else { return false };
-    cells.any(|c| c.cpu_request != first.cpu_request || c.mem_request != first.mem_request)
-}
-
-/// Rows matching the text, and only changed ones if asked.
-pub(crate) fn filter(rows: &[CompareRow], text: &str, changed_only: bool) -> Vec<CompareRow> {
-    let text = text.trim().to_lowercase();
-    rows.iter()
-        .filter(|r| text.is_empty() || [&r.key.name, &r.key.container, &r.key.namespace].iter().any(|s| s.to_lowercase().contains(&text)))
-        .filter(|r| !changed_only || requests_changed(r))
-        .cloned()
-        .collect()
-}
-
-/// `1.5 cores → 15m (−99%)`, or the value alone when it didn't change.
-pub(crate) fn from_to(a: Option<f64>, b: Option<f64>, m: Measure) -> String {
-    match (a, b) {
-        (Some(a), Some(b)) if a == b => m.fmt(a),
-        (Some(a), Some(b)) => format!("{} → {} ({})", m.fmt(a), m.fmt(b), change_text(a, b)),
-        (None, Some(b)) => format!("not set → {}", m.fmt(b)),
-        (Some(a), None) => format!("{} → not set", m.fmt(a)),
-        (None, None) => "not set".into(),
-    }
-}
-
-fn opt(v: Option<f64>, m: Measure) -> String {
-    v.map_or("—".into(), |v| m.fmt(v))
+/// A date in this browser's locale.
+fn local_date(t: f64) -> String {
+    js_sys::Date::new(&(t * 1000.0).into())
+        .to_locale_date_string("default", &wasm_bindgen::JsValue::UNDEFINED)
+        .as_string()
+        .unwrap_or_default()
 }
 
 #[component]
@@ -110,7 +60,7 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
     // The row whose charts are overlaid, and how the traces line up.
     let sel = RwSignal::new(None::<TraceKey>);
     let align = RwSignal::new(Align::SinceStart);
-    let pick = move |key: TraceKey| sel.update(|s| *s = if s.as_ref() == Some(&key) { None } else { Some(key) });
+    let pick = move |key: TraceKey| sel.update(|s| pick(s, key));
     let back = move |_| {
         store.compare_paths.set(None);
         store.comparison.set(None);
@@ -124,28 +74,21 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
-                    let span = match (t.data_start, t.data_end) {
-                        (Some(a), Some(b)) => duration_text(b - a),
-                        _ => "no data".into(),
-                    };
-                    let started = js_sys::Date::new(&(t.data_start.unwrap_or(t.started) * 1000.0).into())
-                        .to_locale_date_string("default", &wasm_bindgen::JsValue::UNDEFINED)
-                        .as_string()
-                        .unwrap_or_default();
-                    let header = format!("Trace {}", i + 1);
+                    let started = local_date(data_start(t));
+                    let header = trace_header(i);
                     let (h1, h2) = (header.clone(), header.clone());
                     view! {
                         <th class="cmp-head" title="Sort by CPU request in this trace">
                             <button class="th-sort cmp-index" class:on=move || store.sorts.get(TABLE).is_some_and(|(s, _)| s == h1) on:click=move |_| store.sorts.click(TABLE, &header)>
                                 // The trace's colour on overlays, beside its number.
                                 {trace_slot(i, c.traces.len()).map(|slot| view! {
-                                    <span class="ochart-swatch" style=format!("--trace: var(--trace-{})", slot + 1) aria-hidden="true"></span>
+                                    <span class="ochart-swatch" style=trace_var(slot) aria-hidden="true"></span>
                                 })}
-                                {format!("{}", i + 1)}
+                                {(i + 1).to_string()}
                                 <span class="sort-arrow">{move || store.sorts.arrow(TABLE, &h2)}</span>
                             </button>
                             <span class="cmp-file" title=t.path.clone()>{file_name(&t.path).to_owned()}</span>
-                            <span class="muted small">{format!("{started} · {span} · {}", t.context)}</span>
+                            <span class="muted small">{head_text(t, &started)}</span>
                             <span class="muted small">{scope_text(&t.scope)}</span>
                         </th>
                     }
@@ -153,10 +96,9 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                 .collect_view();
             let n = c.traces.len();
             let (overlay_traces, overlay_rows) = (c.traces.clone(), c.rows.clone());
-            let mut rows = filter(&c.rows, &text.get(), changed_only.get());
             let headers = headers(n);
             let names: Vec<&str> = headers.iter().map(String::as_str).collect();
-            crate::sort::sort(&mut rows, store.sorts.by(TABLE, &names), |r, i| row_key(r, i, n));
+            let rows = sorted(filter(&c.rows, &text.get(), changed_only.get()), store.sorts.by(TABLE, &names), n);
             let count = rows.len();
             let body = rows
                 .into_iter()
@@ -166,44 +108,47 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                         .iter()
                         .map(|cell| match cell {
                             None => view! { <td class="muted cmp-cell">"not in this trace"</td> }.into_any(),
-                            Some(c) => view! {
-                                <td class="cmp-cell">
-                                    <div class="res-cpu"><span class="res-dot" aria-hidden="true"></span>{format!("{} · p95 {}", opt(c.cpu_request, Measure::Cpu), Measure::Cpu.fmt(c.cpu_p95))}</div>
-                                    <div class="res-memory"><span class="res-dot" aria-hidden="true"></span>{format!("{} · peak {}", opt(c.mem_request, Measure::Memory), Measure::Memory.fmt(c.mem_max))}</div>
-                                    <div class="muted small">
-                                        {format!("{} pods · {}", format!("{:.1}", c.avg_pods).trim_end_matches(".0"), duration_text(c.hours * 3600.0))}
-                                        {(c.ooms > 0).then(|| view! { <span class="flag critical"><span class="flag-dot" aria-hidden="true"></span>{format!("OOM ×{}", c.ooms)}</span> })}
-                                        {c.throttled.map(|t| view! { <span class="flag serious"><span class="flag-dot" aria-hidden="true"></span>{format!("Throttled {:.0}%", t * 100.0)}</span> })}
-                                    </div>
-                                </td>
+                            Some(c) => {
+                                let (cpu, memory, pods) = cell_lines(c);
+                                let (ooms, throttled) = cell_flags(c);
+                                view! {
+                                    <td class="cmp-cell">
+                                        <div class="res-cpu"><span class="res-dot" aria-hidden="true"></span>{cpu}</div>
+                                        <div class="res-memory"><span class="res-dot" aria-hidden="true"></span>{memory}</div>
+                                        <div class="muted small">
+                                            {pods}
+                                            {ooms.map(|t| view! { <span class="flag critical"><span class="flag-dot" aria-hidden="true"></span>{t}</span> })}
+                                            {throttled.map(|t| view! { <span class="flag serious"><span class="flag-dot" aria-hidden="true"></span>{t}</span> })}
+                                        </div>
+                                    </td>
+                                }
+                                .into_any()
                             }
-                            .into_any(),
                         })
                         .collect_view();
-                    let present: Vec<usize> = row.cells.iter().enumerate().filter(|(_, c)| c.is_some()).map(|(i, _)| i + 1).collect();
                     let key = row.key.clone();
                     let selected = { let key = key.clone(); move || sel.with(|s| s.as_ref() == Some(&key)) };
-                    if present.len() < n {
-                        let only = present.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
+                    if let Some(only) = only_text(&row, n) {
                         return view! {
                             <tr class="cmp-row" class:selected=selected on:click=move |_| pick(key.clone())>
                                 <td>
                                     <div class="review-name">{row.key.name.clone()}</div>
-                                    <div class="muted small">{format!("{} · {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
+                                    <div class="muted small">{key_subtitle(&row.key)}</div>
                                 </td>
                                 {cells}
-                                <td class="muted">{format!("Only in trace {only}")}</td>
+                                <td class="muted">{only}</td>
                             </tr>
                         }
                         .into_any();
                     }
                     let change = ends(&row).map(|(a, b)| {
+                        let [cpu, p95, memory, peak] = change_lines(a, b);
                         view! {
                             <td class="cmp-cell">
-                                <div class="res-cpu">"Request "{from_to(a.cpu_request, b.cpu_request, Measure::Cpu)}</div>
-                                <div class="muted small">"p95 "{from_to(Some(a.cpu_p95), Some(b.cpu_p95), Measure::Cpu)}</div>
-                                <div class="res-memory">"Request "{from_to(a.mem_request, b.mem_request, Measure::Memory)}</div>
-                                <div class="muted small">"peak "{from_to(Some(a.mem_max), Some(b.mem_max), Measure::Memory)}</div>
+                                <div class="res-cpu">"Request "{cpu}</div>
+                                <div class="muted small">"p95 "{p95}</div>
+                                <div class="res-memory">"Request "{memory}</div>
+                                <div class="muted small">"peak "{peak}</div>
                             </td>
                         }
                     });
@@ -211,7 +156,7 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                         <tr class="cmp-row" class:selected=selected on:click=move |_| pick(key.clone())>
                             <td>
                                 <div class="review-name">{row.key.name.clone()}</div>
-                                <div class="muted small">{format!("{} · {} · {}", row.key.kind, row.key.container, row.key.namespace)}</div>
+                                <div class="muted small">{key_subtitle(&row.key)}</div>
                             </td>
                             {cells}
                             {change}
@@ -230,7 +175,7 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                         "Requests changed only"
                     </label>
                     <span class="spacer"></span>
-                    <span class="muted small">{format!("{count} of {} rows · select one to overlay its charts", c.rows.len())}</span>
+                    <span class="muted small">{count_text_of(count, c.rows.len())}</span>
                 </div>
                 {move || {
                     let key = sel.get()?;
@@ -246,7 +191,7 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
                             {heads}
                             <th title="Sort by the change in CPU request (memory where CPU has none)">
                                 <button class="th-sort" class:on=move || store.sorts.get(TABLE).is_some_and(|(s, _)| s == "Change") on:click=move |_| store.sorts.click(TABLE, "Change")>
-                                    {format!("Change, 1 → {n}")}<span class="sort-arrow">{move || store.sorts.arrow(TABLE, "Change")}</span>
+                                    {change_heading(n)}<span class="sort-arrow">{move || store.sorts.arrow(TABLE, "Change")}</span>
                                 </button>
                             </th>
                         </tr></thead>
@@ -261,7 +206,7 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
         <div class="traces-page review">
             <div class="resource-header page-head">
                 <button class="btn small" on:click=back title="Back to the list of traces">"← Traces"</button>
-                <h1>{move || format!("Comparing {} traces", store.compare_paths.with(|p| p.as_ref().map_or(0, Vec::len)))}</h1>
+                <h1>{move || store.compare_paths.with(|p| title(p.as_ref()))}</h1>
                 <span class="spacer"></span>
             </div>
             <p class="muted pad-x">"Oldest data first. After a resize, requests should drop while usage stays about the same and no OOM kills or throttling appear."</p>
@@ -270,65 +215,31 @@ pub(crate) fn CompareView(store: Store) -> impl IntoView {
     }
 }
 
-/// When a trace's data starts.
-fn data_start(t: &TraceSummary) -> f64 {
-    t.data_start.unwrap_or(t.started)
-}
-
-/// "Showing traces 1, 4 and 5 of 5", when the overlay can't hold them all.
-pub(crate) fn shown_text(shown: &[usize], of: usize) -> Option<String> {
-    (shown.len() < of).then(|| {
-        let mut n: Vec<String> = shown.iter().map(|i| (i + 1).to_string()).collect();
-        let last = n.pop().unwrap_or_default();
-        format!("Showing traces {} and {last} of {of}: an overlay holds {MAX_TRACES} at most.", n.join(", "))
-    })
-}
-
 /// One row's CPU and memory from each trace that has it, overlaid.
 #[component]
 fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, align: RwSignal<Align>, on_close: Callback<()>) -> impl IntoView {
     // The comparison's overlaid traces that have this row; each keeps its colour.
     let n = traces.len();
-    let shown: Vec<usize> = picked(n).into_iter().filter(|&i| present.get(i) == Some(&true)).collect();
+    let shown = overlaid(n, &present);
     let note = shown_text(&picked(n), n);
     // Each shown trace's series, by its index in the comparison.
     let loaded = RwSignal::new(Vec::<(usize, Result<TraceSeries, String>)>::new());
     for &i in &shown {
         let (path, key) = (traces[i].path.clone(), key.clone());
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                path: String,
-                key: TraceKey,
-                start: Option<f64>,
-                end: Option<f64>,
-                points: u32,
-            }
-            let result = invoke::<_, TraceSeries>("trace_series", &Args { path, key, start: None, end: None, points: OVERLAY_POINTS }).await;
+            let result = invoke::<_, TraceSeries>("trace_series", &SeriesArgs::new(path, key, None, OVERLAY_POINTS)).await;
             // Dropped if the row was closed or another chosen meanwhile.
             let _ = loaded.try_update(|l| l.push((i, result)));
         });
     }
-    let (first, first_offset) = shown.first().map(|&i| (data_start(&traces[i]), local_offset(data_start(&traces[i])))).unwrap_or_default();
-    let starts: Vec<(f64, f64)> = traces.iter().map(|t| (data_start(t), local_offset(data_start(t)))).collect();
+    let with_offset = |t: f64| (t, local_offset(t));
+    let first = shown.first().map(|&i| with_offset(data_start(&traces[i]))).unwrap_or_default();
+    let starts: Vec<(f64, f64)> = traces.iter().map(|t| with_offset(data_start(t))).collect();
     let lines = Signal::derive(move || {
         let a = align.get();
-        loaded.with(|l| {
-            let mut lines: Vec<Line> = l
-                .iter()
-                .filter_map(|(i, r)| {
-                    let series = r.as_ref().ok()?.clone();
-                    let (start, offset) = starts[*i];
-                    Some(Line { n: i + 1, slot: trace_slot(*i, n)?, series, shift: shift(a, start, offset, first, first_offset) })
-                })
-                .collect();
-            lines.sort_by_key(|l| l.n);
-            lines
-        })
+        loaded.with(|l| lines(l, &starts, first, a))
     });
-    let errors = move || {
-        loaded.with(|l| l.iter().filter_map(|(i, r)| r.as_ref().err().map(|e| format!("Trace {}: {e}", i + 1))).collect::<Vec<_>>().join(" "))
-    };
+    let errors = move || loaded.with(|l| errors(l));
     let toggle = move |to: Align, label: &'static str| {
         view! { <button class="btn small toggle" class:on=move || align.get() == to on:click=move |_| align.set(to)>{label}</button> }
     };
@@ -336,14 +247,11 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
         .iter()
         .map(|&i| {
             let (t, slot) = (&traces[i], trace_slot(i, n).unwrap_or_default());
-            let started = js_sys::Date::new(&(data_start(t) * 1000.0).into())
-                .to_locale_date_string("default", &wasm_bindgen::JsValue::UNDEFINED)
-                .as_string()
-                .unwrap_or_default();
+            let started = local_date(data_start(t));
             view! {
-                <span style=format!("--trace: var(--trace-{})", slot + 1)>
+                <span style=trace_var(slot)>
                     <span class="key ochart-key"></span>
-                    {format!("Trace {} · {} · {started}", i + 1, file_name(&t.path))}
+                    {legend_text(i, t, &started)}
                 </span>
             }
         })
@@ -352,7 +260,7 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
         <section class="review-overview cmp-overlay">
             <div class="overview-head">
                 <h3 class="chart-title">{key.name.clone()}</h3>
-                <span class="muted small">{format!("{} · {} · {}", key.kind, key.container, key.namespace)}</span>
+                <span class="muted small">{key_subtitle(&key)}</span>
                 <span class="spacer"></span>
                 <span class="muted small">"Line up by"</span>
                 {toggle(Align::SinceStart, "Since start")}
@@ -378,7 +286,3 @@ fn CompareOverlay(key: TraceKey, traces: Vec<TraceSummary>, present: Vec<bool>, 
         </section>
     }
 }
-
-#[cfg(test)]
-#[path = "compare_tests.rs"]
-mod tests;

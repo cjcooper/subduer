@@ -4,29 +4,17 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{DirListing, UploadOutcome, UploadTarget};
+use subduer_types::{DirListing, UploadOutcome};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::modal::{Generation, Modal};
 use crate::app::Store;
-use crate::browser::{BrowseMode, FolderBrowser, folder_of, join};
-use crate::overview::fmt_bytes;
+use crate::browser::{BrowseMode, FolderBrowser, folder_of};
+use crate::logic::download::BrowseArgs;
+use crate::logic::upload::{self as logic, Phase, START_DIR};
+pub use crate::logic::upload::UploadPrompt;
+use crate::modal::{Generation, Modal};
 use crate::tauri::{invoke, invoke_bytes};
-
-/// Matches the backend limit; the file is held in memory.
-const MAX_BYTES: f64 = 512.0 * 1024.0 * 1024.0;
-const START_DIR: &str = "/tmp";
-
-/// The container the dialog uploads into.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UploadPrompt {
-    pub context: String,
-    pub namespace: String,
-    pub pod: String,
-    pub container: String,
-}
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
 pub fn request(store: Store, namespace: String, pod: String, container: String) {
@@ -40,41 +28,11 @@ pub fn request(store: Store, namespace: String, pod: String, container: String) 
     }
 }
 
-#[derive(Clone)]
-enum Phase {
-    Choosing,
-    Uploading,
-    /// The file exists; offer to replace it.
-    Exists(String),
-    Done { bytes: u64, path: String },
-}
-
-/// What the destination `dest` will mean for a file named `name` (if chosen),
-/// given the folder on screen.
-fn dest_hint(dest: &str, shown: Option<&DirListing>, name: Option<&str>) -> String {
-    let d = dest.trim();
-    if !d.starts_with('/') {
-        return "Use an absolute path, e.g. /tmp/".to_owned();
-    }
-    // Warn before uploading into the folder on screen when it's read-only.
-    let read_only =
-        shown.is_some_and(|l| !l.writable && folder_of(d).trim_end_matches('/') == l.path.trim_end_matches('/'));
-    if read_only {
-        return "This folder is read-only for the container user; pick a writable one.".to_owned();
-    }
-    match name {
-        Some(name) if d.ends_with('/') => format!("Saved as {}", join(d, name)),
-        Some(name) => format!("Saved as {d}, or as {} if {d} is a folder", join(d, name)),
-        None if d.ends_with('/') => "The file keeps its name in this folder.".into(),
-        None => "A folder keeps the file's name; anything else is the new file's path.".into(),
-    }
-}
-
 #[component]
 pub fn UploadDialog(store: Store) -> impl IntoView {
     let file = StoredValue::new_local(None::<web_sys::File>);
     let file_label = RwSignal::new(None::<(String, f64)>);
-    let dest = RwSignal::new(format!("{START_DIR}/"));
+    let dest = RwSignal::new(logic::start_dest());
     let phase = RwSignal::new(Phase::Choosing);
     let error = RwSignal::new(None::<String>);
     let dragging = RwSignal::new(false);
@@ -90,19 +48,11 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         browsing.set(true);
         let sent = generation.now();
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                namespace: String,
-                pod: String,
-                container: String,
-                path: String,
-                suggest: bool,
-            }
-            let args = Args { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path, suggest };
+            let args = BrowseArgs { namespace: prompt.namespace, pod: prompt.pod, container: prompt.container, path, suggest };
             let mut result = invoke::<_, DirListing>("browse_dir", &args).await;
             // No /tmp: start at the root instead.
-            if suggest && result.is_err() {
-                result = invoke::<_, DirListing>("browse_dir", &Args { path: "/".into(), ..args }).await;
+            if logic::retry_at_root(suggest, result.is_err()) {
+                result = invoke::<_, DirListing>("browse_dir", &BrowseArgs { path: "/".into(), ..args }).await;
             }
             if !generation.still(sent) {
                 return;
@@ -112,11 +62,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                     suggestions.set(l.suggestions.clone());
                 }
                 // Point the destination at the folder, keeping a typed file name.
-                let name = dest.with_untracked(|d| {
-                    let tail = d.rsplit('/').next().unwrap_or_default();
-                    tail.to_owned()
-                });
-                dest.set(join(&l.path, &name));
+                dest.set(dest.with_untracked(|d| logic::browsed_dest(&l.path, d)));
             }
             listing.set(Some(result));
             browsing.set(false);
@@ -129,7 +75,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         if store.upload_prompt.with(Option::is_some) {
             file.set_value(None);
             file_label.set(None);
-            dest.set(format!("{START_DIR}/"));
+            dest.set(logic::start_dest());
             phase.set(Phase::Choosing);
             error.set(None);
             listing.set(None);
@@ -140,7 +86,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
 
     let choose = move |f: web_sys::File| {
         let (name, size) = (f.name(), f.size());
-        error.set(if size > MAX_BYTES { Some("Files over 512 MiB aren't supported.".into()) } else { None });
+        error.set(logic::size_error(size));
         file_label.set(Some((name, size)));
         file.set_value(Some(f));
     };
@@ -164,15 +110,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
         else {
             return;
         };
-        let target = UploadTarget {
-            context: prompt.context,
-            namespace: prompt.namespace,
-            pod: prompt.pod,
-            container: prompt.container,
-            path: dest.get_untracked().trim().to_owned(),
-            file_name: name,
-            overwrite,
-        };
+        let target = logic::target(prompt, &dest.get_untracked(), name, overwrite);
         phase.set(Phase::Uploading);
         error.set(None);
         let sent = generation.now();
@@ -189,40 +127,36 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
             if !generation.still(sent) {
                 return;
             }
-            match result {
-                Ok(UploadOutcome::Uploaded { bytes, path }) => phase.set(Phase::Done { bytes, path }),
-                Ok(UploadOutcome::Exists { path }) => phase.set(Phase::Exists(path)),
-                Err(e) => {
-                    error.set(Some(e));
-                    phase.set(Phase::Choosing);
-                }
+            let (next, failed) = logic::after_upload(result);
+            if failed.is_some() {
+                error.set(failed);
             }
+            phase.set(next);
         });
     };
     let close = move || store.upload_prompt.set(None);
     // Esc: from "already exists", back to choosing; otherwise close.
     let cancel = move || {
-        if matches!(phase.get_untracked(), Phase::Exists(_)) {
+        if phase.with_untracked(logic::cancel_goes_back) {
             phase.set(Phase::Choosing);
         } else {
             close();
         }
     };
-    let dest_ok = move || dest.with(|p| p.trim().starts_with('/'));
-    let can_upload = move || file_label.with(|f| f.as_ref().is_some_and(|(_, size)| *size <= MAX_BYTES)) && dest_ok();
+    let can_upload = move || file_label.with(|f| dest.with(|d| logic::can_upload(f.as_ref().map(|(_, size)| *size), d)));
     // What the destination will mean once the file is chosen.
     let hint = move || {
         let d = dest.get();
         let name = file_label.get().map(|(name, _)| name);
-        listing.with(|l| dest_hint(&d, l.as_ref().and_then(|l| l.as_ref().ok()), name.as_deref()))
+        listing.with(|l| logic::dest_hint(&d, l.as_ref().and_then(|l| l.as_ref().ok()), name.as_deref()))
     };
 
     move || {
         store.upload_prompt.get().map(|prompt| {
-            let target = format!("{} · {}/{} · {}", prompt.container, prompt.namespace, prompt.pod, prompt.context);
+            let target = logic::target_line(&prompt);
             let body = move || match phase.get() {
                 Phase::Done { bytes, path } => view! {
-                    <p>"Uploaded "{fmt_bytes(bytes as f64)}" to "<strong class="mono">{path}</strong>"."</p>
+                    <p>"Uploaded "{crate::logic::download::size(bytes)}" to "<strong class="mono">{path}</strong>"."</p>
                     <div class="modal-actions"><button class="primary" on:click=move |_| close()>"Done"</button></div>
                 }
                 .into_any(),
@@ -251,7 +185,7 @@ pub fn UploadDialog(store: Store) -> impl IntoView {
                             {move || match file_label.get() {
                                 Some((name, size)) => view! {
                                     <span class="mono">{name}</span>
-                                    <span class="muted">{format!(" · {}", fmt_bytes(size))}</span>
+                                    <span class="muted">{logic::file_size(size)}</span>
                                 }
                                 .into_any(),
                                 None => view! { <span class="muted">"Drop a file here, or click to choose one"</span> }.into_any(),

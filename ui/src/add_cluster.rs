@@ -6,83 +6,13 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{AddedCluster, CloudAccounts, CloudCluster, CloudProvider, ClusterAuth, ManagedContext, ManagedContexts, NewCluster};
+use subduer_types::{AddedCluster, CloudAccounts, CloudCluster, CloudProvider, ManagedContext, ManagedContexts, NewCluster};
 
 use crate::app::{Store, guard};
 use crate::icons::ProviderLogo;
+use crate::logic::add_cluster::{self as logic, AUTHS, AWS_REGIONS, DEFAULT_AUTH, DEFAULT_SOURCE, ManualInput, SOURCES, Source};
 use crate::modal::{Generation, Modal};
 use crate::tauri::{NoArgs, invoke};
-
-/// An API server's host and port, lowercase, without `https://`, a path or
-/// the default port: clouds report a bare host or a URL, kubeconfigs a URL.
-pub(crate) fn server_key(server: &str) -> String {
-    let rest = server.trim().split_once("://").map_or(server.trim(), |(_, r)| r);
-    let host = rest.split('/').next().unwrap_or("").to_ascii_lowercase();
-    host.strip_suffix(":443").map(str::to_owned).unwrap_or(host)
-}
-
-/// The contexts already pointing at a cluster: same API server, or (from a
-/// cloud's CLI) the cluster entry it would write. Renamed contexts count too.
-pub(crate) fn already_in(existing: &[ManagedContext], server: &str, entry: &str) -> Vec<String> {
-    let key = server_key(server);
-    existing
-        .iter()
-        .filter(|c| (!key.is_empty() && server_key(&c.server) == key) || (!entry.is_empty() && c.cluster == entry))
-        .map(|c| c.name.clone())
-        .collect()
-}
-
-/// "“a”", "“a” and “b”", "“a”, “b” and “c”".
-pub(crate) fn quoted_names(names: &[String]) -> String {
-    let quoted: Vec<String> = names.iter().map(|n| format!("“{n}”")).collect();
-    match quoted.split_last() {
-        None => String::new(),
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
-/// Where a new cluster comes from: typed in (`None`) or a cloud.
-type Source = Option<CloudProvider>;
-
-const SOURCES: [(Source, &str, &str); 4] = [
-    (Some(CloudProvider::Eks), "AWS", "EKS, with the aws CLI"),
-    (Some(CloudProvider::Gke), "Google Cloud", "GKE, with gcloud"),
-    (Some(CloudProvider::Aks), "Azure", "AKS, with the az CLI"),
-    (None, "Kubernetes", "Server and credentials"),
-];
-
-/// The card the dialog opens on.
-const DEFAULT_SOURCE: Source = Some(CloudProvider::Eks);
-
-/// Regions offered for EKS; any other can be typed.
-const AWS_REGIONS: [&str; 17] = [
-    "us-east-1", "us-east-2", "us-west-1", "us-west-2", "ca-central-1", "sa-east-1", "eu-west-1", "eu-west-2",
-    "eu-west-3", "eu-central-1", "eu-north-1", "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
-    "ap-northeast-2", "me-central-1",
-];
-
-/// What the cloud's account picker is called.
-fn account_label(provider: CloudProvider) -> &'static str {
-    match provider {
-        CloudProvider::Gke => "Project",
-        CloudProvider::Eks => "Profile",
-        CloudProvider::Aks => "Subscription",
-    }
-}
-
-fn cli_name(provider: CloudProvider) -> &'static str {
-    match provider {
-        CloudProvider::Gke => "gcloud",
-        CloudProvider::Eks => "aws",
-        CloudProvider::Aks => "az",
-    }
-}
-
-/// Exec plugin arguments, one per line.
-pub(crate) fn split_args(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
-}
 
 /// The typed-in form.
 #[derive(Clone, Copy)]
@@ -110,7 +40,7 @@ impl Manual {
             ca: RwSignal::new(String::new()),
             insecure: RwSignal::new(false),
             proxy: RwSignal::new(String::new()),
-            auth: RwSignal::new("token"),
+            auth: RwSignal::new(DEFAULT_AUTH),
             token: RwSignal::new(String::new()),
             cert: RwSignal::new(String::new()),
             key: RwSignal::new(String::new()),
@@ -125,31 +55,30 @@ impl Manual {
             s.set(String::new());
         }
         self.insecure.set(false);
-        self.auth.set("token");
+        self.auth.set(DEFAULT_AUTH);
     }
 
     /// Something was typed: only then is what's missing pointed out.
     fn touched(self) -> bool {
-        !self.name.get().is_empty() || !self.server.get().is_empty()
+        logic::touched(&self.name.get(), &self.server.get())
     }
 
     fn cluster(self, make_current: bool) -> NewCluster {
-        let auth = match self.auth.get() {
-            "none" => ClusterAuth::None,
-            "cert" => ClusterAuth::ClientCertificate { certificate: self.cert.get(), key: self.key.get() },
-            "exec" => ClusterAuth::Exec { command: self.command.get(), args: split_args(&self.args.get()) },
-            _ => ClusterAuth::Token { token: self.token.get() },
-        };
-        NewCluster {
+        let input = ManualInput {
             name: self.name.get(),
             server: self.server.get(),
-            certificate_authority: self.ca.get(),
-            insecure_skip_tls_verify: self.insecure.get(),
-            proxy_url: self.proxy.get(),
-            auth,
+            ca: self.ca.get(),
+            insecure: self.insecure.get(),
+            proxy: self.proxy.get(),
+            auth: self.auth.get(),
+            token: self.token.get(),
+            cert: self.cert.get(),
+            key: self.key.get(),
+            command: self.command.get(),
+            args: self.args.get(),
             namespace: self.namespace.get(),
-            make_current,
-        }
+        };
+        input.cluster(make_current)
     }
 }
 
@@ -203,22 +132,15 @@ impl Cloud {
                 return;
             }
             if let Ok(found) = &result {
-                let first = found.accounts.first().map(|a| a.id.clone());
-                // EKS can list with the default credentials, without a profile.
-                let account = found.default.clone().or(if provider == CloudProvider::Eks { None } else { first }).unwrap_or_default();
-                self.choose_account(provider, found, account);
+                self.choose_account(provider, found, logic::default_account(provider, found));
             }
             self.accounts.set(Some(result));
         });
     }
 
     fn choose_account(self, provider: CloudProvider, found: &CloudAccounts, account: String) {
-        if provider == CloudProvider::Eks {
-            // A profile's own region, else the default credentials' one.
-            let region = found.accounts.iter().find(|a| a.id == account).and_then(|a| a.region.clone()).or_else(|| found.region.clone());
-            if let Some(region) = region {
-                self.region.set(region);
-            }
+        if let Some(region) = logic::account_region(provider, found, &account) {
+            self.region.set(region);
         }
         self.account.set(account);
         self.load_clusters(provider);
@@ -235,11 +157,7 @@ impl Cloud {
         self.picked.set(None);
         let account = self.account.get_untracked();
         let region = self.region.get_untracked();
-        let ready = match provider {
-            CloudProvider::Eks => !region.trim().is_empty(),
-            _ => !account.is_empty(),
-        };
-        if !ready {
+        if !logic::ready_to_list(provider, &account, &region) {
             self.clusters.set(Some(Ok(vec![])));
             return;
         }
@@ -248,8 +166,8 @@ impl Cloud {
         spawn_local(async move {
             let result = invoke::<_, Vec<CloudCluster>>("cloud_clusters", &Args { provider, account, region }).await;
             if self.asked.still(asked) {
-                if let Ok([only]) = result.as_deref() {
-                    self.picked.set(Some(only.clone()));
+                if let Some(only) = logic::only_cluster(&result) {
+                    self.picked.set(Some(only));
                 }
                 self.clusters.set(Some(result));
             }
@@ -303,7 +221,7 @@ pub fn AddClusterDialog(store: Store) -> impl IntoView {
         store.add_cluster_open.set(false);
     };
     let pick_source = move |s: Source| {
-        if source.get_untracked() == s && (s.is_none() || cloud.accounts.with_untracked(Option::is_some)) {
+        if logic::same_source(source.get_untracked(), s, cloud.accounts.with_untracked(Option::is_some)) {
             return;
         }
         error.set(None);
@@ -313,11 +231,7 @@ pub fn AddClusterDialog(store: Store) -> impl IntoView {
             None => cloud.clear(),
         }
     };
-    let problem = move || match source.get() {
-        None => manual.cluster(false).problem(),
-        Some(_) if cloud.picked.with(Option::is_none) => Some("Pick a cluster."),
-        Some(_) => None,
-    };
+    let problem = move || logic::problem(source.get(), &|| manual.cluster(false).problem(), cloud.picked.with(Option::is_some));
     let ok = move || problem().is_none() && !busy.get();
     // Done: every window lists it (the backend tells them); this one connects.
     let added = move |added: AddedCluster| {
@@ -434,18 +348,14 @@ pub fn AddClusterDialog(store: Store) -> impl IntoView {
                     </p>
                     // Only the typed-in form says what's missing, once something's typed.
                     {move || {
-                        let show = source.get().is_none() && manual.touched() && !busy.get();
+                        let show = logic::shows_problem(source.get(), manual.touched(), busy.get());
                         show.then(problem).flatten().map(|h| view! { <p class="warn-text">{h}</p> })
                     }}
                     {move || error.get().map(|e| view! { <pre class="warn add-cluster-error">{e}</pre> })}
                     <div class="modal-actions">
                         <button prop:disabled=move || busy.get() on:click=move |_| close()>"Cancel"</button>
                         <button class="primary" prop:disabled=move || !ok() on:click=move |_| add()>
-                            {move || match (busy.get(), source.get()) {
-                                (true, Some(p)) => format!("Running {}…", cli_name(p)),
-                                (true, None) => "Adding…".to_owned(),
-                                (false, _) => "Add".to_owned(),
-                            }}
+                            {move || logic::add_label(busy.get(), source.get())}
                         </button>
                     </div>
                 </Modal>
@@ -517,27 +427,16 @@ fn PemField(label: &'static str, value: RwSignal<String>, hint: &'static str, #[
 
 #[component]
 fn ManualForm(form: Manual, existing: RwSignal<Vec<ManagedContext>>, #[prop(into)] busy: Signal<bool>) -> impl IntoView {
-    let auths: [(&str, &str); 4] = [("token", "Bearer token"), ("cert", "Client certificate"), ("exec", "Exec plugin"), ("none", "None")];
     let same_server = move || {
         let server = form.server.get();
-        if server_key(&server).is_empty() {
-            return vec![];
-        }
-        existing.with(|e| already_in(e, &server, ""))
+        existing.with(|e| logic::same_server(e, &server))
     };
     view! {
         <div class="form-grid">
             <Field label="Context name" value=form.name placeholder="e.g. lab" busy=busy />
             <Field label="API server" value=form.server placeholder="https://10.0.0.1:6443" mono=true busy=busy />
         </div>
-        {move || {
-            let names = same_server();
-            (!names.is_empty()).then(|| view! {
-                <p class="already-in small">
-                    {format!("This server is already in your kubeconfig as {}.", quoted_names(&names))}
-                </p>
-            })
-        }}
+        {move || logic::server_already_text(&same_server()).map(|text| view! { <p class="already-in small">{text}</p> })}
         <PemField label="CA certificate" value=form.ca busy=busy
             hint="Paste the PEM (-----BEGIN CERTIFICATE-----…) or choose a file. Empty: the system's CAs." />
         <label class="check">
@@ -549,10 +448,9 @@ fn ManualForm(form: Manual, existing: RwSignal<Vec<ManagedContext>>, #[prop(into
             <span class="form-label">"Authentication"</span>
             <select class="rollback-select" prop:disabled=move || busy.get()
                 on:change=move |ev| {
-                    let v = event_target_value(&ev);
-                    form.auth.set(auths.iter().find(|(k, _)| *k == v).map_or("token", |(k, _)| *k));
+                    form.auth.set(logic::auth_choice(&event_target_value(&ev)));
                 }>
-                {auths.into_iter().map(|(k, label)| view! { <option value=k selected=move || form.auth.get() == k>{label}</option> }).collect_view()}
+                {AUTHS.into_iter().map(|(k, label)| view! { <option value=k selected=move || form.auth.get() == k>{label}</option> }).collect_view()}
             </select>
         </div>
         {move || match form.auth.get() {
@@ -583,7 +481,6 @@ fn ManualForm(form: Manual, existing: RwSignal<Vec<ManagedContext>>, #[prop(into
 
 #[component]
 fn CloudForm(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<ManagedContext>>, #[prop(into)] busy: Signal<bool>) -> impl IntoView {
-    let cli = cli_name(provider);
     let on_account = move |ev: leptos::ev::Event| {
         let id = event_target_value(&ev);
         if let Some(Ok(found)) = cloud.accounts.get_untracked() {
@@ -595,7 +492,7 @@ fn CloudForm(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Manag
         cloud.load_clusters(provider);
     };
     let accounts = move || match cloud.accounts.get() {
-        None => view! { <p class="muted">{format!("Asking {cli}…")}</p> }.into_any(),
+        None => view! { <p class="muted">{logic::asking_text(provider)}</p> }.into_any(),
         Some(Err(e)) => view! {
             <pre class="warn add-cluster-error">{e}</pre>
             <button class="btn small" on:click=move |_| cloud.load_accounts(provider)>"Try again"</button>
@@ -615,11 +512,11 @@ fn CloudForm(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Manag
                 CloudProvider::Eks => Some(view! { <option value="" selected=move || cloud.account.get().is_empty()>"Default credentials"</option> }),
                 _ => None,
             };
-            let empty = found.accounts.is_empty() && provider != CloudProvider::Eks;
+            let empty = logic::no_accounts(provider, &found);
             view! {
                 <div class="form-grid">
                     <div class="form-field">
-                        <span class="form-label">{account_label(provider)}</span>
+                        <span class="form-label">{logic::account_label(provider)}</span>
                         <select class="rollback-select" prop:disabled=move || busy.get() || empty on:change=on_account>
                             {none}
                             {options}
@@ -636,26 +533,17 @@ fn CloudForm(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Manag
                         </label>
                     })}
                 </div>
-                {empty.then(|| view! { <p class="warn-text">{format!("{cli} lists no {}s for this sign-in.", account_label(provider).to_lowercase())}</p> })}
+                {empty.then(|| view! { <p class="warn-text">{logic::no_accounts_text(provider)}</p> })}
                 <ClusterList provider=provider cloud=cloud existing=existing busy=busy />
             }
             .into_any()
         }
     };
-    let placeholder = move || match (provider, cloud.picked.get()) {
-        (_, None) => "as the CLI names it".to_owned(),
-        (CloudProvider::Gke, Some(c)) => format!("gke_{}_{}_{}", cloud.account.get(), c.location, c.name),
-        (CloudProvider::Eks, Some(c)) => format!("the cluster's ARN (…:cluster/{})", c.name),
-        (CloudProvider::Aks, Some(c)) => c.name,
-    };
+    let placeholder = move || logic::alias_placeholder(provider, &cloud.account.get(), cloud.picked.get().as_ref());
     view! {
         <p class="muted small">
-            {format!("Uses your {cli} sign-in. The context it writes runs ")}
-            <span class="mono">{match provider {
-                CloudProvider::Gke => "gke-gcloud-auth-plugin",
-                CloudProvider::Eks => "aws eks get-token",
-                CloudProvider::Aks => "kubelogin",
-            }}</span>
+            {logic::sign_in_text(provider)}
+            <span class="mono">{logic::credential_command(provider)}</span>
             " for credentials, in kubectl too."
         </p>
         {accounts}
@@ -671,7 +559,7 @@ fn CloudForm(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Manag
 #[component]
 fn ClusterList(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<ManagedContext>>, #[prop(into)] busy: Signal<bool>) -> impl IntoView {
     let refresh = move |_| cloud.load_clusters(provider);
-    let where_label = if provider == CloudProvider::Aks { "Region · group" } else { "Location" };
+    let where_label = logic::where_label(provider);
     move || match cloud.clusters.get() {
         None => view! { <p class="muted">"Listing clusters…"</p> }.into_any(),
         Some(Err(e)) => view! {
@@ -680,7 +568,7 @@ fn ClusterList(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Man
         }
         .into_any(),
         Some(Ok(list)) if list.is_empty() => {
-            let why = if provider == CloudProvider::Eks && cloud.region.get().trim().is_empty() { "Choose a region." } else { "No clusters here." };
+            let why = logic::no_clusters_text(provider, &cloud.region.get());
             view! { <p class="muted cloud-empty">{why}</p> }.into_any()
         }
         Some(Ok(list)) => {
@@ -690,9 +578,9 @@ fn ClusterList(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Man
                     let row = c.clone();
                     let mine = c.clone();
                     let on = Memo::new(move |_| cloud.picked.with(|p| p.as_ref() == Some(&mine)));
-                    let place = if c.group.is_empty() { c.location.clone() } else { format!("{} · {}", c.location, c.group) };
+                    let place = logic::place(&c);
                     let (server, entry) = (c.server.clone(), c.entry.clone());
-                    let added = move || existing.with(|e| !already_in(e, &server, &entry).is_empty());
+                    let added = move || existing.with(|e| !logic::already_in(e, &server, &entry).is_empty());
                     view! {
                         <tr class="cloud-row" class:selected=on on:click=move |_| if !busy.get_untracked() { cloud.picked.set(Some(row.clone())) }>
                             <td><input type="radio" name="cloud-cluster" prop:checked=on prop:disabled=move || busy.get() /></td>
@@ -716,15 +604,12 @@ fn ClusterList(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Man
                 </div>
                 // The picked cluster's contexts, if it's in the kubeconfig already.
                 {move || {
-                    let names = cloud.picked.with(|p| p.as_ref().map(|c| existing.with(|e| already_in(e, &c.server, &c.entry))).unwrap_or_default());
-                    (!names.is_empty()).then(|| {
-                        let what = if names.len() == 1 { "context" } else { "contexts" };
-                        view! {
-                            <p class="already-in small">
-                                {format!("This cluster is already in your kubeconfig as {what} {}. ", quoted_names(&names))}
-                                "You only need to add it again if its credentials have changed, or to give it another context name."
-                            </p>
-                        }
+                    let names = cloud.picked.with(|p| p.as_ref().map(|c| existing.with(|e| logic::already_in(e, &c.server, &c.entry))).unwrap_or_default());
+                    logic::cluster_already_text(&names).map(|text| view! {
+                        <p class="already-in small">
+                            {text}
+                            "You only need to add it again if its credentials have changed, or to give it another context name."
+                        </p>
                     })
                 }}
                 <button class="btn small" prop:disabled=move || busy.get() on:click=refresh>"Refresh"</button>
@@ -733,7 +618,3 @@ fn ClusterList(provider: CloudProvider, cloud: Cloud, existing: RwSignal<Vec<Man
         }
     }
 }
-
-#[cfg(test)]
-#[path = "add_cluster_tests.rs"]
-mod tests_unit;

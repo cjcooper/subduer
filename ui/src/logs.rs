@@ -6,23 +6,15 @@ use std::collections::VecDeque;
 use leptos::html::Div;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
 use subduer_types::{LogBatch, LogLine, LogSession, LogTarget};
 
+use crate::logic::logs::{self as logic, OpenArgs, Row, StartArgs, label_in};
 use crate::tauri::{invoke, listen};
-
-/// Lines kept per window; older ones are dropped.
-const MAX_LINES: usize = 10_000;
-const MAX_NOTICES: usize = 20;
 
 /// Asks the backend to open (or focus) a logs window for `target`.
 pub fn open(target: LogTarget, on_error: impl Fn(String) + 'static) {
-    #[derive(Serialize)]
-    struct Args {
-        target: LogTarget,
-    }
     spawn_local(async move {
-        if let Err(e) = invoke::<_, ()>("open_logs", &Args { target }).await {
+        if let Err(e) = invoke::<_, ()>("open_logs", &OpenArgs { target }).await {
             on_error(e);
         }
     });
@@ -32,22 +24,6 @@ pub fn open(target: LogTarget, on_error: impl Fn(String) + 'static) {
 pub fn label_from_url() -> Option<String> {
     let search = window().location().search().ok()?;
     label_in(&search)
-}
-
-/// The `logs` parameter of a URL's query string (`?a=b&logs=x`).
-fn label_in(search: &str) -> Option<String> {
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("logs="))
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Row {
-    id: u64,
-    line: LogLine,
 }
 
 #[component]
@@ -68,17 +44,10 @@ pub fn LogsApp(label: String) -> impl IntoView {
         notices.set(vec![]);
         follow.set(true);
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                previous: bool,
-            }
-            let result = invoke::<_, LogSession>("logs_start", &Args { previous: previous.get_untracked() }).await;
+            let result = invoke::<_, LogSession>("logs_start", &StartArgs { previous: previous.get_untracked() }).await;
             // The target's filter applies when the window opens, not on every restart.
-            if let Ok(s) = &result
-                && let Some(f) = &s.target.filter
-                && session.with_untracked(Option::is_none)
-            {
-                filter.set(f.clone());
+            if let Some(f) = logic::start_filter(&result, session.with_untracked(Option::is_some)) {
+                filter.set(f);
             }
             session.set(Some(result));
         });
@@ -88,42 +57,17 @@ pub fn LogsApp(label: String) -> impl IntoView {
     spawn_local(async move {
         listen::<LogBatch>(&label, move |batch| {
             if !batch.lines.is_empty() {
-                lines.update(|l| {
-                    for line in batch.lines {
-                        let id = next_id.get_value();
-                        next_id.set_value(id + 1);
-                        l.push_back(Row { id, line });
-                    }
-                    while l.len() > MAX_LINES {
-                        l.pop_front();
-                    }
-                });
+                lines.update(|l| next_id.set_value(logic::push_lines(l, next_id.get_value(), batch.lines)));
             }
             if !batch.notices.is_empty() {
-                notices.update(|n| {
-                    n.extend(batch.notices);
-                    let excess = n.len().saturating_sub(MAX_NOTICES);
-                    n.drain(..excess);
-                });
+                notices.update(|n| logic::push_notices(n, batch.notices));
             }
         })
         .await;
         start();
     });
 
-    let visible = Memo::new(move |_| {
-        let needle = filter.get().to_lowercase();
-        lines.with(|l| {
-            l.iter()
-                .filter(|r| {
-                    needle.is_empty()
-                        || r.line.text.to_lowercase().contains(&needle)
-                        || r.line.source.as_ref().is_some_and(|s| s.to_lowercase().contains(&needle))
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-    });
+    let visible = Memo::new(move |_| filter.with(|f| lines.with(|l| logic::visible(l, f))));
 
     // Keep the newest line in view while following.
     Effect::new(move |_| {
@@ -139,7 +83,7 @@ pub fn LogsApp(label: String) -> impl IntoView {
     // Scrolling up pauses following; scrolling back to the bottom resumes it.
     let on_scroll = move |_| {
         if let Some(el) = scroller.get_untracked() {
-            let at_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 40;
+            let at_bottom = logic::at_bottom(el.scroll_height(), el.scroll_top(), el.client_height());
             if follow.get_untracked() != at_bottom {
                 follow.set(at_bottom);
             }
@@ -152,15 +96,8 @@ pub fn LogsApp(label: String) -> impl IntoView {
         }
     };
 
-    let heading = move || match session.get() {
-        None => "Connecting…".to_owned(),
-        Some(Ok(s)) => s.title,
-        Some(Err(e)) => e,
-    };
-    let count = move || {
-        let (shown, total) = (visible.with(Vec::len), lines.with(VecDeque::len));
-        if shown == total { format!("{total} lines") } else { format!("{shown} of {total} lines") }
-    };
+    let heading = move || logic::heading(session.get());
+    let count = move || logic::count(visible.with(Vec::len), lines.with(VecDeque::len));
     let toggle = |signal: RwSignal<bool>, label: &'static str, title: &'static str| {
         view! {
             <button
@@ -234,32 +171,14 @@ fn LogRow(line: LogLine, show_time: RwSignal<bool>) -> impl IntoView {
     }
 }
 
-/// An RFC 3339 UTC time cut to milliseconds, which JS dates can parse.
-fn millis(ts: &str) -> String {
-    match ts.find('.') {
-        Some(dot) => format!("{}Z", &ts[..(dot + 4).min(ts.len() - 1)]),
-        None => ts.to_owned(),
-    }
-}
-
 /// `HH:MM:SS.mmm` in local time, plus the original RFC 3339 for the tooltip.
 fn local_time(ts: &str) -> (String, String) {
     // JS dates take milliseconds at most; the kubelet sends nanoseconds.
-    let trimmed = millis(ts);
+    let trimmed = logic::millis(ts);
     let d = js_sys::Date::new(&trimmed.into());
     if d.get_time().is_nan() {
         return (ts.to_owned(), ts.to_owned());
     }
-    let local = format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        d.get_hours(),
-        d.get_minutes(),
-        d.get_seconds(),
-        d.get_milliseconds()
-    );
+    let local = logic::clock(d.get_hours(), d.get_minutes(), d.get_seconds(), d.get_milliseconds());
     (local, ts.to_owned())
 }
-
-#[cfg(test)]
-#[path = "logs_tests.rs"]
-mod tests_unit;

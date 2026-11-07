@@ -4,6 +4,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
 
+use crate::logic::tauri as logic;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
@@ -23,8 +25,8 @@ pub async fn invoke<A: Serialize, R: DeserializeOwned>(cmd: &str, args: &A) -> R
         .map_err(|e| e.to_string())?;
     let value = invoke_raw(cmd, args)
         .await
-        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
-    serde_wasm_bindgen::from_value(value).map_err(|e| format!("{cmd}: bad response: {e}"))
+        .map_err(|e| logic::call_error(e.as_string(), &|| format!("{e:?}")))?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| logic::bad_response(cmd, e))
 }
 
 /// Calls a backend command with a binary body (sent as is, not as JSON) and
@@ -42,8 +44,8 @@ pub async fn invoke_bytes<R: DeserializeOwned>(
     let _ = js_sys::Reflect::set(&options, &"headers".into(), &header_obj);
     let value = invoke_with_options(cmd, body.into(), options.into())
         .await
-        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
-    serde_wasm_bindgen::from_value(value).map_err(|e| format!("{cmd}: bad response: {e}"))
+        .map_err(|e| logic::call_error(e.as_string(), &|| format!("{e:?}")))?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| logic::bad_response(cmd, e))
 }
 
 /// This window's label (`main`, `main-2`, `logs-3`, …), if Tauri says.
@@ -64,7 +66,7 @@ pub async fn listen<T: DeserializeOwned + 'static>(event: &str, mut handler: imp
         let payload = js_sys::Reflect::get(&raw, &JsValue::from_str("payload")).unwrap_or(JsValue::NULL);
         match serde_wasm_bindgen::from_value(payload) {
             Ok(value) => handler(value),
-            Err(e) => web_log(&format!("bad {name} payload: {e}")),
+            Err(e) => web_log(&logic::bad_payload(&name, e)),
         }
     });
     let options = js_sys::Object::new();

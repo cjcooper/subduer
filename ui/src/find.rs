@@ -18,62 +18,20 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
 use crate::app::Store;
+use crate::logic::find::{self as logic, count_text, matches_in, step};
 
 /// Elements whose text is never searched.
 const SKIP: &str = "[data-find-skip], svg, script, style, button.btn, button.close, textarea, input, select, .find-bar, .secret-mask";
 const ALL: &str = "subduer-find";
 const CURRENT: &str = "subduer-find-current";
 
-/// The UTF-16 ranges (as the DOM counts) where `query` occurs in `text`,
-/// ignoring ASCII case. Overlapping matches aren't counted twice.
-pub(crate) fn matches_in(text: &str, query: &str) -> Vec<(u32, u32)> {
-    let query = query.trim();
-    if query.is_empty() {
-        return vec![];
-    }
-    let (hay, needle) = (text.to_ascii_lowercase(), query.to_ascii_lowercase());
-    let utf16 = |byte: usize| text[..byte].encode_utf16().count() as u32;
-    let mut out = Vec::new();
-    let mut from = 0;
-    while let Some(at) = hay[from..].find(&needle) {
-        let start = from + at;
-        let end = start + needle.len();
-        out.push((utf16(start), utf16(end)));
-        from = end;
-    }
-    out
-}
-
-/// "3 of 12", "No matches" or nothing before typing.
-pub(crate) fn count_text(current: Option<usize>, total: usize, query: &str) -> String {
-    match (query.trim().is_empty(), total, current) {
-        (true, _, _) => String::new(),
-        (false, 0, _) => "No matches".into(),
-        (false, n, Some(i)) => format!("{} of {n}", i + 1),
-        (false, n, None) => format!("{n} matches"),
-    }
-}
-
-/// The next match index going forward or back, wrapping around.
-pub(crate) fn step(current: Option<usize>, total: usize, back: bool) -> Option<usize> {
-    if total == 0 {
-        return None;
-    }
-    Some(match (current, back) {
-        (None, false) => 0,
-        (None, true) => total - 1,
-        (Some(i), false) => (i + 1) % total,
-        (Some(i), true) => (i + total - 1) % total,
-    })
-}
-
 /// Whether ⌘F (Mac) or Ctrl+F opens find: the shortcut shown in tooltips.
 pub(crate) fn shortcut_label() -> &'static str {
-    if crate::prefs::desktop() == crate::prefs::Desktop::Mac { "⌘F" } else { "Ctrl+F" }
+    logic::shortcut_for(crate::prefs::desktop())
 }
 
 fn is_find_key(ev: &web_sys::KeyboardEvent, key: &str) -> bool {
-    (ev.meta_key() || ev.ctrl_key()) && !ev.alt_key() && ev.key().eq_ignore_ascii_case(key)
+    logic::is_find_key(ev.meta_key(), ev.ctrl_key(), ev.alt_key(), &ev.key(), key)
 }
 
 /// Every match under `root` as DOM ranges, in document order.
@@ -148,17 +106,15 @@ fn reveal(range: &web_sys::Range) {
     let mut el = node.parent_element();
     while let Some(e) = el {
         let style = leptos::prelude::window().get_computed_style(&e).ok().flatten();
-        let scrolls = |prop: &str| {
-            style.as_ref().and_then(|s| s.get_property_value(prop).ok()).is_some_and(|v| v == "auto" || v == "scroll")
-        };
+        let scrolls = |prop: &str| style.as_ref().and_then(|s| s.get_property_value(prop).ok()).is_some_and(|v| logic::scrolls(&v));
         let r = range.get_bounding_client_rect();
         let b = e.get_bounding_client_rect();
         if scrolls("overflow-y") && e.scroll_height() > e.client_height() {
-            let dy = r.top() - b.top() - (b.height() - r.height()) / 2.0;
+            let dy = logic::centre_offset(r.top(), r.height(), b.top(), b.height());
             e.set_scroll_top(e.scroll_top() + dy as i32);
         }
-        if scrolls("overflow-x") && e.scroll_width() > e.client_width() && (r.left() < b.left() || r.right() > b.right()) {
-            let dx = r.left() - b.left() - (b.width() - r.width()) / 2.0;
+        if scrolls("overflow-x") && e.scroll_width() > e.client_width() && logic::outside(r.left(), r.right(), b.left(), b.right()) {
+            let dx = logic::centre_offset(r.left(), r.width(), b.left(), b.width());
             e.set_scroll_left(e.scroll_left() + dx as i32);
         }
         el = e.parent_element();
@@ -195,7 +151,7 @@ pub fn FindBar(store: Store, root: &'static str) -> impl IntoView {
         let found = if store.find_open.get_untracked() { root_el().map(|r| find_ranges(&r, &query)).unwrap_or_default() } else { vec![] };
         paint(ALL, &found);
         let n = found.len();
-        let at = current.get_untracked().map(|i| i.min(n.saturating_sub(1))).filter(|_| n > 0);
+        let at = logic::keep_current(current.get_untracked(), n);
         mark_current(at.and_then(|i| found.get(i)));
         ranges.set_value(found);
         total.set(n);
@@ -215,7 +171,7 @@ pub fn FindBar(store: Store, root: &'static str) -> impl IntoView {
             }
             mark_current(Some(&range));
             // An opened section lays out first.
-            let delay = if hidden { 50 } else { 0 };
+            let delay = logic::reveal_delay_ms(hidden);
             set_timeout(move || reveal(&range), std::time::Duration::from_millis(delay));
         }
     };
@@ -226,7 +182,7 @@ pub fn FindBar(store: Store, root: &'static str) -> impl IntoView {
         let _ = store.find_open.get();
         current.set(None);
         // After hidden section bodies render.
-        set_timeout(move || if store.find_open.get_untracked() && !store.find_query.with_untracked(|q| q.trim().is_empty()) { go(false) } else { rescan() }, std::time::Duration::from_millis(0));
+        set_timeout(move || if store.find_query.with_untracked(|q| logic::goes_to_first(store.find_open.get_untracked(), q)) { go(false) } else { rescan() }, std::time::Duration::from_millis(0));
     });
 
     // The panel changing (refreshes, tabs, sections) finds again, a little later.
@@ -321,7 +277,7 @@ pub fn FindBar(store: Store, root: &'static str) -> impl IntoView {
 /// The header button that opens find.
 #[component]
 pub fn FindButton(store: Store) -> impl IntoView {
-    let title = format!("Find in this panel ({})", shortcut_label());
+    let title = logic::button_title(shortcut_label());
     view! {
         <button
             class="btn small find-open"
@@ -336,7 +292,3 @@ pub fn FindButton(store: Store) -> impl IntoView {
         </button>
     }
 }
-
-#[cfg(test)]
-#[path = "find_tests.rs"]
-mod tests_unit;

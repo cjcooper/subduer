@@ -4,11 +4,13 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use subduer_types::{Category, ClusterInfo, ClusterOverview, ForwardInfo, PodDetails, PodHistory, Column, ColumnKind, ContextInfo, ContextList, KindInfo, KindRef, ResourceRow, ResourceTable, events};
+use subduer_types::{Category, ClusterInfo, ClusterOverview, ForwardInfo, PodDetails, PodHistory, ColumnKind, ContextInfo, ContextList, KindRef, ResourceRow, ResourceTable, events};
 
 use subduer_types::containers::{self, State};
 
 use crate::columns::{ColumnWidths, ResizableTh};
+use crate::logic::app::{self as logic, OpenPlan, Page, column_class, visible};
+pub(crate) use crate::logic::app::{age_since, format_span};
 use crate::modal::Modal;
 use crate::tauri::{NoArgs, invoke, listen};
 
@@ -29,9 +31,8 @@ const UNSAVED_CLOSE: &str = "unsaved-close";
 
 /// How often a connected context is checked, so a dropped VPN is noticed
 /// even when nothing else is failing (a watch on a dead connection just waits).
+/// [`logic::MAX_PROBE_FAILURES`] failures in a row count as disconnected.
 const PROBE_EVERY: Duration = Duration::from_secs(10);
-/// Failed checks in a row before the context counts as disconnected.
-const MAX_PROBE_FAILURES: u32 = 3;
 
 /// Seconds between background refreshes of the selected pod's details.
 const POD_REFRESH: Duration = Duration::from_secs(15);
@@ -298,18 +299,17 @@ impl Store {
     }
 
     pub(crate) fn current_context(&self) -> Option<ContextInfo> {
-        let name = self.context.get()?;
-        self.contexts.get().into_iter().find(|c| c.name == name)
+        self.context.with(|name| self.contexts.with(|cs| logic::context_named(cs, name.as_deref())))
     }
 
     pub(crate) fn current_context_untracked(&self) -> Option<ContextInfo> {
-        let name = self.context.get_untracked()?;
-        self.contexts.get_untracked().into_iter().find(|c| c.name == name)
+        self.context.with_untracked(|name| self.contexts.with_untracked(|cs| logic::context_named(cs, name.as_deref())))
     }
 
     /// The Node kind is shown with the Cluster page's node table.
     pub(crate) fn node_page(&self) -> bool {
-        !self.overview_open.get() && self.kind.with(|k| k.as_ref().is_some_and(|k| k.key() == "core/Node"))
+        let overview_open = self.overview_open.get();
+        self.kind.with(|k| logic::is_node_page(overview_open, k.as_ref()))
     }
 
     /// Whether the visible page is built from `cluster_overview` data.
@@ -323,7 +323,7 @@ impl Store {
             // kubectl): connect to kubectl's current one, else the first.
             Ok(list) if self.no_clusters.get_untracked() && !list.contexts.is_empty() => {
                 self.no_clusters.set(false);
-                let ctx = list.current.clone().filter(|c| list.contexts.iter().any(|x| x.name == *c)).unwrap_or_else(|| list.contexts[0].name.clone());
+                let ctx = logic::first_context(&list).unwrap_or_default();
                 self.contexts.set(list.contexts);
                 spawn_local(self.connect(ctx));
             }
@@ -343,7 +343,7 @@ impl Store {
             context: &'a str,
         }
         // Connecting again after losing the connection keeps the namespace.
-        let resume = self.disconnected.get_untracked().is_some() && self.context.get_untracked().as_deref() == Some(&context);
+        let resume = logic::resumes(self.disconnected.with_untracked(Option::is_some), self.context.get_untracked().as_deref(), &context);
         self.connecting.set(true);
         self.generation.update(|g| *g += 1);
         let generation = self.generation.get_untracked();
@@ -368,19 +368,10 @@ impl Store {
         match result {
             Ok(info) => {
                 let current = self.namespace.get_untracked();
-                let kept = resume && current.as_ref().is_none_or(|ns| info.namespaces.contains(ns));
-                // Otherwise start in the context's default namespace when it has one.
-                let default_ns = self
-                    .contexts
-                    .get_untracked()
-                    .into_iter()
-                    .find(|c| c.name == context)
-                    .and_then(|c| c.namespace)
-                    .filter(|ns| info.namespaces.contains(ns));
-                self.namespace.set(if kept { current } else { default_ns });
-                // Keep the selected kind if this cluster has it, else show Pods.
-                let keep = self.kind.get_untracked().and_then(|k| find_kind(&info.kinds, &k.key()));
-                self.kind.set(keep.or_else(|| find_kind(&info.kinds, "core/Pod")));
+                let namespace = self.contexts.with_untracked(|cs| logic::namespace_after_connect(resume, current, cs, &context, &info.namespaces));
+                self.namespace.set(namespace);
+                let kind = self.kind.with_untracked(|k| logic::kind_after_connect(k.as_ref(), &info.kinds));
+                self.kind.set(kind);
                 self.cluster.set(Some(info));
             }
             Err(e) => self.disconnected.set(Some(e)),
@@ -404,10 +395,10 @@ impl Store {
         });
     }
 
-    /// The background check: [`MAX_PROBE_FAILURES`] failures in a row (a
-    /// dropped VPN, say) count as a lost connection.
+    /// The background check: [`logic::MAX_PROBE_FAILURES`] failures in a row
+    /// (a dropped VPN, say) count as a lost connection.
     fn probe(self) {
-        if self.probing.get_untracked() || self.connecting.get_untracked() || self.cluster.with_untracked(Option::is_none) {
+        if !logic::should_probe(self.probing.get_untracked(), self.connecting.get_untracked(), self.cluster.with_untracked(Option::is_some)) {
             return;
         }
         self.probing.set(true);
@@ -422,7 +413,7 @@ impl Store {
                 Ok(()) => self.probe_failures.set(0),
                 Err(e) => {
                     self.probe_failures.update(|n| *n += 1);
-                    if self.probe_failures.get_untracked() >= MAX_PROBE_FAILURES && self.cluster.with_untracked(Option::is_some) {
+                    if logic::probe_gives_up(self.probe_failures.get_untracked(), self.cluster.with_untracked(Option::is_some)) {
                         self.lose(e);
                     }
                 }
@@ -463,23 +454,18 @@ impl Store {
     }
 }
 
-fn find_kind(kinds: &[KindInfo], key: &str) -> Option<KindRef> {
-    kinds.iter().map(|k| &k.kind).find(|k| k.key() == key).cloned()
-}
-
 #[component]
 pub fn App() -> impl IntoView {
     let store = Store::new();
 
     spawn_local(async move {
         listen::<ResourceTable>(events::RESOURCE_TABLE, move |table| {
-            if table.watch_id >= store.min_watch_id.get_untracked() {
+            if logic::takes_table(table.watch_id, store.min_watch_id.get_untracked()) {
                 store.min_watch_id.set(table.watch_id);
                 if table.stopped {
                     store.gave_up();
                 }
-                let pending = store.pending_select.get_untracked();
-                let row = pending.and_then(|id| table.rows.iter().find(|r| r.id == id).cloned());
+                let row = store.pending_select.with_untracked(|id| logic::pending_row(&table, id.as_deref()));
                 store.table.set(Some(table));
                 if let Some(row) = row {
                     store.pending_select.set(None);
@@ -495,10 +481,7 @@ pub fn App() -> impl IntoView {
         // This window's context was deleted outside the app (kubectl, an editor):
         // move to the one the backend picked, as if chosen from the menu.
         listen::<subduer_types::ContextRemoved>(subduer_types::cluster_events::CONTEXT_REMOVED, move |moved| {
-            store.notice.set(Some(format!(
-                "“{}” was removed from your kubeconfig, so this window moved to “{}”.",
-                moved.removed, moved.switch_to
-            )));
+            store.notice.set(Some(logic::removed_notice(&moved)));
             spawn_local(async move {
                 store.refresh_contexts().await;
                 let to = moved.switch_to;
@@ -507,7 +490,7 @@ pub fn App() -> impl IntoView {
         })
         .await;
         listen::<()>(subduer_types::cluster_events::NO_CONTEXTS, move |()| {
-            store.notice.set(Some("Your kubeconfig has no contexts left. Add a cluster to carry on.".into()));
+            store.notice.set(Some(logic::NO_CONTEXTS_NOTICE.into()));
             store.no_contexts();
         })
         .await;
@@ -519,9 +502,7 @@ pub fn App() -> impl IntoView {
         // An edit window saved: refresh what's shown of that object, and the
         // contexts (the edit window may have allowed changes).
         listen::<subduer_types::EditTarget>(subduer_types::edit_events::SAVED, move |target| {
-            let shown = store.selected.with_untracked(|s| {
-                s.as_ref().is_some_and(|s| s.name == target.name && s.namespace == target.namespace)
-            }) && store.kind.with_untracked(|k| k.as_ref() == Some(&target.kind));
+            let shown = store.selected.with_untracked(|s| store.kind.with_untracked(|k| logic::edit_shows(s.as_ref(), k.as_ref(), &target)));
             if shown {
                 load_yaml(store);
                 if selected_has_details(store) {
@@ -618,10 +599,12 @@ pub fn App() -> impl IntoView {
     crate::overview::start_refresh(store);
     set_interval(
         move || {
-            let has_details = store.cluster.with_untracked(Option::is_some)
-                && store.selected.with_untracked(Option::is_some)
-                && selected_has_details(store);
-            if has_details && store.detail_tab.get_untracked() == DetailTab::Details {
+            if logic::refreshes_details(
+                store.cluster.with_untracked(Option::is_some),
+                store.selected.with_untracked(Option::is_some),
+                selected_has_details(store),
+                store.detail_tab.get_untracked() == DetailTab::Details,
+            ) {
                 crate::pod_detail::load(store, true);
             }
         },
@@ -668,18 +651,19 @@ pub fn App() -> impl IntoView {
             <div class="body">
                 <Sidebar store=store />
                 <main class="main">
-                    {move || if store.traces_open.get() {
-                        view! { <crate::trace_review::TracesPage store=store /> }.into_any()
-                    } else if store.forwards_open.get() {
-                        view! { <crate::forward::ForwardsPage store=store /> }.into_any()
-                    } else if store.no_clusters.get() {
-                        view! { <NoClusters /> }.into_any()
-                    } else if store.disconnected.with(Option::is_some) {
-                        view! { <Disconnected store=store /> }.into_any()
-                    } else if store.overview_open.get() {
-                        view! { <crate::overview::Overview store=store /> }.into_any()
-                    } else {
-                        view! { <ResourceView store=store /> }.into_any()
+                    {move || match logic::page(
+                        store.traces_open.get(),
+                        store.forwards_open.get(),
+                        store.no_clusters.get(),
+                        store.disconnected.with(Option::is_some),
+                        store.overview_open.get(),
+                    ) {
+                        Page::Traces => view! { <crate::trace_review::TracesPage store=store /> }.into_any(),
+                        Page::Forwards => view! { <crate::forward::ForwardsPage store=store /> }.into_any(),
+                        Page::NoClusters => view! { <NoClusters /> }.into_any(),
+                        Page::Disconnected => view! { <Disconnected store=store /> }.into_any(),
+                        Page::Overview => view! { <crate::overview::Overview store=store /> }.into_any(),
+                        Page::Resources => view! { <ResourceView store=store /> }.into_any(),
                     }}
                 </main>
                 <DetailPanel store=store />
@@ -735,13 +719,13 @@ fn Disconnected(store: Store) -> impl IntoView {
     };
     view! {
         <div class="disconnected">
-            <h1>{move || format!("Not connected to {}", store.context.get().unwrap_or_default())}</h1>
+            <h1>{move || store.context.with(|c| logic::not_connected_title(c.as_deref()))}</h1>
             <p class="muted">
                 "Stopped trying after repeated failures. If your credentials have expired, sign in again, then Connect."
             </p>
             <pre class="reason">{move || store.disconnected.get()}</pre>
             <button class="btn primary" prop:disabled=move || store.connecting.get() on:click=connect>
-                {move || if store.connecting.get() { "Connecting…" } else { "Connect" }}
+                {move || logic::connect_label(store.connecting.get())}
             </button>
         </div>
     }
@@ -757,7 +741,7 @@ fn TopBar(store: Store) -> impl IntoView {
         select.set_value(&store.namespace.get_untracked().unwrap_or_default());
         guard(store, move || {
             select.set_value(&ns);
-            store.namespace.set((!ns.is_empty()).then_some(ns));
+            store.namespace.set(logic::namespace_choice(ns));
         });
     };
 
@@ -818,12 +802,7 @@ fn LockToggle(store: Store) -> impl IntoView {
 
     view! {
         {move || store.current_context().map(|ctx| {
-            let (class, label, title) = if ctx.unlocked {
-                ("lock unlocked", "Writable", "Changes are allowed. Click to make read-only.")
-            } else {
-                ("lock", "Read-only", "Click to allow changes to this context.")
-            };
-            let class = if ctx.prod_like { format!("{class} prod") } else { class.to_owned() };
+            let (class, label, title) = logic::lock_look(ctx.unlocked, ctx.prod_like);
             view! { <button class=class title=title on:click=toggle><crate::icons::LockIcon open=ctx.unlocked />{label}</button> }
         })}
     }
@@ -839,7 +818,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
             let prod = ctx.prod_like;
             let ok = {
                 let name = name.clone();
-                move || !prod || typed.get().trim() == name
+                move || typed.with(|t| logic::unlock_ok(prod, t, &name))
             };
             let cancel = move || {
                 typed.set(String::new());
@@ -921,15 +900,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
 #[component]
 fn Sidebar(store: Store) -> impl IntoView {
     let in_category = move |category: Category| {
-        let filter = store.kind_filter.get().to_lowercase();
-        // Kinds keep the backend's order within a category.
-        store.cluster.with(|c| {
-            c.iter()
-                .flat_map(|c| &c.kinds)
-                .filter(|k| k.category == category && kind_matches(&k.kind, &filter))
-                .map(|k| k.kind.clone())
-                .collect::<Vec<_>>()
-        })
+        store.kind_filter.with(|filter| store.cluster.with(|c| logic::kinds_in(c.as_ref(), category, filter)))
     };
     let sections = move || {
         store
@@ -952,10 +923,10 @@ fn Sidebar(store: Store) -> impl IntoView {
             />
             <div class="kinds">
                 <div class="top-level-kinds">
-                    <Show when=move || kind_matches_text("Cluster", &store.kind_filter.get().to_lowercase())>
+                    <Show when=move || logic::kind_matches_text("Cluster", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
-                            class:active=move || store.overview_open.get() && !store.forwards_open.get() && !store.traces_open.get()
+                            class:active=move || logic::cluster_active(store.overview_open.get(), store.forwards_open.get(), store.traces_open.get())
                             on:click=move |_| guard(store, move || {
                                 store.forwards_open.set(false);
                                 store.traces_open.set(false);
@@ -963,10 +934,10 @@ fn Sidebar(store: Store) -> impl IntoView {
                             })
                         ><crate::icons::ClusterIcon /><span class="kind-label">"Cluster"</span></button>
                     </Show>
-                    <Show when=move || kind_matches_text("Port Forwards", &store.kind_filter.get().to_lowercase())>
+                    <Show when=move || logic::kind_matches_text("Port Forwards", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
-                            class:active=move || store.forwards_open.get() && !store.traces_open.get()
+                            class:active=move || logic::forwards_active(store.forwards_open.get(), store.traces_open.get())
                             title="Running port-forwards"
                             on:click=move |_| guard(store, move || {
                                 store.selected.set(None);
@@ -982,7 +953,7 @@ fn Sidebar(store: Store) -> impl IntoView {
                             }}
                         </button>
                     </Show>
-                    <Show when=move || kind_matches_text("Traces", &store.kind_filter.get().to_lowercase())>
+                    <Show when=move || logic::kind_matches_text("Traces", &store.kind_filter.get().to_lowercase())>
                         <button
                             class="kind"
                             class:active=move || store.traces_open.get()
@@ -998,22 +969,13 @@ fn Sidebar(store: Store) -> impl IntoView {
                 </div>
                 {move || sections().into_iter().map(|(category, kinds)| {
                     // Searching shows every match, even in collapsed sections.
-                    let open = move || {
-                        !store.kind_filter.with(String::is_empty)
-                            || store.expanded.with(|c| c.contains(&category))
-                    };
-                    let toggle = move |_| store.expanded.update(|c| {
-                        if !c.remove(&category) {
-                            c.insert(category);
-                        }
-                    });
+                    let open = move || store.kind_filter.with(|f| store.expanded.with(|e| logic::section_open(f, e, category)));
+                    let toggle = move |_| store.expanded.update(|c| logic::toggle_section(c, category));
                     let is_dragging = move || store.dragging.get() == Some(category);
-                    let is_target = move || {
-                        store.drop_target.get() == Some(category) && store.dragging.get() != Some(category)
-                    };
+                    let is_target = move || logic::is_drop_target(store.drop_target.get(), store.dragging.get(), category);
                     view! {
                         <div
-                            class=format!("kind-section {}", category_class(category))
+                            class=logic::kind_section_class(category)
                             class:dragging=is_dragging
                             class:drop-target=is_target
                             on:dragover=move |ev: web_sys::DragEvent| {
@@ -1060,35 +1022,13 @@ fn Sidebar(store: Store) -> impl IntoView {
     }
 }
 
-/// The class that tints a sidebar section, e.g. `cat-access-control`.
-pub(crate) fn category_class(category: Category) -> String {
-    format!("cat-{}", category.label().to_lowercase().replace(' ', "-"))
-}
-
-fn kind_matches_text(text: &str, filter: &str) -> bool {
-    filter.is_empty() || text.to_lowercase().contains(filter)
-}
-
-fn kind_matches(k: &KindRef, filter: &str) -> bool {
-    filter.is_empty() || k.kind.to_lowercase().contains(filter) || k.plural.contains(filter) || k.group.contains(filter)
-}
-
 /// Moves `moved` to where `target` is, shifting the sections in between.
 fn move_section(store: Store, moved: Category, target: Category) {
     if moved == target {
         return;
     }
-    store.section_order.update(|order| reorder(order, moved, target));
+    store.section_order.update(|order| logic::reorder(order, moved, target));
     crate::prefs::save_section_order(&store.section_order.get_untracked());
-}
-
-/// Moves `moved` to `target`'s position in `order`; unknown sections leave it as is.
-fn reorder(order: &mut Vec<Category>, moved: Category, target: Category) {
-    let (Some(from), Some(to)) = (order.iter().position(|c| *c == moved), order.iter().position(|c| *c == target)) else {
-        return;
-    };
-    let item = order.remove(from);
-    order.insert(to, item);
 }
 
 fn end_drag(store: Store) {
@@ -1098,13 +1038,13 @@ fn end_drag(store: Store) {
 
 /// Kind buttons for one section. Custom resources get a sub-heading per API group.
 fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl IntoView {
-    let mut last_group: Option<String> = None;
+    let headings = logic::group_headings(category.groups_by_api_group(), &kinds);
     kinds
         .into_iter()
-        .map(|k| {
-            let heading = (category.groups_by_api_group() && last_group.as_deref() != Some(&k.group))
+        .zip(headings)
+        .map(|(k, heading)| {
+            let heading = heading
                 .then(|| {
-                    last_group = Some(k.group.clone());
                     view! {
                         <div class="kind-group-title">
                             <crate::icons::GroupIcon group=k.group.clone() />
@@ -1114,10 +1054,11 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
                 });
             let key = k.key();
             let active = move || {
-                !store.overview_open.get() && !store.forwards_open.get() && !store.traces_open.get() && store.kind.get().is_some_and(|cur| cur.key() == key)
+                let (overview, forwards, traces) = (store.overview_open.get(), store.forwards_open.get(), store.traces_open.get());
+                store.kind.with(|cur| logic::kind_active(overview, forwards, traces, cur.as_ref(), &key))
             };
             let label = k.kind.clone();
-            let title = format!("{} ({})", k.plural, k.api_version());
+            let title = logic::kind_title(&k);
             let icon = view! {
                 <crate::icons::KindIcon kind=k.clone() custom=category.groups_by_api_group() />
             };
@@ -1146,25 +1087,17 @@ fn kind_list(store: Store, category: Category, kinds: Vec<KindRef>) -> impl Into
 fn ResourceView(store: Store) -> impl IntoView {
 
     let rows = move || {
-        let filter = store.row_filter.get().to_lowercase();
+        let filter = store.row_filter.get();
         let Some(table) = store.table.get() else { return vec![] };
-        let mut rows: Vec<ResourceRow> =
-            table.rows.into_iter().filter(|r| filter.is_empty() || r.id.to_lowercase().contains(&filter)).collect();
         let table_id = store.kind.get_untracked().map(|k| k.key()).unwrap_or_default();
-        let headers: Vec<&str> = table.columns.iter().map(|c| c.header.as_str()).collect();
-        let by = store.sorts.by(&table_id, &headers);
-        crate::sort::sort(&mut rows, by, |r, i| cell_key(table.columns[i].kind, r.cells.get(i).map_or("", String::as_str)));
-        rows
+        let by = store.sorts.by(&table_id, &logic::column_headers(&table.columns));
+        logic::table_rows(table, &filter, by, crate::sort::js_date)
     };
 
     let header = move || {
         let kind = store.kind.get();
         let title = kind.as_ref().map(|k| k.kind.clone()).unwrap_or_default();
-        let scope = match (&kind, store.namespace.get()) {
-            (Some(k), _) if !k.namespaced => "cluster-scoped".to_owned(),
-            (_, Some(ns)) => format!("in {ns}"),
-            _ => "in all namespaces".to_owned(),
-        };
+        let scope = store.namespace.with(|ns| logic::scope_text(kind.as_ref(), ns.as_deref()));
         let count = if store.node_page() {
             store.overview.with(|o| o.as_ref().map(|o| o.nodes.len()))
         } else {
@@ -1191,7 +1124,7 @@ fn ResourceView(store: Store) -> impl IntoView {
                 on:input=move |ev| store.row_filter.set(event_target_value(&ev))
             />
         </div>
-        {move || store.table.get().and_then(|t| Some((t.error?, t.stopped))).map(|(e, stopped)| if stopped {
+        {move || store.table.with(|t| t.as_ref().and_then(logic::watch_problem)).map(|(e, stopped)| if stopped {
             view! {
                 <div class="warn">
                     "Stopped after repeated failures: " {e}
@@ -1213,7 +1146,7 @@ fn ResourceView(store: Store) -> impl IntoView {
                 Some(table) => {
                     let table_id = store.kind.get_untracked().map(|k| k.key()).unwrap_or_default();
                     let single_ns = store.namespace.get().is_some();
-                    let headers: Vec<String> = visible(&table.columns, single_ns).map(|(_, c)| c.header.clone()).collect();
+                    let headers = logic::visible_headers(&table.columns, single_ns);
                     let style = {
                         let table_id = table_id.clone();
                         move || store.col_widths.table_style(&table_id, &headers)
@@ -1223,7 +1156,7 @@ fn ResourceView(store: Store) -> impl IntoView {
                         <thead><tr>
                             {visible(&table.columns, single_ns)
                                 .map(|(_, c)| {
-                                    let title = if c.kind == ColumnKind::Containers { CONTAINER_LEGEND } else { "" };
+                                    let title = logic::column_title(c.kind);
                                     view! {
                                         <ResizableTh
                                             widths=store.col_widths
@@ -1269,45 +1202,6 @@ fn ResourceView(store: Store) -> impl IntoView {
     }
 }
 
-/// Columns to display with their cell index. The namespace column is
-/// redundant while a single namespace is selected.
-fn visible(columns: &[Column], single_namespace: bool) -> impl Iterator<Item = (usize, &Column)> {
-    columns
-        .iter()
-        .enumerate()
-        .filter(move |(_, c)| !(single_namespace && c.kind == ColumnKind::Namespace))
-}
-
-/// How a cell sorts: ages youngest first, numbers by value, containers with
-/// failures first and then by the share running, the rest as text.
-pub(crate) fn cell_key(kind: ColumnKind, value: &str) -> crate::sort::Key {
-    use crate::sort::Key;
-    match kind {
-        ColumnKind::Age => Key::age(value),
-        ColumnKind::Number => Key::quantity(value),
-        ColumnKind::Containers => {
-            let all = containers::decode(value);
-            if all.is_empty() {
-                return Key::Missing;
-            }
-            let running = all.iter().filter(|c| c.state == containers::State::Running).count();
-            let failed = all.iter().any(|c| c.state == containers::State::Failed);
-            Key::num(running as f64 / all.len() as f64 - if failed { 1.0 } else { 0.0 })
-        }
-        _ => Key::text(value),
-    }
-}
-
-fn column_class(kind: ColumnKind) -> &'static str {
-    match kind {
-        ColumnKind::Name => "name",
-        ColumnKind::LongText => "long",
-        ColumnKind::Number => "num",
-        ColumnKind::Age => "age",
-        ColumnKind::Namespace | ColumnKind::Text | ColumnKind::Badge | ColumnKind::Containers => "",
-    }
-}
-
 fn cell_view(store: Store, kind: ColumnKind, value: String) -> AnyView {
     let class = column_class(kind);
     match kind {
@@ -1329,9 +1223,6 @@ fn cell_view(store: Store, kind: ColumnKind, value: String) -> AnyView {
     }
 }
 
-/// Explains the container icons (tooltip on the Ready header).
-const CONTAINER_LEGEND: &str = "Containers: ✓ running · ◐ starting · ■ stopped · ✕ failed";
-
 /// One icon per container. Each state has its own symbol, so colour is never
 /// the only cue: ✓ running, ◐ starting, ■ stopped (exited cleanly), ✕ failed.
 #[component]
@@ -1349,15 +1240,7 @@ pub(crate) fn ContainerIcon(c: containers::Container) -> impl IntoView {
 }
 
 fn container_icon(c: containers::Container) -> impl IntoView {
-    let (class, label) = match c.state {
-        State::Running => ("ctr running", "running"),
-        State::Starting => ("ctr starting", "starting"),
-        State::Stopped => ("ctr stopped", "stopped"),
-        State::Failed => ("ctr failed", "failed"),
-    };
-    let kind = if c.init { "init container " } else { "" };
-    let title = format!("{kind}{}: {}", c.name, c.detail);
-    let aria = format!("{kind}{} {label}", c.name);
+    let (class, title, aria) = logic::container_look(&c);
     let shape = match c.state {
         State::Running => view! {
             <circle cx="7" cy="7" r="6.5" fill="currentColor" />
@@ -1388,15 +1271,12 @@ fn container_icon(c: containers::Container) -> impl IntoView {
 }
 
 pub(crate) fn selected_is_pod(store: Store) -> bool {
-    store.kind.with_untracked(|k| k.as_ref().is_some_and(|k| k.key() == "core/Pod"))
+    store.kind.with_untracked(|k| logic::is_kind(k.as_ref(), "core/Pod"))
 }
 
 /// Pods, workloads and the Config section's kinds get a Details tab besides YAML.
 fn selected_has_details(store: Store) -> bool {
-    selected_is_pod(store)
-        || store.kind.with_untracked(|k| {
-            k.as_ref().is_some_and(|k| subduer_types::has_workload_details(k) || subduer_types::has_object_details(k))
-        })
+    store.kind.with_untracked(|k| logic::has_details(k.as_ref()))
 }
 
 /// Runs `then` now, or, if there are unsaved edits, once the user chooses to
@@ -1452,11 +1332,7 @@ fn SettingsDialog(store: Store) -> impl IntoView {
             </button>
         }
     };
-    let note = move || match store.theme.get() {
-        Theme::Auto => "Follows your system's light or dark appearance.",
-        Theme::Light => "Always light.",
-        Theme::Dark => "Always dark.",
-    };
+    let note = move || logic::theme_note(store.theme.get());
     move || {
         store.settings_open.get().then(|| view! {
             <Modal on_cancel=move |()| close() wide=true dismiss_outside=true>
@@ -1503,7 +1379,7 @@ fn DiscardDialog(store: Store) -> impl IntoView {
     };
     move || {
         store.discard_prompt.get().then(|| {
-            let what = store.dirty.get_untracked().unwrap_or_else(|| "this object".into());
+            let what = logic::dirty_what(store.dirty.get_untracked());
             view! {
                 <Modal on_cancel=move |()| keep()>
                         <h2>"Discard unsaved changes?"</h2>
@@ -1520,7 +1396,7 @@ fn DiscardDialog(store: Store) -> impl IntoView {
 }
 
 pub(crate) fn selected_is_object(store: Store) -> bool {
-    store.kind.with_untracked(|k| k.as_ref().is_some_and(subduer_types::has_object_details))
+    store.kind.with_untracked(|k| logic::is_object(k.as_ref()))
 }
 
 /// Switches to the Pod list and selects one pod once it's listed.
@@ -1536,44 +1412,35 @@ pub(crate) fn open_object(store: Store, kind_key: &str, namespace: Option<String
 }
 
 fn open_object_now(store: Store, kind_key: &str, namespace: Option<String>, name: String) {
-    let Some(kind) = store.cluster.with_untracked(|c| c.as_ref().and_then(|c| find_kind(&c.kinds, kind_key))) else {
-        store.error.set(Some(format!("{kind_key} isn't listed on this cluster")));
-        return;
-    };
-    // Links don't always know whether a kind is namespaced (e.g. Helm manifests).
-    let namespace = namespace.filter(|_| kind.namespaced);
-    // No name: open the kind's list, filtered to the namespace.
-    if name.is_empty() {
-        store.overview_open.set(false);
-        store.forwards_open.set(false);
-                                store.traces_open.set(false);
-        store.selected.set(None);
-        store.namespace.set(namespace);
-        store.kind.set(Some(kind));
-        return;
-    }
-    let id = match &namespace {
-        Some(ns) => format!("{ns}/{name}"),
-        None => name,
-    };
-    store.overview_open.set(false);
-    store.forwards_open.set(false);
-                                store.traces_open.set(false);
-    // A namespace filter that hides the object is widened to its namespace.
-    if let (Some(ns), Some(filter)) = (&namespace, store.namespace.get_untracked())
-        && *ns != filter
-    {
-        store.namespace.set(Some(ns.clone()));
-    }
-    let same_list = store.kind.with_untracked(|k| k.as_ref() == Some(&kind)) && store.namespace.with_untracked(|f| {
-        f.is_none() || f.as_ref() == namespace.as_ref()
+    let plan = store.cluster.with_untracked(|c| {
+        let kinds = c.as_ref().map_or(&[][..], |c| &c.kinds[..]);
+        store.kind.with_untracked(|k| logic::open_plan(kinds, kind_key, namespace, name, k.as_ref(), store.namespace.get_untracked()))
     });
-    if same_list && let Some(row) = store.table.with_untracked(|t| t.as_ref().and_then(|t| t.rows.iter().find(|r| r.id == id).cloned())) {
-        select_row(store, row);
-        return;
+    match plan {
+        OpenPlan::Missing(e) => store.error.set(Some(e)),
+        OpenPlan::List { kind, namespace } => {
+            store.overview_open.set(false);
+            store.forwards_open.set(false);
+            store.traces_open.set(false);
+            store.selected.set(None);
+            store.namespace.set(namespace);
+            store.kind.set(Some(kind));
+        }
+        OpenPlan::Select { kind, id, filter, same_list } => {
+            store.overview_open.set(false);
+            store.forwards_open.set(false);
+            store.traces_open.set(false);
+            if store.namespace.with_untracked(|f| *f != filter) {
+                store.namespace.set(filter);
+            }
+            if same_list && let Some(row) = store.table.with_untracked(|t| t.as_ref().and_then(|t| logic::pending_row(t, Some(&id)))) {
+                select_row(store, row);
+                return;
+            }
+            store.pending_select.set(Some(id));
+            store.kind.set(Some(kind));
+        }
     }
-    store.pending_select.set(Some(id));
-    store.kind.set(Some(kind));
 }
 
 pub(crate) fn select_row(store: Store, row: ResourceRow) {
@@ -1621,7 +1488,7 @@ fn load_yaml(store: Store) {
 #[component]
 fn ServiceForwardButton(store: Store, row: ResourceRow) -> impl IntoView {
     move || {
-        store.kind.get().filter(|k| k.key() == "core/Service")?;
+        store.kind.with(|k| logic::is_kind(k.as_ref(), "core/Service")).then_some(())?;
         let namespace = row.namespace.clone()?;
         let source = subduer_types::ForwardSource::Service { service: row.name.clone() };
         Some(view! {
@@ -1640,7 +1507,7 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
     move || {
         let kind = store.kind.get().filter(subduer_types::has_workload_logs)?;
         let namespace = row.namespace.clone()?;
-        let title = format!("Open logs from every pod of {} {} in a new window", kind.kind, row.name);
+        let title = logic::workload_logs_title(&kind, &row.name);
         let target = subduer_types::LogTarget {
             namespace,
             source: subduer_types::LogSource::Workload { kind, name: row.name.clone() },
@@ -1661,18 +1528,8 @@ fn WorkloadLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
 #[component]
 fn ObjectLogsButton(store: Store, row: ResourceRow) -> impl IntoView {
     move || {
-        let target = store.object.with(|o| match o {
-            Some(Ok(d)) if d.name == row.name && d.namespace == row.namespace => d.logs.clone(),
-            _ => None,
-        })?;
-        let controller = match &target.source {
-            subduer_types::LogSource::Workload { name, .. } => name.clone(),
-            subduer_types::LogSource::Container { pod, .. } => pod.clone(),
-        };
-        let title = format!(
-            "Open the logs of {controller} in a new window, filtered to {}",
-            target.filter.clone().unwrap_or_else(|| row.name.clone())
-        );
+        let target = store.object.with(|o| logic::object_logs(o.as_ref(), &row))?;
+        let title = logic::object_logs_title(&target, &row.name);
         Some(view! {
             <button
                 class="btn small"
@@ -1700,14 +1557,12 @@ fn DetailPanel(store: Store) -> impl IntoView {
     // text field has focus. Ignoring repeats means holding Esc closes one thing.
     let esc = window_event_listener(leptos::ev::keydown, move |ev| {
         use wasm_bindgen::JsCast;
-        if !crate::modal::is_plain_esc(&ev) || crate::modal::any_open() || store.selected.with_untracked(Option::is_none) {
-            return;
-        }
         let in_field = ev
             .target()
             .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
             .is_some_and(|el| el.closest(TEXT_FIELD).ok().flatten().is_some());
-        if !in_field {
+        let selected = store.selected.with_untracked(Option::is_some);
+        if logic::esc_closes_panel(crate::modal::is_plain_esc(&ev), crate::modal::any_open(), selected, in_field) {
             close_now();
         }
     });
@@ -1715,7 +1570,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
     let show_tab = move |tab: DetailTab| {
         let switch = move || {
             store.detail_tab.set(tab);
-            if tab == DetailTab::Yaml && store.yaml.with_untracked(Option::is_none) {
+            if logic::loads_yaml(tab == DetailTab::Yaml, store.yaml.with_untracked(Option::is_some)) {
                 load_yaml(store);
             }
         };
@@ -1791,7 +1646,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
                                         <crate::editor::EditButton store=store row=row.clone() />
                                     </div>
                                     // A Secret's YAML holds its values: never searched.
-                                    <pre class="yaml" data-find-skip=move || store.kind.with(|k| k.as_ref().is_some_and(|k| k.key() == "core/Secret")).then_some("")>{yaml}</pre>
+                                    <pre class="yaml" data-find-skip=move || store.kind.with(|k| logic::is_kind(k.as_ref(), "core/Secret")).then_some("")>{yaml}</pre>
                                 }
                                 .into_any(),
                                 Some(Err(e)) => view! { <p class="warn">{e}</p> }.into_any(),
@@ -1807,25 +1662,6 @@ fn DetailPanel(store: Store) -> impl IntoView {
 /// kubectl-style age: 45s, 12m, 5h, 3d, 2y.
 pub(crate) fn format_age(now_ms: f64, created: &str) -> String {
     age_since(now_ms, js_sys::Date::parse(created))
-}
-
-/// [`format_age`] from a parsed time (ms); empty when it didn't parse.
-pub(crate) fn age_since(now_ms: f64, then_ms: f64) -> String {
-    if then_ms.is_nan() {
-        return String::new();
-    }
-    format_span(((now_ms - then_ms) / 1000.0).max(0.0) as u64)
-}
-
-/// A length of time the way ages are shown: 45s, 12m, 5h, 3d, 2y.
-pub(crate) fn format_span(secs: u64) -> String {
-    match secs {
-        s if s < 120 => format!("{s}s"),
-        s if s < 2 * 3600 => format!("{}m", s / 60),
-        s if s < 2 * 86400 => format!("{}h", s / 3600),
-        s if s < 365 * 86400 => format!("{}d", s / 86400),
-        s => format!("{}y", s / (365 * 86400)),
-    }
 }
 
 #[cfg(test)]

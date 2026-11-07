@@ -12,29 +12,7 @@ use wasm_bindgen::JsCast;
 
 use crate::app::{Store, guard};
 use crate::icons::{ProdIcon, ProviderLogo};
-
-/// The index after `from` for `key` in a list of `len` (`None` if the key
-/// doesn't move the highlight).
-pub(crate) fn step(key: &str, from: Option<usize>, len: usize) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    let last = len - 1;
-    match key {
-        "ArrowDown" => Some(from.map_or(0, |i| (i + 1).min(last))),
-        "ArrowUp" => Some(from.map_or(last, |i| i.saturating_sub(1))),
-        "Home" | "PageUp" => Some(0),
-        "End" | "PageDown" => Some(last),
-        _ => None,
-    }
-}
-
-/// The next context after `from` whose name starts with `letter`, wrapping round.
-pub(crate) fn jump(names: &[String], from: Option<usize>, letter: char) -> Option<usize> {
-    let letter = letter.to_lowercase().to_string();
-    let start = from.map_or(0, |i| i + 1);
-    (0..names.len()).map(|n| (start + n) % names.len()).find(|&i| names[i].to_lowercase().starts_with(&letter))
-}
+use crate::logic::context_picker::{self as logic, KeyAction};
 
 #[component]
 pub fn ContextPicker(store: Store) -> impl IntoView {
@@ -43,19 +21,16 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
     let root = NodeRef::<html::Span>::new();
     let list = NodeRef::<html::Ul>::new();
 
-    let selected_index = move || {
-        let current = store.context.get_untracked();
-        store.contexts.with_untracked(|cs| cs.iter().position(|c| Some(&c.name) == current.as_ref()))
-    };
     let show = move || {
-        active.set(selected_index().or(Some(0)));
+        let current = store.context.get_untracked();
+        active.set(store.contexts.with_untracked(|cs| logic::opening_index(cs, current.as_deref())));
         open.set(true);
     };
     // Picking the context already shown does nothing, as with a native menu.
     // A trace of the current context stops first; then unsaved edits ask.
     let choose = move |ctx: String| {
         open.set(false);
-        if store.context.get_untracked().as_deref() == Some(ctx.as_str()) {
+        if !logic::is_switch(store.context.get_untracked().as_deref(), &ctx) {
             return;
         }
         crate::trace::before_switch(store, ctx.clone(), move || guard(store, move || spawn_local(store.connect(ctx))));
@@ -69,10 +44,8 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
         }
         let Some(row) = list.children().item(i as u32).and_then(|r| r.dyn_into::<web_sys::HtmlElement>().ok()) else { return };
         let (top, bottom) = (row.offset_top(), row.offset_top() + row.offset_height());
-        if top < list.scroll_top() {
-            list.set_scroll_top(top);
-        } else if bottom > list.scroll_top() + list.client_height() {
-            list.set_scroll_top(bottom - list.client_height());
+        if let Some(to) = logic::scroll_into_view(top, bottom, list.scroll_top(), list.client_height()) {
+            list.set_scroll_top(to);
         }
     });
 
@@ -89,41 +62,32 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
     on_cleanup(move || outside.remove());
 
     let on_key = move |ev: leptos::ev::KeyboardEvent| {
-        let key = ev.key();
-        let len = store.contexts.with_untracked(Vec::len);
-        if !open.get_untracked() {
-            if matches!(key.as_str(), "ArrowDown" | "ArrowUp" | "Enter" | " ") {
+        let names: Vec<String> = store.contexts.with_untracked(|cs| cs.iter().map(|c| c.name.clone()).collect());
+        match logic::key_action(&ev.key(), open.get_untracked(), active.get_untracked(), &names) {
+            KeyAction::Ignore => {}
+            KeyAction::Open => {
                 ev.prevent_default();
                 show();
             }
-            return;
-        }
-        match key.as_str() {
-            "Escape" => {
+            KeyAction::Escape => {
                 // Not the detail panel's or a dialog's Esc.
                 ev.prevent_default();
                 ev.stop_propagation();
                 open.set(false);
             }
-            "Tab" => open.set(false),
-            "Enter" | " " => {
+            KeyAction::Tab => open.set(false),
+            KeyAction::Pick(index) => {
                 ev.prevent_default();
-                let name = active.get_untracked().and_then(|i| store.contexts.with_untracked(|cs| cs.get(i).map(|c| c.name.clone())));
-                match name {
+                match index.map(|i| names[i].clone()) {
                     Some(name) => choose(name),
                     None => open.set(false),
                 }
             }
-            _ => {
-                if let Some(i) = step(&key, active.get_untracked(), len) {
+            KeyAction::Highlight { index, prevent } => {
+                if prevent {
                     ev.prevent_default();
-                    active.set(Some(i));
-                } else if let Some(letter) = key.chars().next().filter(|c| key.chars().count() == 1 && c.is_alphanumeric()) {
-                    let names: Vec<String> = store.contexts.with_untracked(|cs| cs.iter().map(|c| c.name.clone()).collect());
-                    if let Some(i) = jump(&names, active.get_untracked(), letter) {
-                        active.set(Some(i));
-                    }
                 }
+                active.set(Some(index));
             }
         }
     };
@@ -136,7 +100,7 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
                 class:prod=move || shown().is_some_and(|c| c.prod_like)
                 aria-haspopup="listbox"
                 aria-expanded=move || open.get().to_string()
-                aria-activedescendant=move || open.get().then(|| active.get().map(|i| format!("context-option-{i}"))).flatten()
+                aria-activedescendant=move || logic::active_descendant(open.get(), active.get())
                 // Stays enabled while connecting, so a context that doesn't
                 // answer can be left without waiting for it to time out.
                 on:click=move |_| if open.get_untracked() { open.set(false) } else { show() }
@@ -145,7 +109,7 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
                 {move || match shown() {
                     Some(c) => view! { <Entry context=c /> }.into_any(),
                     None => {
-                        let label = if store.contexts.with(Vec::is_empty) { "No contexts" } else { "Choose a context" };
+                        let label = logic::empty_label(store.contexts.with(Vec::is_empty));
                         view! { <span class="context-name muted">{label}</span> }.into_any()
                     }
                 }}
@@ -162,7 +126,7 @@ pub fn ContextPicker(store: Store) -> impl IntoView {
                         let selected = move || store.context.with(|ctx| name.with_value(|n| ctx.as_ref() == Some(n)));
                         view! {
                             <li
-                                id=format!("context-option-{i}")
+                                id=logic::option_id(i)
                                 role="option"
                                 class="context-option"
                                 class:active=move || active.get() == Some(i)
@@ -191,7 +155,3 @@ fn Entry(context: ContextInfo) -> impl IntoView {
         {context.prod_like.then(|| view! { <ProdIcon /> })}
     }
 }
-
-#[cfg(test)]
-#[path = "context_picker_tests.rs"]
-mod tests;

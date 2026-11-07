@@ -6,22 +6,18 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{Condition, JobRun, KindRef, TemplateContainer, Usage, WorkloadDetails, WorkloadPod};
+use subduer_types::{Condition, JobRun, TemplateContainer, WorkloadDetails, WorkloadPod};
 
-use crate::app::{ContainerIcon, Store, age_since, format_age, format_span};
+use crate::app::{ContainerIcon, Store, format_age};
+use crate::logic::pod_detail as pod_logic;
+use crate::logic::workload_detail::{self as logic, DetailsArgs};
+pub(crate) use crate::logic::workload_detail::{badge_class, healthy};
 use crate::overview::{fmt_bytes, fmt_cpu};
 use crate::pod_detail::{EnvTable, EventList, HistoryNote, Resource, Section, SpecRows, UsageChart};
 use crate::tauri::invoke;
 
 /// Re-fetches the selected workload's details and usage history.
 pub fn load(store: Store, quiet: bool) {
-    #[derive(Serialize)]
-    struct Args {
-        kind: KindRef,
-        namespace: String,
-        name: String,
-    }
     let Some(kind) = store.kind.get_untracked() else { return };
     crate::pod_detail::load_history(store, quiet, "workload_history", Some(kind.clone()));
     let Some(row) = store.selected.get_untracked() else { return };
@@ -34,11 +30,11 @@ pub fn load(store: Store, quiet: bool) {
     }
     store.pod_loading.set(true);
     spawn_local(async move {
-        let args = Args { kind, namespace, name: row.name.clone() };
+        let args = DetailsArgs { kind, namespace, name: row.name.clone() };
         let result = invoke::<_, WorkloadDetails>("workload_details", &args).await;
         if store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == row.id)) {
             // A failed background refresh keeps the last good render.
-            if !(quiet && result.is_err() && store.workload.with_untracked(|w| matches!(w, Some(Ok(_))))) {
+            if pod_logic::replaces(quiet, result.is_err(), store.workload.with_untracked(|w| matches!(w, Some(Ok(_))))) {
                 store.workload.set(Some(result));
             }
         }
@@ -59,21 +55,11 @@ pub fn WorkloadDetailView(store: Store) -> impl IntoView {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 #[component]
 fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
-    let pod_count = d.pods.len();
     // Jobs keep their finished pods; only running ones use resources.
-    let live = d.pods.iter().filter(|p| !p.finished).count();
-    let ready = d.pods.iter().filter(|p| ready_all(&p.ready)).count();
-    let pods_summary = match (pod_count, d.replicas.is_some()) {
-        (0, _) => "none".to_owned(),
-        (n, true) => format!("{n} · {ready} ready"),
-        (n, false) => format!("{n} · {live} running"),
-    };
+    let live = logic::live_pods(&d.pods);
+    let pods_summary = logic::pods_summary(&d);
     let rolling = d.status == "Rolling out";
     let containers = d
         .containers
@@ -83,12 +69,7 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
         .collect_view();
     let jobs = (d.kind == "CronJob").then(|| {
         let (jobs, ns) = (d.jobs.clone(), d.namespace.clone());
-        let failed = jobs.iter().filter(|j| j.status == "Failed").count();
-        let summary = match (jobs.len(), failed) {
-            (0, _) => "none".to_owned(),
-            (n, 0) => format!("{n}"),
-            (n, f) => format!("{n} · {f} failed"),
-        };
+        let summary = logic::jobs_summary(&jobs);
         view! {
             <Section store=store id="jobs" title="Jobs".to_owned() summary=summary>
                 <JobTable store=store jobs=jobs.clone() namespace=ns.clone() />
@@ -96,17 +77,8 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
         }
     });
     let events = d.events.clone();
-    let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
-    let events_summary = match (events.len(), warnings) {
-        (0, _) => "none".to_owned(),
-        (n, 0) => format!("{n}"),
-        (n, w) => format!("{n} · ⚠ {}", plural(w, "warning", "warnings")),
-    };
-    let resources_summary = match (live, d.replicas.is_some()) {
-        (0, false) => "none running · request and limit per pod".to_owned(),
-        (0, true) => String::new(),
-        (n, _) => format!("total of {}", plural(n, "pod", "pods")),
-    };
+    let events_summary = pod_logic::events_summary(&events);
+    let resources_summary = logic::resources_summary(live, d.replicas.is_some());
     let kind_id = d.kind.to_lowercase();
     let (cpu, memory) = (d.cpu, d.memory);
     let (pods, namespace) = (d.pods.clone(), d.namespace.clone());
@@ -131,85 +103,42 @@ fn WorkloadSections(store: Store, d: WorkloadDetails) -> impl IntoView {
     }
 }
 
-/// Info rows holding an RFC 3339 time, shown relative to now.
-fn is_time(key: &str) -> bool {
-    matches!(key, "Started" | "Finished" | "Last scheduled" | "Last successful" | "Next run" | "Last restart")
-}
-
 /// `5m ago` or `in 12m`.
 pub(crate) fn relative(now_ms: f64, time: &str) -> String {
-    relative_at(now_ms, js_sys::Date::parse(time))
-}
-
-/// [`relative`] from a parsed time (ms).
-fn relative_at(now_ms: f64, then_ms: f64) -> String {
-    if then_ms > now_ms {
-        format!("in {}", format_span(((then_ms - now_ms) / 1000.0) as u64))
-    } else {
-        format!("{} ago", age_since(now_ms, then_ms))
-    }
-}
-
-fn ready_all(ready: &str) -> bool {
-    ready.split_once('/').is_some_and(|(r, t)| r == t && t != "0")
-}
-
-pub(crate) fn badge_class(status: &str) -> String {
-    let slug = status
-        .to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-    format!("badge badge-{slug}")
+    logic::relative_at(now_ms, js_sys::Date::parse(time))
 }
 
 #[component]
 fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
-    let replicas = d.replicas.map(|r| {
-        let extra = (r.current > r.desired).then(|| format!(" · {} running during rollout", r.current));
-        format!(
-            "{} desired · {} ready · {} up to date · {} available{}",
-            r.desired,
-            r.ready,
-            r.updated,
-            r.available,
-            extra.unwrap_or_default()
-        )
-    });
+    let replicas = d.replicas.map(logic::replicas_text);
     let created = d.created.clone().unwrap_or_default();
     let created_text = {
         let created = created.clone();
-        move || format!("{} ago · {}", format_age(store.now.get(), &created), created)
+        move || pod_logic::ago_at(&format_age(store.now.get(), &created), &created)
     };
     let info = d
         .info
         .iter()
         .map(|(k, v)| {
-            if is_time(k) && !js_sys::Date::parse(v).is_nan() {
+            if logic::is_time(k) && !js_sys::Date::parse(v).is_nan() {
                 let v = v.clone();
                 let text = {
                     let v = v.clone();
-                    move || format!("{} · {v}", relative(store.now.get(), &v))
+                    move || logic::dated(&relative(store.now.get(), &v), &v)
                 };
                 return view! { <dt>{k.clone()}</dt><dd>{text}</dd> }.into_any();
             }
-            let mono = matches!(k.as_str(), "Selector" | "Revision" | "Schedule");
+            let mono = logic::is_mono(k);
             view! { <dt>{k.clone()}</dt><dd class:mono=mono>{v.clone()}</dd> }.into_any()
         })
         .collect_view();
     let labels = d
         .labels
         .iter()
-        .map(|(k, v)| view! { <span class="chip">{format!("{k}={v}")}</span> })
+        .map(|(k, v)| view! { <span class="chip">{pod_logic::label_chip(k, v)}</span> })
         .collect_view();
     let conditions = d.conditions.clone();
-    let unhealthy = conditions.iter().filter(|c| !healthy(c)).count();
-    let conditions_summary = match (conditions.len(), unhealthy) {
-        (0, _) => "none".to_owned(),
-        (n, 0) => format!("{n}"),
-        (n, u) => format!("{n} · {u} unhealthy"),
-    };
+    let conditions_summary = logic::conditions_summary(&conditions);
     view! {
         <dl class="kv">
             <dt>"Status"</dt>
@@ -227,28 +156,12 @@ fn WorkloadInfo(store: Store, d: WorkloadDetails) -> impl IntoView {
     }
 }
 
-/// Most conditions are good when true; these report a problem when true.
-pub(crate) fn healthy(c: &Condition) -> bool {
-    // KEDA's Active (a trigger has work) and Paused are fine either way.
-    if matches!(c.type_.as_str(), "Active" | "Paused") && c.status != "Unknown" {
-        return true;
-    }
-    // A Namespace's conditions all describe a deletion that's stuck; a Node's
-    // pressure conditions are problems too, and so is KEDA's Fallback.
-    let bad_when_true = matches!(
-        c.type_.as_str(),
-        "Failed" | "FailureTarget" | "ReplicaFailure" | "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable"
-            | "Fallback"
-    ) || c.type_.starts_with("Namespace");
-    (c.status == "True") != bad_when_true
-}
-
 #[component]
 pub(crate) fn ConditionList(store: Store, conditions: Vec<Condition>) -> impl IntoView {
     conditions
         .into_iter()
         .map(|c| {
-            let badge = if healthy(&c) { "badge badge-ready" } else { "badge badge-warning" };
+            let badge = logic::condition_badge(&c);
             let when = c.last_transition.clone().map(|t| {
                 move || format!("{} ago", format_age(store.now.get(), &t))
             });
@@ -275,19 +188,16 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
     const HEADERS: [&str; 6] = ["Name", "Status", "Restarts", "CPU", "Memory", "Age"];
     let rows = move || {
         let mut pods = pods.clone();
-        crate::sort::sort(&mut pods, store.sorts.by("pods", &HEADERS), pod_key);
+        crate::sort::sort(&mut pods, store.sorts.by("pods", &HEADERS), logic::pod_key);
         pods
         .into_iter()
         .map(|p| {
             let icons = p.containers.iter().cloned().map(|c| view! { <ContainerIcon c=c /> }).collect_view();
-            let title = match &p.node {
-                Some(node) => format!("Open pod {} · on {node}", p.name),
-                None => format!("Open pod {}", p.name),
-            };
+            let title = logic::pod_title(&p);
             let created = p.created.clone().unwrap_or_default();
             let age = move || format_age(store.now.get(), &created);
             let (ns, name) = (namespace.clone(), p.name.clone());
-            let old = rolling && !p.updated;
+            let old = logic::is_old(rolling, &p);
             view! {
                 <tr title=title on:click=move |_| crate::app::open_pod(store, ns.clone(), name.clone())>
                     <td class="name">
@@ -299,8 +209,8 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
                         {old.then(|| view! { <span class="chip old-rev" title="Still runs the previous pod template">"old"</span> })}
                     </td>
                     <td class="num">{p.restarts}</td>
-                    <td class="num">{p.cpu.map(fmt_cpu).unwrap_or_else(|| "—".into())}</td>
-                    <td class="num">{p.memory.map(fmt_bytes).unwrap_or_else(|| "—".into())}</td>
+                    <td class="num">{logic::usage_cell(p.cpu, fmt_cpu)}</td>
+                    <td class="num">{logic::usage_cell(p.memory, fmt_bytes)}</td>
                     <td class="age">{age}</td>
                 </tr>
             }
@@ -312,7 +222,7 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
             <thead>
                 <tr>
                     {HEADERS.map(|h| {
-                        let class = if matches!(h, "Restarts" | "CPU" | "Memory") { "num" } else { "" };
+                        let class = logic::heading_class(h, &["Restarts", "CPU", "Memory"]);
                         view! { <crate::sort::SortTh sorts=store.sorts table="pods" header=h class=class /> }
                     })}
                 </tr>
@@ -321,51 +231,6 @@ fn PodTable(store: Store, pods: Vec<WorkloadPod>, namespace: String, rolling: bo
         </table>
     }
     .into_any()
-}
-
-/// How a pod sorts under the Pods table's column `i`.
-pub(crate) fn pod_key(p: &WorkloadPod, i: usize) -> crate::sort::Key {
-    use crate::sort::Key;
-    match i {
-        0 => Key::text(&p.name),
-        1 => Key::text(&p.status),
-        2 => Key::num(p.restarts as f64),
-        3 => Key::opt(p.cpu),
-        4 => Key::opt(p.memory),
-        _ => Key::age(p.created.as_deref().unwrap_or_default()),
-    }
-}
-
-/// How a Job sorts under the Jobs table's column `i`; a running Job's
-/// duration counts up to `now` (ms).
-pub(crate) fn job_key(j: &JobRun, i: usize, now: f64) -> crate::sort::Key {
-    use crate::sort::Key;
-    match i {
-        0 => Key::text(&j.name),
-        1 => Key::text(&j.status),
-        2 => Key::text(&j.completions),
-        3 => {
-            let (Key::Num(start), end) = (Key::time(j.started.as_deref().unwrap_or_default()), j.finished.as_deref()) else {
-                return Key::Missing;
-            };
-            let end = match end.map(Key::time) {
-                Some(Key::Num(e)) => e,
-                Some(_) => return Key::Missing,
-                None => now,
-            };
-            Key::num(end - start)
-        }
-        _ => Key::age(j.created.as_deref().unwrap_or_default()),
-    }
-}
-
-/// Seconds-precise under an hour (`2m 18s`), then like ages.
-fn run_time(secs: u64) -> String {
-    match secs {
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
-        s => format_span(s),
-    }
 }
 
 #[component]
@@ -377,7 +242,7 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
     let rows = move || {
         let mut jobs = jobs.clone();
         let now = store.now.get_untracked();
-        crate::sort::sort(&mut jobs, store.sorts.by("jobs", &HEADERS), |j, i| job_key(j, i, now));
+        crate::sort::sort(&mut jobs, store.sorts.by("jobs", &HEADERS), |j, i| logic::job_key(j, i, now));
         jobs
         .into_iter()
         .map(|j| {
@@ -388,7 +253,7 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
             let duration = move || {
                 let start = js_sys::Date::parse(started.as_deref()?);
                 let end = finished.as_deref().map_or_else(|| store.now.get(), js_sys::Date::parse);
-                (!start.is_nan() && !end.is_nan()).then(|| run_time(((end - start) / 1000.0).max(0.0) as u64))
+                logic::duration(start, end)
             };
             let (ns, name) = (namespace.clone(), j.name.clone());
             view! {
@@ -411,7 +276,7 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
             <thead>
                 <tr>
                     {HEADERS.map(|h| {
-                        let class = if matches!(h, "Done" | "Duration") { "num" } else { "" };
+                        let class = logic::heading_class(h, &["Done", "Duration"]);
                         view! { <crate::sort::SortTh sorts=store.sorts table="jobs" header=h class=class /> }
                     })}
                 </tr>
@@ -422,34 +287,16 @@ fn JobTable(store: Store, jobs: Vec<JobRun>, namespace: String) -> impl IntoView
     .into_any()
 }
 
-/// Requests and limits are per pod in the template; the chart compares them
-/// with usage summed over the pods, so they're scaled by the pod count.
-fn scaled(u: Usage, pods: usize) -> Usage {
-    let n = pods.max(1) as f64;
-    Usage { requests: u.requests.map(|v| v * n), limits: u.limits.map(|v| v * n), ..u }
-}
-
-fn per_pod(u: Usage, fmt: fn(f64) -> String) -> String {
-    let show = |v: Option<f64>| v.map_or_else(|| "not set".to_owned(), fmt);
-    format!("request {} · limit {}", show(u.requests), show(u.limits))
-}
-
 #[component]
 fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: String) -> impl IntoView {
-    let kind = match (c.init, c.sidecar) {
-        (true, true) => "Sidecar · ",
-        (true, false) => "Init · ",
-        _ => "",
-    };
-    let short_image = c.image.rsplit('/').next().unwrap_or(&c.image).to_owned();
-    let summary = format!("{kind}{short_image}");
+    let summary = logic::template_summary(&c);
     let id = format!("wcontainer:{}", c.name);
     let env_id = format!("wenv:{}", c.name);
-    let env_count = c.env.iter().filter(|e| !e.name.is_empty()).count();
+    let env_summary = pod_logic::env_summary(&c.env);
     // Init containers that ran to completion have no usage to chart.
-    let charted = !c.init || c.sidecar;
-    let totals = (charted && pods > 1).then(|| format!("Charts show totals over {pods} pods."));
-    let (cpu, memory, name) = (scaled(c.cpu, pods), scaled(c.memory, pods), c.name.clone());
+    let charted = logic::charted(&c);
+    let totals = logic::totals_note(charted, pods);
+    let (cpu, memory, name) = (logic::scaled(c.cpu, pods), logic::scaled(c.memory, pods), c.name.clone());
     view! {
         <Section store=store id=id title=c.name.clone() summary=summary>
             {charted.then(|| view! {
@@ -459,8 +306,8 @@ fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: S
             {totals.clone().map(|t| view! { <p class="legend small">{t}</p> })}
             <dl class="kv">
                 <dt>"Image"</dt><dd class="mono">{c.image.clone()}</dd>
-                <dt>"CPU per pod"</dt><dd>{per_pod(c.cpu, fmt_cpu)}</dd>
-                <dt>"Memory per pod"</dt><dd>{per_pod(c.memory, fmt_bytes)}</dd>
+                <dt>"CPU per pod"</dt><dd>{logic::per_pod(c.cpu, fmt_cpu)}</dd>
+                <dt>"Memory per pod"</dt><dd>{logic::per_pod(c.memory, fmt_bytes)}</dd>
                 {(!c.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{c.ports.join(", ")}</dd> })}
                 <SpecRows spec=c.spec.clone() />
             </dl>
@@ -471,7 +318,7 @@ fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: S
                         store=store
                         id=env_id.clone()
                         title="Environment".to_owned()
-                        summary=if env_count == 0 { "none".to_owned() } else { env_count.to_string() }
+                        summary=env_summary.clone()
                         nested=true
                     >
                         <EnvTable store=store vars=env.clone() namespace=ns.clone() />
@@ -481,7 +328,3 @@ fn TemplateSection(store: Store, c: TemplateContainer, pods: usize, namespace: S
         </Section>
     }
 }
-
-#[cfg(test)]
-#[path = "workload_detail_tests.rs"]
-mod tests_unit;

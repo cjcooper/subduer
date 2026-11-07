@@ -4,168 +4,38 @@
 //! ScaledObjects and ScaledJobs, saving a ConfigMap's or Secret's edited
 //! data, and Force sync for ExternalSecrets and ClusterExternalSecrets.
 //! Gated like Delete, and production-like contexts need the object's name
-//! typed out.
+//! typed out. The logic lives in [`crate::logic::workload`].
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{
-    ContextInfo, DataChange, KindRef, Replicas, ResourceRow, can_force_sync, has_workload_details, is_keda_scaler,
-    is_scalable_workload,
-};
+use subduer_types::{ContextInfo, KindRef, Replicas, ResourceRow, is_keda_scaler};
 
-use crate::modal::Modal;
 use crate::app::Store;
+use crate::logic::workload::{
+    Choices, Form, Prefill, after_success, button_title, can_confirm, cancel_label, change, chose_failed, confirm_class,
+    confirm_label, current_revision, force_sync_note, force_sync_text, grows, has_ops, helm_note, helm_release, history,
+    key_list, listed, manual_job, needs_name, new_policy, object_row, ops_for, owner_note, parse_count, parse_range,
+    pause_detail, pause_hold, pause_note, prefill, provisioned_count, range_floor, range_intro, range_now, range_rule,
+    reclaim_note, release_objects, replicas_now, replicas_text, restart_note, revision_label, rollback_note, run_note,
+    scale_note, suspend_note, target_args, target_for, title, will_be, zero_note,
+};
+pub use crate::logic::workload::{Op, SaveData, WorkloadTarget};
+use crate::modal::Modal;
 use crate::tauri::invoke;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    Restart,
-    Scale,
-    /// Start a Job from a CronJob now.
-    Run,
-    Suspend,
-    Resume,
-    /// An HPA's, ScaledObject's or ScaledJob's min and max replicas.
-    Range,
-    /// Edited ConfigMap or Secret data.
-    Save,
-    /// Grow a PersistentVolumeClaim.
-    Expand,
-    /// Switch a PersistentVolume between Retain and Delete.
-    Reclaim,
-    /// Roll a Helm release back to an earlier revision.
-    Rollback,
-    /// Delete a Helm release with `helm uninstall`.
-    Uninstall,
-    /// Annotate an ExternalSecret or ClusterExternalSecret with `force-sync`.
-    ForceSync,
-    /// Stop KEDA scaling a ScaledObject or ScaledJob.
-    Pause,
-    /// Let KEDA scale it again.
-    Unpause,
-}
-
-impl Op {
-    fn label(self) -> &'static str {
-        match self {
-            Op::Restart => "Restart",
-            Op::Scale => "Scale",
-            Op::Run => "Run now",
-            Op::Suspend => "Suspend",
-            Op::Resume => "Resume",
-            Op::Range => "Edit range",
-            Op::Save => "Save",
-            Op::Expand => "Expand",
-            Op::Reclaim => "Reclaim policy",
-            Op::Rollback => "Rollback",
-            Op::Uninstall => "Delete",
-            Op::ForceSync => "Force sync",
-            Op::Pause => "Pause",
-            Op::Unpause => "Resume",
-        }
-    }
-
-    fn hint(self, kind: &KindRef) -> &'static str {
-        match (self, kind.kind.as_str()) {
-            (Op::Restart, _) => "Rollout restart",
-            (Op::Scale, _) => "Scale",
-            (Op::Run, _) => "Start a Job from its template now",
-            (Op::Suspend, "CronJob") => "Stop starting new Jobs",
-            (Op::Suspend, _) => "Stop its running pods until resumed",
-            (Op::Resume, "CronJob") => "Start Jobs on its schedule again",
-            (Op::Resume, _) => "Start its pods again",
-            (Op::Range, "ScaledJob") => "Change how many Jobs it may run at once",
-            (Op::Range, _) => "Change its min and max replicas",
-            (Op::Save, _) => "Save the edited data",
-            (Op::Expand, _) => "Make the claim bigger",
-            (Op::Reclaim, _) => "Keep or delete the data when its claim is deleted",
-            (Op::Rollback, _) => "Go back to an earlier revision with helm rollback",
-            (Op::Uninstall, _) => "Delete the release and everything it created, with helm uninstall",
-            (Op::ForceSync, "ClusterExternalSecret") => "Have External Secrets fetch from the store now, for every namespace",
-            (Op::ForceSync, _) => "Have External Secrets fetch from the store now and update the Secret",
-            (Op::Pause, "ScaledJob") => "Stop KEDA starting new Jobs",
-            (Op::Pause, _) => "Stop KEDA scaling it, where it is or at a replica count",
-            (Op::Unpause, _) => "Let KEDA scale it from its triggers again",
-        }
-    }
-}
-
-/// What the dialog acts on, captured when it opens.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkloadTarget {
-    pub context: ContextInfo,
-    pub kind: KindRef,
-    pub namespace: String,
-    pub name: String,
-    pub op: Op,
-    /// What a Save writes.
-    pub save: Option<SaveData>,
-}
-
-/// A data edit ready to save, with its summary for the dialog.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SaveData {
-    pub resource_version: String,
-    pub changes: Vec<DataChange>,
-    pub added: Vec<String>,
-    pub changed: Vec<String>,
-    pub removed: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct Target<'a> {
-    kind: &'a KindRef,
-    namespace: &'a str,
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct Change<'a> {
-    context: &'a str,
-    #[serde(flatten)]
-    target: Target<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    replicas: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    suspend: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    paused: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resource_version: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changes: Option<&'a [DataChange]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    revision: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    wait: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    keep_history: Option<bool>,
-}
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only.
 fn request(store: Store, kind: KindRef, row: &ResourceRow, op: Op) {
-    // Cluster-scoped objects (PersistentVolumes) have no namespace.
-    let namespace = row.namespace.clone().unwrap_or_default();
-    open(store, kind, namespace, row.name.clone(), op, None);
+    open(store, |context| target_for(context, kind, row, op));
 }
 
 /// Asks to save edited data of the selected ConfigMap or Secret.
 pub(crate) fn request_save(store: Store, kind: KindRef, namespace: String, name: String, save: SaveData) {
-    open(store, kind, namespace, name, Op::Save, Some(save));
+    open(store, |context| WorkloadTarget { context, kind, namespace, name, op: Op::Save, save: Some(save) });
 }
 
-fn open(store: Store, kind: KindRef, namespace: String, name: String, op: Op, save: Option<SaveData>) {
+fn open(store: Store, target: impl FnOnce(ContextInfo) -> WorkloadTarget) {
     let Some(context) = store.current_context_untracked() else { return };
-    let target = WorkloadTarget { context: context.clone(), kind, namespace, name, op, save };
+    let target = target(context.clone());
     if context.unlocked {
         store.workload_prompt.set(Some(target));
     } else {
@@ -180,92 +50,11 @@ fn open(store: Store, kind: KindRef, namespace: String, name: String, op: Op, sa
 pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
     let selected = row.clone();
     let ops = move || {
-        let row = &selected;
-        let kind = store
-            .kind
-            .get()
-            .filter(|k| {
-                has_workload_details(k)
-                    || can_force_sync(k)
-                    || is_keda_scaler(k)
-                    || matches!(
-                        k.key().as_str(),
-                        "autoscaling/HorizontalPodAutoscaler"
-                            | "core/PersistentVolumeClaim"
-                            | "core/PersistentVolume"
-                            | "helm.sh/Release"
-                    )
-            })?;
-        let allowed = |key: &str, verb: &str| {
-            store.cluster.with(|c| {
-                c.iter()
-                    .flat_map(|c| &c.kinds)
-                    .any(|k| k.kind.key() == key && k.verbs.iter().any(|v| v == verb))
-            })
-        };
-        let patch = allowed(&kind.key(), "patch");
-        let mut ops = Vec::new();
-        // Rows of the loaded details, tracked so buttons appear once they load.
-        let detail = |key: &str| {
-            store.object.with(|o| match o {
-                Some(Ok(d)) if d.name == row.name => d.info.iter().find(|r| r.key == key).map(|r| r.value.clone()),
-                _ => None,
-            })
-        };
-        if kind.key() == "helm.sh/Release" {
-            // Helm runs it with your own credentials, so the listed verbs don't apply.
-            if history(store, &row.name, true).len() > 1 {
-                ops.push(Op::Rollback);
-            }
-            if !history(store, &row.name, true).is_empty() {
-                ops.push(Op::Uninstall);
-            }
-        } else if kind.kind == "HorizontalPodAutoscaler" {
-            if patch {
-                ops.push(Op::Range);
-            }
-        } else if kind.kind == "PersistentVolumeClaim" {
-            if patch && detail("Can expand").as_deref() == Some("yes") {
-                ops.push(Op::Expand);
-            }
-        } else if kind.kind == "PersistentVolume" {
-            let policy = detail("Reclaim policy");
-            if patch && policy.is_some_and(|p| p.starts_with("Retain") || p.starts_with("Delete")) {
-                ops.push(Op::Reclaim);
-            }
-        } else if can_force_sync(&kind) {
-            if patch {
-                ops.push(Op::ForceSync);
-            }
-        } else if is_keda_scaler(&kind) {
-            // Both start from the loaded details: the range, and whether it's paused.
-            let loaded = store.object.with(|o| matches!(o, Some(Ok(d)) if d.name == row.name));
-            if patch && loaded {
-                ops.push(Op::Range);
-                ops.push(if detail("Paused").is_some() { Op::Unpause } else { Op::Pause });
-            }
-        } else if is_scalable_workload(&kind) {
-            if patch {
-                ops.extend([Op::Restart, Op::Scale]);
-            }
-        } else {
-            if kind.kind == "CronJob" && allowed("batch/Job", "create") {
-                ops.push(Op::Run);
-            }
-            let state = store.workload.with(|w| match w {
-                Some(Ok(d)) if d.name == row.name && row.namespace.as_ref() == Some(&d.namespace) && d.kind == kind.kind => {
-                    Some((d.suspended, d.status.clone()))
-                }
-                _ => None,
-            });
-            // A finished Job has nothing left to suspend.
-            if let Some((Some(suspended), status)) = state
-                && patch
-                && !(kind.kind == "Job" && matches!(status.as_str(), "Complete" | "Failed"))
-            {
-                ops.push(if suspended { Op::Resume } else { Op::Suspend });
-            }
-        }
+        let kind = store.kind.get().filter(has_ops)?;
+        // The loaded details are tracked so buttons appear once they load.
+        let ops = store.cluster.with(|c| {
+            store.object.with(|o| store.workload.with(|w| ops_for(&kind, &selected, c.as_ref(), o, w)))
+        });
         Some((kind, ops))
     };
     move || {
@@ -274,13 +63,7 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
             ops.into_iter()
                 .map(|op| {
                     let hint = op.hint(&kind);
-                    let title = move || {
-                        if locked() {
-                            format!("{hint}… (asks to allow changes first: the context is read-only)")
-                        } else {
-                            format!("{hint}…")
-                        }
-                    };
+                    let title = move || button_title(hint, locked());
                     let (kind, row) = (kind.clone(), row.clone());
                     view! {
                         <button
@@ -295,185 +78,6 @@ pub fn WorkloadButtons(store: Store, row: ResourceRow) -> impl IntoView {
                 })
                 .collect_view()
         })
-    }
-}
-
-/// The selected CronJob's concurrency policy and whether a Job is running.
-fn cron_state(store: Store, name: &str) -> Option<(String, bool)> {
-    store.workload.with_untracked(|w| match w {
-        Some(Ok(d)) if d.name == name && d.kind == "CronJob" => {
-            let policy = d.info.iter().find(|(k, _)| k == "Concurrency").map(|(_, v)| v.clone())?;
-            Some((policy, d.status == "Running"))
-        }
-        _ => None,
-    })
-}
-
-fn run_note(store: Store, name: &str) -> Option<&'static str> {
-    match cron_state(store, name)? {
-        (p, _) if p == "Forbid" => Some("Scheduled runs are skipped while this Job runs (concurrency: Forbid)."),
-        (p, true) if p == "Replace" => Some("Its running Job is not replaced; but the next scheduled run replaces this one if it's still running."),
-        (p, false) if p == "Replace" => Some("The next scheduled run replaces this Job if it's still running (concurrency: Replace)."),
-        _ => None,
-    }
-}
-
-/// A release's revisions from its loaded History: (revision, status, chart,
-/// app version, updated), newest first.
-fn history(store: Store, name: &str, tracked: bool) -> Vec<(i64, String, String, String, String)> {
-    let read = |o: &Option<Result<subduer_types::ObjectDetails, String>>| match o {
-        Some(Ok(d)) if d.name == name && d.kind == "Release" => d
-            .sections
-            .iter()
-            .find(|s| s.id == "helm-history")
-            .and_then(|s| s.table.as_ref())
-            .map(|t| {
-                t.rows
-                    .iter()
-                    .filter_map(|r| {
-                        let c = &r.cells;
-                        Some((c.first()?.parse().ok()?, c.get(1)?.clone(), c.get(2)?.clone(), c.get(3)?.clone(), c.get(4)?.clone()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    if tracked { store.object.with(read) } else { store.object.with_untracked(read) }
-}
-
-/// The objects a release created, from its loaded Resources: (kind, name).
-fn release_objects(store: Store, name: &str) -> Vec<(String, String)> {
-    store.object.with_untracked(|o| match o {
-        Some(Ok(d)) if d.name == name && d.kind == "Release" => d
-            .sections
-            .iter()
-            .find(|s| s.id == "helm-resources")
-            .and_then(|s| s.table.as_ref())
-            .map(|t| t.rows.iter().filter_map(|r| Some((r.cells.first()?.clone(), r.cells.get(1)?.clone()))).collect())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    })
-}
-
-/// Why Force sync won't fetch, from the loaded ExternalSecret's refresh rows.
-fn force_sync_note(store: Store, name: &str) -> Option<&'static str> {
-    if object_row(store, name, "Refresh policy").is_some_and(|p| p.starts_with("CreatedOnce")) {
-        return Some("Its refresh policy is CreatedOnce: External Secrets fetched it once and ignores this annotation.");
-    }
-    if object_row(store, name, "Refresh interval").is_some_and(|i| i.contains("fetched once")) {
-        return Some("Its refresh interval is 0: External Secrets fetched it once and ignores this annotation.");
-    }
-    None
-}
-
-/// How many ExternalSecrets the loaded ClusterExternalSecret has made.
-fn provisioned_count(store: Store, name: &str) -> usize {
-    store.object.with_untracked(|o| match o {
-        Some(Ok(d)) if d.name == name => d
-            .sections
-            .iter()
-            .find(|s| s.id == "externalsecret-children")
-            .and_then(|s| s.table.as_ref())
-            .map_or(0, |t| t.rows.iter().filter(|r| r.link.is_some()).count()),
-        _ => 0,
-    })
-}
-
-/// A size like `20Gi`, `500M` or `1e9` in bytes.
-fn bytes(s: &str) -> Option<f64> {
-    // An exponent (`1e9`) is part of the number, so the suffix is matched
-    // from the end rather than split off at the first non-digit.
-    const SUFFIXES: [(&str, f64); 9] = [
-        ("Ki", 1024.0),
-        ("Mi", 1048576.0),
-        ("Gi", 1073741824.0),
-        ("Ti", 1099511627776.0),
-        ("Pi", 1125899906842624.0),
-        ("k", 1e3),
-        ("M", 1e6),
-        ("G", 1e9),
-        ("T", 1e12),
-    ];
-    let (number, k) =
-        SUFFIXES.iter().find_map(|(suffix, k)| s.strip_suffix(suffix).map(|n| (n, *k))).unwrap_or((s, 1.0));
-    // Plain decimals only: no sign, `inf` or `NaN`.
-    if !number.starts_with(|c: char| c.is_ascii_digit() || c == '.')
-        || !number.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
-    {
-        return None;
-    }
-    let n: f64 = number.parse().ok()?;
-    Some(n * k)
-}
-
-/// An info row of the selected object's details, e.g. an HPA's `Min replicas`.
-fn object_row(store: Store, name: &str, key: &str) -> Option<String> {
-    store.object.with_untracked(|o| match o {
-        Some(Ok(d)) if d.name == name => d.info.iter().find(|r| r.key == key).map(|r| r.value.clone()),
-        _ => None,
-    })
-}
-
-/// A ScaledObject's or ScaledJob's range from its loaded details:
-/// `Range: 0 to 10 replicas`, `Jobs at once: 0 to 20`.
-fn keda_range(store: Store, name: &str) -> Option<(i32, i32)> {
-    let text = object_row(store, name, "Range").or_else(|| object_row(store, name, "Jobs at once"))?;
-    let (lo, rest) = text.split_once(" to ")?;
-    let hi = rest.split_whitespace().next()?;
-    Some((lo.trim().parse().ok()?, hi.parse().ok()?))
-}
-
-/// `Some(release)` when the loaded object is managed by Helm (the release
-/// name may be empty if it isn't annotated).
-fn helm_release(store: Store, name: &str) -> Option<String> {
-    store.object.with_untracked(|o| match o {
-        Some(Ok(d)) if d.name == name => {
-            let helm = d.labels.iter().any(|(k, v)| k == "app.kubernetes.io/managed-by" && v == "Helm");
-            helm.then(|| d.annotations.iter().find(|(k, _)| k == "meta.helm.sh/release-name").map(|(_, v)| v.clone()).unwrap_or_default())
-        }
-        _ => None,
-    })
-}
-
-/// A ScaledObject's replicas now, from `Replicas: 3 now · 4 wanted`.
-fn replicas_now(store: Store, name: &str) -> Option<i32> {
-    object_row(store, name, "Replicas")?.split_whitespace().next()?.parse().ok()
-}
-
-fn pause_note(kind: &KindRef, pause: bool) -> &'static str {
-    match (kind.kind.as_str(), pause) {
-        ("ScaledJob", true) => "KEDA starts no new Jobs until it's resumed. Jobs already running carry on.",
-        (_, true) => "KEDA stops scaling it: its triggers are no longer acted on until it's resumed.",
-        ("ScaledJob", false) => "KEDA starts Jobs from its triggers again.",
-        (_, false) => "KEDA scales it from its triggers again, within its range.",
-    }
-}
-
-fn suspend_note(kind: &KindRef, suspend: bool) -> &'static str {
-    match (kind.kind.as_str(), suspend) {
-        ("CronJob", true) => "No new Jobs start until it's resumed. Jobs already running carry on.",
-        ("CronJob", false) => "Jobs start on its schedule again. If a run was missed while suspended, one may start right away.",
-        (_, true) => "Its running pods are stopped. Pods that already succeeded still count when it's resumed.",
-        (_, false) => "New pods start for the work that's left.",
-    }
-}
-
-fn restart_note(kind: &KindRef) -> &'static str {
-    if kind.kind == "StatefulSet" {
-        "Its pods are replaced one at a time, highest ordinal first."
-    } else {
-        "New pods replace the current ones following its rollout strategy."
-    }
-}
-
-fn scale_note(kind: &KindRef, from: i32, to: i32) -> Option<&'static str> {
-    if to == 0 && from > 0 {
-        Some("Every pod is stopped.")
-    } else if to < from && kind.kind == "StatefulSet" {
-        Some("Pods with the highest ordinals are removed; their volume claims are kept.")
-    } else {
-        None
     }
 }
 
@@ -507,162 +111,94 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
     // the HPA's current range.
     Effect::new(move |_| {
         let Some(target) = store.workload_prompt.get() else { return };
-        if target.op == Op::Range {
-            if is_keda_scaler(&target.kind) {
-                let (lo, hi) = keda_range(store, &target.name).map_or_else(Default::default, |(lo, hi)| (lo.to_string(), hi.to_string()));
+        match store.object.with_untracked(|o| prefill(&target, o)) {
+            Prefill::Range(lo, hi) => {
                 min.set(lo);
                 max.set(hi);
-            } else {
-                min.set(object_row(store, &target.name, "Min replicas").unwrap_or_default());
-                max.set(object_row(store, &target.name, "Max replicas").unwrap_or_default());
             }
-            return;
-        }
-        if target.op == Op::Pause {
-            hold.set(replicas_now(store, &target.name).unwrap_or(0).to_string());
-            return;
-        }
-        if target.op == Op::Expand {
-            size.set(object_row(store, &target.name, "Requested").unwrap_or_default());
-            return;
-        }
-        if target.op == Op::Rollback {
-            // The latest earlier revision that didn't fail.
-            let revisions = history(store, &target.name, false);
-            let pick = revisions.iter().skip(1).find(|r| r.1 != "failed").or_else(|| revisions.get(1));
-            rollback_to.set(pick.map(|r| r.0.to_string()).unwrap_or_default());
-            return;
-        }
-        if target.op != Op::Scale {
-            return;
-        }
-        spawn_local(async move {
-            let args = Target { kind: &target.kind, namespace: &target.namespace, name: &target.name };
-            let result = invoke::<_, Replicas>("get_replicas", &args).await;
-            if store.workload_prompt.with_untracked(|p| p.as_ref() != Some(&target)) {
-                return;
-            }
-            match result {
-                Ok(r) => {
-                    wanted.set(r.desired.to_string());
-                    current.set(Some(r));
+            Prefill::Hold(n) => hold.set(n),
+            Prefill::Size(s) => size.set(s),
+            Prefill::Rollback(r) => rollback_to.set(r),
+            Prefill::Nothing => {}
+            Prefill::FetchReplicas => spawn_local(async move {
+                let result = invoke::<_, Replicas>("get_replicas", &target_args(&target)).await;
+                if store.workload_prompt.with_untracked(|p| p.as_ref() != Some(&target)) {
+                    return;
                 }
-                Err(e) => error.set(Some(e)),
-            }
-        });
+                match result {
+                    Ok(r) => {
+                        wanted.set(r.desired.to_string());
+                        current.set(Some(r));
+                    }
+                    Err(e) => error.set(Some(e)),
+                }
+            }),
+        }
     });
 
     move || {
         store.workload_prompt.get().map(|target| {
             let WorkloadTarget { context, kind, namespace, name, op, save } = target.clone();
             let prod = context.prod_like;
-            let replicas = move || wanted.get().trim().parse::<i32>().ok().filter(|n| *n >= 0);
-            // KEDA can scale to zero; an HPA can't.
-            let keda = is_keda_scaler(&kind);
-            let floor = if keda { 0 } else { 1 };
-            let range = move || {
-                let parse = |s: RwSignal<String>| s.get().trim().parse::<i32>().ok();
-                parse(min).zip(parse(max)).filter(|(lo, hi)| *lo >= floor && *hi >= 1 && hi >= lo)
-            };
-            let held = move || hold_on.get().then(|| hold.get().trim().parse::<i32>().ok().filter(|n| *n >= 0));
-            let current_size = object_row(store, &name, "Requested").unwrap_or_default();
-            let grows = {
-                let current = current_size.clone();
-                move || size.with(|s| bytes(s.trim()).zip(bytes(&current)).is_some_and(|(new, old)| new > old))
-            };
-            // Reclaim switches to the other policy.
-            let new_policy = match object_row(store, &name, "Reclaim policy") {
-                Some(p) if p.starts_with("Retain") => "Delete",
-                _ => "Retain",
-            };
-            let range_now = {
+            let row = {
                 let name = name.clone();
-                move || {
-                    if keda {
-                        return keda_range(store, &name);
-                    }
-                    let get = |k: &str| object_row(store, &name, k).and_then(|v| v.parse::<i32>().ok());
-                    get("Min replicas").zip(get("Max replicas"))
+                move |key: &str| store.object.with_untracked(|o| object_row(o, &name, key))
+            };
+            let replicas = move || wanted.with(|w| parse_count(w));
+            let keda = is_keda_scaler(&kind);
+            let floor = range_floor(keda);
+            let range = move || min.with(|lo| max.with(|hi| parse_range(lo, hi, floor)));
+            let held = move || pause_hold(hold_on.get(), &hold.get());
+            let current_size = row("Requested").unwrap_or_default();
+            let policy = store.object.with_untracked(|o| new_policy(o, &name));
+            let form = {
+                let (name, current_size) = (name.clone(), current_size.clone());
+                move || Form {
+                    busy: busy.get(),
+                    typed: typed.get(),
+                    current: current.get(),
+                    replicas: replicas(),
+                    range: range(),
+                    range_now: store.object.with_untracked(|o| range_now(o, &name, keda)),
+                    grows: size.with(|s| grows(s, &current_size)),
+                    size: size.get(),
+                    rollback_to: rollback_to.get(),
+                    held: held(),
+                    policy,
                 }
             };
             let ok = {
-                let name = name.clone();
-                let grows = grows.clone();
-                move || {
-                    // Deleting a whole release always needs the name typed.
-                    let typed_ok = !(prod || op == Op::Uninstall) || typed.get().trim() == name;
-                    let scale_ok = match op {
-                        Op::Scale => current.get().zip(replicas()).is_some_and(|(c, n)| c.desired != n),
-                        Op::Range => range().is_some_and(|r| Some(r) != range_now()),
-                        Op::Expand => grows(),
-                        Op::Rollback => rollback_to.with(|r| r.parse::<i64>().is_ok()),
-                        Op::Pause => held() != Some(None),
-                        _ => true,
-                    };
-                    !busy.get() && typed_ok && scale_ok
-                }
+                let (name, form) = (name.clone(), form.clone());
+                move || can_confirm(op, prod, &name, &form())
             };
             let confirm = {
                 let target = target.clone();
                 move |_| {
                     let target = target.clone();
-                    let replicas = replicas();
-                    let range = range();
-                    let held = held().flatten();
-                    let size = size.get_untracked().trim().to_owned();
-                    let revision = rollback_to.get_untracked().parse::<i64>().ok();
-                    let wait = wait.get_untracked();
-                    let keep_history = keep_history.get_untracked();
+                    let choices = Choices {
+                        replicas: replicas(),
+                        range: range(),
+                        held: held().flatten(),
+                        size: size.get_untracked().trim().to_owned(),
+                        revision: rollback_to.get_untracked().parse::<i64>().ok(),
+                        policy,
+                        wait: wait.get_untracked(),
+                        keep_history: keep_history.get_untracked(),
+                    };
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
-                        let paused = match target.op {
-                            Op::Pause => Some(true),
-                            Op::Unpause => Some(false),
-                            _ => None,
-                        };
-                        let (command, replicas, suspend) = match target.op {
-                            Op::Restart => ("restart_workload", None, None),
-                            Op::Scale => ("scale_workload", replicas, None),
-                            Op::Run => ("run_cron_job", None, None),
-                            Op::Suspend => ("suspend_workload", None, Some(true)),
-                            Op::Resume => ("suspend_workload", None, Some(false)),
-                            Op::Range if is_keda_scaler(&target.kind) => ("set_scaling_range", None, None),
-                            Op::Range => ("set_hpa_range", None, None),
-                            Op::Save => ("save_config_data", None, None),
-                            Op::Expand => ("expand_claim", None, None),
-                            Op::Reclaim => ("set_reclaim_policy", None, None),
-                            Op::Rollback => ("helm_rollback", None, None),
-                            Op::Uninstall => ("helm_uninstall", None, None),
-                            Op::ForceSync => ("force_sync", None, None),
-                            Op::Pause => ("pause_scaling", held, None),
-                            Op::Unpause => ("pause_scaling", None, None),
-                        };
-                        let args = Change {
-                            context: &target.context.name,
-                            target: Target { kind: &target.kind, namespace: &target.namespace, name: &target.name },
-                            replicas,
-                            suspend,
-                            paused,
-                            min: range.map(|r| r.0),
-                            max: range.map(|r| r.1),
-                            resource_version: target.save.as_ref().map(|s| s.resource_version.as_str()),
-                            changes: target.save.as_ref().map(|s| s.changes.as_slice()),
-                            size: (target.op == Op::Expand).then_some(size.as_str()),
-                            policy: (target.op == Op::Reclaim).then_some(new_policy),
-                            revision: (target.op == Op::Rollback).then_some(revision).flatten(),
-                            wait: matches!(target.op, Op::Rollback | Op::Uninstall).then_some(wait),
-                            keep_history: (target.op == Op::Uninstall).then_some(keep_history),
-                        };
+                        let (command, args) = change(&target, &choices);
                         // Run now answers with the new Job's name, Force sync with a
                         // count; the others with nothing.
                         match invoke::<_, serde_json::Value>(command, &args).await {
                             Ok(_) => {
                                 close();
-                                if target.op == Op::Save {
+                                let (stop_editing, deselect) = after_success(target.op);
+                                if stop_editing {
                                     store.editing.set(false);
                                 }
-                                if target.op == Op::Uninstall {
+                                if deselect {
                                     // It's gone; the table drops it when the watch catches up.
                                     store.selected.set(None);
                                     return;
@@ -690,20 +226,17 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                 .into_any(),
                 Op::Run => view! {
                     <p>"A Job is started now from the template of "{what}", outside its schedule."</p>
-                    <p class="muted">"It's named "<span class="mono">{format!("{name}-manual-…")}</span>" and listed with its other Jobs."</p>
-                    {run_note(store, &name).map(|n| view! { <p class="warn-text">{n}</p> })}
+                    <p class="muted">"It's named "<span class="mono">{manual_job(&name)}</span>" and listed with its other Jobs."</p>
+                    {store.workload.with_untracked(|w| run_note(w, &name)).map(|n| view! { <p class="warn-text">{n}</p> })}
                 }
                 .into_any(),
-                Op::Suspend | Op::Resume => {
-                    let verb = if op == Op::Suspend { " will be suspended." } else { " will be resumed." };
-                    view! {
-                        <p>{what}{verb}</p>
-                        <p>{suspend_note(&kind, op == Op::Suspend)}</p>
-                    }
-                    .into_any()
+                Op::Suspend | Op::Resume => view! {
+                    <p>{what}{will_be(op)}</p>
+                    <p>{suspend_note(&kind, op == Op::Suspend)}</p>
                 }
+                .into_any(),
                 Op::Range => {
-                    let owner = object_row(store, &name, "Controlled by");
+                    let owner = row("Controlled by");
                     let input = |label: &'static str, value: RwSignal<String>| view! {
                         <label class="replicas">
                             {label}
@@ -717,34 +250,29 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         </label>
                     };
                     let jobs = kind.kind == "ScaledJob";
-                    let paused = object_row(store, &name, "Paused").is_some();
-                    let helm = if keda { helm_release(store, &name) } else { None };
-                    let rule = if keda { "Min can't be below 0, max must be at least 1 and at least min." } else { "Min must be at least 1, and max at least min." };
+                    let paused = row("Paused").is_some();
+                    let helm = if keda { store.object.with_untracked(|o| helm_release(o, &name)) } else { None };
+                    let rule = range_rule(keda);
                     view! {
-                        <p>{if jobs { "Change how many Jobs at once " } else { "Change the replica range of " }}{what}"."</p>
+                        <p>{range_intro(jobs)}{what}"."</p>
                         {input("Min ", min)}
                         {input("Max ", max)}
                         {move || range().is_none().then(|| view! { <p class="warn-text">{rule}</p> })}
-                        {move || (keda && !jobs && range().is_some_and(|(lo, _)| lo == 0)).then(|| view! {
+                        {move || zero_note(keda, jobs, range()).then(|| view! {
                             <p class="muted">"With min 0, KEDA scales it to zero when no trigger is active, once the cooldown has passed."</p>
                         })}
                         {(keda && paused).then(|| view! { <p class="warn-text">"It's paused: the new range applies once it's resumed."</p> })}
-                        {helm.map(|r| {
-                            let release = if r.is_empty() { String::new() } else { format!(" (release {r})") };
-                            view! { <p class="warn-text">{format!("Managed by Helm{release}: the next helm upgrade puts the chart's min and max back. Change them in its values too.")}</p> }
-                        })}
-                        {owner.map(|o| view! {
-                            <p class="warn-text">{format!("It's controlled by {o}, which sets the range itself: change it there, or this edit is undone.")}</p>
-                        })}
+                        {helm.map(|r| view! { <p class="warn-text">{helm_note(&r)}</p> })}
+                        {owner.map(|o| view! { <p class="warn-text">{owner_note(&o)}</p> })}
                     }
                     .into_any()
                 }
                 Op::Pause | Op::Unpause => {
                     let pause = op == Op::Pause;
                     let object = kind.kind == "ScaledObject";
-                    let now = replicas_now(store, &name);
+                    let now = store.object.with_untracked(|o| replicas_now(o, &name));
                     view! {
-                        <p>{what}{if pause { " will be paused." } else { " will be resumed." }}</p>
+                        <p>{what}{will_be(op)}</p>
                         <p>{pause_note(&kind, pause)}</p>
                         {(pause && object).then(|| view! {
                             <label class="check-row">
@@ -764,11 +292,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                                 </label>
                                 {move || (held() == Some(None)).then(|| view! { <p class="warn-text">"Enter 0 or more replicas."</p> })}
                             })}
-                            <p class="muted">{move || match (held().flatten(), now) {
-                                (Some(n), _) => format!("Sets autoscaling.keda.sh/paused-replicas to {n}."),
-                                (None, Some(n)) => format!("Sets autoscaling.keda.sh/paused; it stays at {n} replicas."),
-                                (None, None) => "Sets autoscaling.keda.sh/paused; it stays at the replicas it has.".to_owned(),
-                            }}</p>
+                            <p class="muted">{move || pause_detail(held().flatten(), now)}</p>
                         })}
                         {(pause && !object).then(|| view! { <p class="muted">"Sets autoscaling.keda.sh/paused."</p> })}
                         {(!pause).then(|| view! { <p class="muted">"Removes the autoscaling.keda.sh/paused and paused-replicas annotations."</p> })}
@@ -787,16 +311,15 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         />
                     </label>
                     {
-                        let grows = grows.clone();
-                        move || (!grows()).then(|| view! { <p class="warn-text">"Enter a size bigger than now, like 20Gi."</p> })
+                        let current_size = current_size.clone();
+                        move || (!size.with(|s| grows(s, &current_size))).then(|| view! { <p class="warn-text">"Enter a size bigger than now, like 20Gi."</p> })
                     }
                     <p class="muted">"Claims can't shrink again. The filesystem grows when the driver resizes it, which for some drivers needs the pod restarted."</p>
                 }
                 .into_any(),
                 Op::Uninstall => {
-                    let objects = release_objects(store, &name);
-                    let shown = objects.len().min(8);
-                    let more = objects.len() - shown;
+                    let objects = store.object.with_untracked(|o| release_objects(o, &name));
+                    let (shown, more) = listed(objects.len());
                     let list = objects
                         .iter()
                         .take(shown)
@@ -824,29 +347,17 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     .into_any()
                 }
                 Op::Rollback => {
-                    let revisions = history(store, &name, false);
-                    let current = revisions.first().cloned();
+                    let revisions = store.object.with_untracked(|o| history(o, &name));
                     let options = revisions
                         .iter()
                         .skip(1)
-                        .map(|(rev, status, chart, app, _)| {
-                            let label = format!("{rev} · {chart}{} · {status}", if app.is_empty() { String::new() } else { format!(" (app {app})") });
-                            view! { <option value=rev.to_string()>{label}</option> }
-                        })
+                        .map(|r| view! { <option value=r.0.to_string()>{revision_label(r)}</option> })
                         .collect_view();
-                    let chosen = {
-                        let revisions = revisions.clone();
-                        move || {
-                            let r: i64 = rollback_to.get().parse().ok()?;
-                            revisions.iter().find(|x| x.0 == r).cloned()
-                        }
-                    };
-                    let next = current.as_ref().map_or(0, |c| c.0 + 1);
+                    let note = rollback_note(&revisions);
+                    let now = revisions.first().map(current_revision);
                     view! {
                         <p>"Roll "{what}" back."</p>
-                        {current.map(|(rev, status, chart, _, _)| view! {
-                            <p class="muted">{format!("Now at revision {rev} ({chart}, {status}).")}</p>
-                        })}
+                        {now.map(|n| view! { <p class="muted">{n}</p> })}
                         <label class="rollback-field">
                             "To revision"
                             <select class="rollback-select" prop:value=move || rollback_to.get() on:change=move |ev| rollback_to.set(event_target_value(&ev))>
@@ -857,62 +368,39 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             <input type="checkbox" prop:checked=move || wait.get() on:change=move |ev| wait.set(event_target_checked(&ev)) />
                             " Wait until its resources are ready (up to 5 minutes)"
                         </label>
-                        {move || chosen().filter(|c| c.1 == "failed").map(|_| view! {
+                        {move || rollback_to.with(|r| chose_failed(&revisions, r)).then(|| view! {
                             <p class="warn-text">"That revision failed when it was deployed."</p>
                         })}
-                        <p class="muted">{format!(
-                            "Helm re-applies that revision's manifest and values as a new revision {next} and runs its rollback hooks. Changes made outside Helm may be overwritten."
-                        )}</p>
+                        <p class="muted">{note}</p>
                         <p class="muted small">"Runs helm rollback with your kubeconfig and this context."</p>
                     }
                     .into_any()
                 }
                 Op::ForceSync => {
                     let cluster = kind.kind == "ClusterExternalSecret";
-                    let children = if cluster { provisioned_count(store, &name) } else { 0 };
+                    let children = if cluster { store.object.with_untracked(|o| provisioned_count(o, &name)) } else { 0 };
                     view! {
                         <p>
                             {what}" gets the annotation "<span class="mono">"force-sync"</span>
-                            {if cluster {
-                                format!(
-                                    " set to now, and so {}. External Secrets then fetches from the store and updates each Secret.",
-                                    match children {
-                                        0 => "will each ExternalSecret it makes".to_owned(),
-                                        1 => "does its ExternalSecret".to_owned(),
-                                        n => format!("do its {n} ExternalSecrets"),
-                                    }
-                                )
-                            } else {
-                                " set to now. External Secrets then fetches from the store and updates the Secret.".to_owned()
-                            }}
+                            {force_sync_text(cluster, children)}
                         </p>
-                        {force_sync_note(store, &name).map(|n| view! { <p class="warn-text">{n}</p> })}
+                        {store.object.with_untracked(|o| force_sync_note(o, &name)).map(|n| view! { <p class="warn-text">{n}</p> })}
                         <p class="muted">"Pods that read the Secret as environment variables keep the old values until they restart; mounted files update within about a minute."</p>
                     }
                     .into_any()
                 }
                 Op::Reclaim => {
-                    let note = if new_policy == "Delete" {
-                        "Once its claim is deleted, the volume and all its data are deleted too."
-                    } else {
-                        "Once its claim is deleted, the volume and its data are kept; you clean them up yourself."
-                    };
+                    let (note, class) = reclaim_note(policy);
                     view! {
-                        <p>"Change the reclaim policy of "{what}" to "<strong>{new_policy}</strong>"?"</p>
-                        <p class=if new_policy == "Delete" { "warn-text" } else { "muted" }>{note}</p>
+                        <p>"Change the reclaim policy of "{what}" to "<strong>{policy}</strong>"?"</p>
+                        <p class=class>{note}</p>
                     }
                     .into_any()
                 }
                 Op::Save => {
-                    let save = save.clone().unwrap_or_else(|| SaveData {
-                        resource_version: String::new(),
-                        changes: Vec::new(),
-                        added: Vec::new(),
-                        changed: Vec::new(),
-                        removed: Vec::new(),
-                    });
+                    let save = save.clone().unwrap_or_default();
                     let line = |label: &'static str, keys: &[String]| {
-                        (!keys.is_empty()).then(|| view! { <li>{label}" "<span class="mono">{keys.join(", ")}</span></li> })
+                        key_list(keys).map(|keys| view! { <li>{label}" "<span class="mono">{keys}</span></li> })
                     };
                     let note = "Pods that read it as environment variables keep the old values until they restart; mounted files update within about a minute (not subPath mounts).";
                     view! {
@@ -934,7 +422,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                             None if error.with(Option::is_none) => view! { <p class="muted">"Reading replicas…"</p> }.into_any(),
                             None => ().into_any(),
                             Some(r) => view! {
-                                <p class="muted">{format!("Now {} desired, {} running.", r.desired, r.current)}</p>
+                                <p class="muted">{replicas_text(r)}</p>
                                 <label class="replicas">
                                     "Replicas "
                                     <input
@@ -956,45 +444,8 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                     .into_any()
                 }
             };
-            let (title, doing) = match op {
-                Op::Restart => (format!("Restart {}?", kind.kind), "Restarting…"),
-                Op::Scale => (format!("Scale {}?", kind.kind), "Scaling…"),
-                Op::Run => (format!("Run {} now?", kind.kind), "Starting…"),
-                Op::Suspend => (format!("Suspend {}?", kind.kind), "Suspending…"),
-                Op::Resume => (format!("Resume {}?", kind.kind), "Resuming…"),
-                Op::Range if kind.kind == "ScaledJob" => ("Edit Jobs at once?".to_owned(), "Saving…"),
-                Op::Range if keda => ("Edit replica range?".to_owned(), "Saving…"),
-                Op::Range => ("Edit HPA range?".to_owned(), "Saving…"),
-                Op::Pause => (format!("Pause {}?", kind.kind), "Pausing…"),
-                Op::Unpause => (format!("Resume {}?", kind.kind), "Resuming…"),
-                Op::Expand => ("Expand claim?".to_owned(), "Expanding…"),
-                Op::Reclaim => ("Change reclaim policy?".to_owned(), "Saving…"),
-                Op::Rollback => ("Roll back Helm release?".to_owned(), "Rolling back…"),
-                Op::Uninstall => ("Delete Helm release?".to_owned(), "Deleting…"),
-                Op::Save => (format!("Save {}?", kind.kind), "Saving…"),
-                Op::ForceSync => (format!("Force sync {}?", kind.kind), "Syncing…"),
-            };
-            let label = move || {
-                if busy.get() {
-                    doing.to_owned()
-                } else if op == Op::Scale {
-                    replicas().map_or_else(|| "Scale".to_owned(), |n| format!("Scale to {n}"))
-                } else if op == Op::Uninstall {
-                    "Delete release".to_owned()
-                } else if op == Op::Rollback {
-                    rollback_to.with(|r| if r.is_empty() { "Rollback".to_owned() } else { format!("Roll back to {r}") })
-                } else if op == Op::Reclaim {
-                    format!("Set {new_policy}")
-                } else if op == Op::Expand {
-                    size.with(|s| if s.trim().is_empty() { "Expand".to_owned() } else { format!("Expand to {}", s.trim()) })
-                } else if op == Op::Pause {
-                    held().flatten().map_or_else(|| "Pause".to_owned(), |n| format!("Pause at {n}"))
-                } else if op == Op::Range {
-                    range().map_or_else(|| "Save".to_owned(), |(lo, hi)| format!("Set {lo}–{hi}"))
-                } else {
-                    op.label().to_owned()
-                }
-            };
+            let (title, doing) = title(op, &kind);
+            let label = move || confirm_label(op, doing, &form());
             view! {
                 <Modal on_cancel=move |()| close() busy=busy prod=context.prod_like wide=op == Op::Rollback>
                         <h2>{title}</h2>
@@ -1002,7 +453,7 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         {context.prod_like.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
                         })}
-                        {(context.prod_like || op == Op::Uninstall).then(|| view! {
+                        {needs_name(context.prod_like, op).then(|| view! {
                             <p>"Type the name to confirm:"</p>
                             <input
                                 class="confirm-input"
@@ -1012,10 +463,9 @@ pub fn WorkloadDialog(store: Store) -> impl IntoView {
                         })}
                         {move || error.get().map(|e| view! { <p class="warn">{e}</p> })}
                         <div class="modal-actions">
-                            // Leaving the Save dialog never saves; it goes back to the edit.
-                            <button prop:disabled=move || busy.get() on:click=move |_| close()>{if op == Op::Save { "Back to editing" } else { "Cancel" }}</button>
+                            <button prop:disabled=move || busy.get() on:click=move |_| close()>{cancel_label(op)}</button>
                             <button
-                                class=if op == Op::Uninstall { "danger" } else { "primary" }
+                                class=confirm_class(op)
                                 prop:disabled=move || !ok()
                                 on:click=confirm.clone()
                             >{label}</button>

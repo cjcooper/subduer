@@ -5,33 +5,31 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{
-    DataChange, DataEntry, DataSet, InfoRow, InfoSection, InfoTable, KindRef, ObjectDetails, ObjectLink, SecretValues,
-};
+use subduer_types::{DataEntry, DataSet, InfoRow, InfoSection, InfoTable, ObjectDetails, ObjectLink, SecretValues};
 
 use crate::app::{Store, format_age};
+use crate::logic::object_detail::{
+    AccessArgs, DetailsArgs, Draft, Pending, RowValue, SecretArgs, UrlArgs, VERBS, access_answer, ago_text, bad_key,
+    binary_note, can_ask, can_patch, can_save, checks_access, conditions_summary, data_summary, data_values, diff, dirty,
+    dirty_label, draft_field, drafts, edit_label, editable, events_section, fill, fmt_count, has_fill, head_class,
+    hosting_note, info_key, keep_result, kind_section_id, label_chip, link_title, no_access, node_summary, pending_text,
+    remove_draft, row_title, row_value, save_request, section_empty, size_line, skip_load, sort_headers, sort_table,
+    time_cell, time_text, update_draft, value_rows, wants_node_history, FILL_HEADER,
+};
 use crate::overview::Meter;
 use crate::pod_detail::{EventList, HistoryNote, NodeUsageChart, Resource, SecretValue, Section};
 use crate::tauri::invoke;
-use crate::workload::SaveData;
-use crate::workload_detail::{ConditionList, badge_class, healthy, relative};
+use crate::workload_detail::{ConditionList, badge_class, relative};
 
 /// Re-fetches the selected object's details. Background refreshes pause
 /// while its data is being edited, so they don't replace the draft.
 pub fn load(store: Store, quiet: bool) {
-    #[derive(Serialize)]
-    struct Args {
-        kind: KindRef,
-        namespace: Option<String>,
-        name: String,
-    }
-    if quiet && store.editing.get_untracked() {
+    if skip_load(quiet, store.editing.get_untracked()) {
         return;
     }
     let Some(kind) = store.kind.get_untracked() else { return };
     let Some(row) = store.selected.get_untracked() else { return };
-    if kind.key() == "core/Node" {
+    if wants_node_history(&kind) {
         crate::pod_detail::load_history(store, quiet, "node_history", None);
     }
     if store.pod_loading.get_untracked() {
@@ -42,15 +40,14 @@ pub fn load(store: Store, quiet: bool) {
     }
     store.pod_loading.set(true);
     spawn_local(async move {
-        let args = Args { kind, namespace: row.namespace.clone(), name: row.name.clone() };
+        let args = DetailsArgs { kind, namespace: row.namespace.clone(), name: row.name.clone() };
         let result = invoke::<_, ObjectDetails>("object_details", &args).await;
         let current = store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == row.id));
         // Editing may have started while this was in flight.
-        if current && !(quiet && store.editing.get_untracked()) {
-            // A failed background refresh keeps the last good render.
-            if !(quiet && result.is_err() && store.object.with_untracked(|o| matches!(o, Some(Ok(_))))) {
-                store.object.set(Some(result));
-            }
+        let editing = store.editing.get_untracked();
+        let have_good = store.object.with_untracked(|o| matches!(o, Some(Ok(_))));
+        if keep_result(quiet, current, editing, result.is_err(), have_good) {
+            store.object.set(Some(result));
         }
         store.pod_loading.set(false);
     });
@@ -71,7 +68,7 @@ pub fn ObjectDetailView(store: Store) -> impl IntoView {
 
 #[component]
 fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
-    let kind_id = d.kind.to_lowercase();
+    let kind_id = kind_section_id(&d.kind);
     let status = d.status.clone().unwrap_or_default();
     let data = d.data.clone().map(|data| {
         let (namespace, name) = (d.namespace.clone().unwrap_or_default(), d.name.clone());
@@ -83,33 +80,15 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
         .into_iter()
         .map(|s| view! { <InfoSectionView store=store s=s /> })
         .collect_view();
-    // A namespace's own list is the recent warnings from anything in it.
-    let in_namespace = d.kind == "Namespace";
-    // Nodes are cluster-scoped, but their events are found in any namespace.
-    let events = (d.namespace.is_some() || in_namespace || d.kind == "Node").then(|| {
+    let events = events_section(&d.kind, d.namespace.as_deref(), &d.events).map(|section| {
         let events = d.events.clone();
-        let warnings = events.iter().filter(|e| e.type_ == "Warning").count();
-        let summary = match (events.len(), warnings) {
-            (0, _) => "none".to_owned(),
-            (n, 0) => n.to_string(),
-            (n, w) => format!("{n} · ⚠ {w}"),
-        };
         view! {
-            <Section
-                store=store
-                id=if in_namespace { "ns-warnings" } else { "events" }
-                title=if in_namespace { "Recent warnings".to_owned() } else { "Events".to_owned() }
-                summary=summary
-            >
-                <EventList
-                    store=store
-                    events=events.clone()
-                    empty=if in_namespace { "No warnings in it." } else { "No events for it." }
-                />
+            <Section store=store id=section.id title=section.title.to_owned() summary=section.summary>
+                <EventList store=store events=events.clone() empty=section.empty />
             </Section>
         }
     });
-    let check = (d.kind == "ServiceAccount").then(|| {
+    let check = checks_access(&d.kind).then(|| {
         let (ns, name) = (d.namespace.clone().unwrap_or_default(), d.name.clone());
         view! {
             <Section store=store id="check-access" title="Check access".to_owned() summary="ask the API server".to_owned()>
@@ -122,21 +101,18 @@ fn ObjectSections(store: Store, d: ObjectDetails) -> impl IntoView {
         // Hosting with one pod per node (Fargate) is always full by design: say why the count is missing.
         let hosting = n.one_pod_hosting.clone();
         let (pods, capacity) = (n.pods as f64, n.pod_capacity as f64);
-        let summary = match &n.one_pod_hosting {
-            None => format!("{} of {} pods", n.pods, n.pod_capacity),
-            Some(h) => h.clone(),
-        };
+        let summary = node_summary(&n);
         view! {
             <Section store=store id="resources" title="Resources".to_owned() summary=summary>
                 <NodeUsageChart store=store resource=Resource::Cpu totals=n.cpu />
                 <NodeUsageChart store=store resource=Resource::Memory totals=n.memory />
                 {hosting.is_none().then(|| view! {
                     <div class="node-pods-meter">
-                        <Meter label="Pods" value=pods total=capacity fmt=|v| format!("{v:.0}") />
+                        <Meter label="Pods" value=pods total=capacity fmt=fmt_count />
                     </div>
                 })}
                 {hosting.clone().map(|h| view! {
-                    <p class="legend small">{format!("Pod count not shown: {h} runs one pod per node, so the node is always full by design.")}</p>
+                    <p class="legend small">{hosting_note(&h)}</p>
                 })}
                 <HistoryNote store=store subject="this node" />
             </Section>
@@ -159,21 +135,17 @@ fn KindInfo(store: Store, d: ObjectDetails) -> impl IntoView {
     let created = d.created.clone().unwrap_or_default();
     let created_text = {
         let created = created.clone();
-        move || format!("{} ago · {}", format_age(store.now.get(), &created), created)
+        move || ago_text(&format_age(store.now.get(), &created), &created)
     };
     let rows = d.info.iter().cloned().map(|r| view! { <InfoRowView store=store r=r /> }).collect_view();
     let labels = d
         .labels
         .iter()
-        .map(|(k, v)| view! { <span class="chip">{format!("{k}={v}")}</span> })
+        .map(|(k, v)| view! { <span class="chip">{label_chip(k, v)}</span> })
         .collect_view();
     let annotations = d.annotations.clone();
     let conditions = d.conditions.clone();
-    let unhealthy = conditions.iter().filter(|c| !healthy(c)).count();
-    let conditions_summary = match (conditions.len(), unhealthy) {
-        (n, 0) => n.to_string(),
-        (n, u) => format!("{n} · {u} unhealthy"),
-    };
+    let conditions_summary = conditions_summary(&conditions);
     view! {
         <dl class="kv">
             {d.status.clone().map(|s| view! { <dt>"Status"</dt><dd><span class=badge_class(&s)>{s.clone()}</span></dd> })}
@@ -201,17 +173,15 @@ fn KindInfo(store: Store, d: ObjectDetails) -> impl IntoView {
 
 #[component]
 fn InfoRowView(store: Store, r: InfoRow) -> impl IntoView {
-    let value = if r.time && !js_sys::Date::parse(&r.value).is_nan() {
-        let v = r.value.clone();
-        view! { <span>{move || format!("{} · {v}", relative(store.now.get(), &v))}</span> }.into_any()
-    } else if r.value.contains('\n') {
-        view! { <pre class="data-value">{r.value.clone()}</pre> }.into_any()
-    } else if let Some(url) = r.url.clone() {
-        view! { <OpenUrl store=store url=url /> }.into_any()
-    } else if let Some(link) = r.link.clone() {
-        view! { <Link store=store link=link text=r.value.clone() /> }.into_any()
-    } else {
-        view! { <span>{r.value.clone()}</span> }.into_any()
+    let value = match row_value(&r, !js_sys::Date::parse(&r.value).is_nan()) {
+        RowValue::Time => {
+            let v = r.value.clone();
+            view! { <span>{move || time_text(&relative(store.now.get(), &v), &v)}</span> }.into_any()
+        }
+        RowValue::Block => view! { <pre class="data-value">{r.value.clone()}</pre> }.into_any(),
+        RowValue::Url(url) => view! { <OpenUrl store=store url=url /> }.into_any(),
+        RowValue::Link(link) => view! { <Link store=store link=link text=r.value.clone() /> }.into_any(),
+        RowValue::Plain => view! { <span>{r.value.clone()}</span> }.into_any(),
     };
     view! { <dt>{r.key.clone()}</dt><dd class:mono=r.mono>{value}</dd> }
 }
@@ -219,14 +189,10 @@ fn InfoRowView(store: Store, r: InfoRow) -> impl IntoView {
 /// An address with a button that opens it in the browser.
 #[component]
 fn OpenUrl(store: Store, url: String) -> impl IntoView {
-    #[derive(Serialize)]
-    struct Args {
-        url: String,
-    }
     let open = {
         let url = url.clone();
         move |_| {
-            let args = Args { url: url.clone() };
+            let args = UrlArgs { url: url.clone() };
             spawn_local(async move {
                 if let Err(e) = invoke::<_, ()>("open_url", &args).await {
                     store.error.set(Some(e));
@@ -245,7 +211,7 @@ fn OpenUrl(store: Store, url: String) -> impl IntoView {
 /// Opens another object in its own list.
 #[component]
 fn Link(store: Store, link: ObjectLink, text: String) -> impl IntoView {
-    let title = format!("Open {} {}", link.kind.rsplit('/').next().unwrap_or_default(), link.name);
+    let title = link_title(&link);
     view! {
         <button
             class="link"
@@ -257,7 +223,7 @@ fn Link(store: Store, link: ObjectLink, text: String) -> impl IntoView {
 
 #[component]
 fn InfoSectionView(store: Store, s: InfoSection) -> impl IntoView {
-    let empty = s.rows.is_empty() && s.table.as_ref().is_none_or(|t| t.rows.is_empty());
+    let empty = section_empty(&s);
     let (rows, table, note) = (s.rows.clone(), s.table.clone(), s.empty.clone());
     view! {
         <Section store=store id=s.id.clone() title=s.title.clone() summary=s.summary.clone()>
@@ -272,22 +238,20 @@ fn InfoSectionView(store: Store, s: InfoSection) -> impl IntoView {
 
 #[component]
 fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
-    let has_fill = t.rows.iter().any(|r| r.fill.is_some());
-    let (numeric, mono) = (t.numeric.clone(), t.mono.clone());
-    // Sorts are kept per section, so a section's order survives refreshes.
-    let table = format!("detail:{id}");
+    let has_fill = has_fill(&t);
+    let mono = t.mono.clone();
+    let table = sort_table(&id);
     let head = t
         .columns
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let class = if numeric.contains(&i) { "num" } else { "" };
+            let class = head_class(&t, i);
             view! { <crate::sort::SortTh sorts=store.sorts table=table.clone() header=c.clone() class=class /> }
         })
         .collect_view();
     let fill_head = has_fill.then(|| view! { <crate::sort::SortTh sorts=store.sorts table=table.clone() header=FILL_HEADER /> });
-    let mut headers: Vec<String> = t.columns.clone();
-    headers.push(FILL_HEADER.to_owned());
+    let headers = sort_headers(&t);
     let rows = move || {
         let names: Vec<&str> = headers.iter().map(String::as_str).collect();
         let by = store.sorts.by(&table, &names);
@@ -300,7 +264,7 @@ fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    if t.times.contains(&i) && !js_sys::Date::parse(c).is_nan() {
+                    if time_cell(&t, i, !js_sys::Date::parse(c).is_nan()) {
                         let c = c.clone();
                         let title = c.clone();
                         return view! { <td class="age" title=title>{move || format!("{} ago", format_age(store.now.get(), &c))}</td> }.into_any();
@@ -309,14 +273,12 @@ fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
                 })
                 .collect_view();
             let fill = has_fill.then(|| {
-                let pct = r.fill.map(|f| (f * 100.0).round());
                 view! {
                     <td class="fill-cell">
-                        {pct.map(|p| {
-                            let (warning, critical) = (r.warn && p < 100.0, p >= 100.0);
+                        {fill(&r).map(|f| {
                             view! {
-                                <span class="meter small" title=format!("{p}% used")>
-                                    <span class="meter-fill" class:warning=warning class:critical=critical style=format!("width:{p}%")></span>
+                                <span class="meter small" title=f.title>
+                                    <span class="meter-fill" class:warning=f.warning class:critical=f.critical style=f.style></span>
                                 </span>
                             }
                         })}
@@ -324,7 +286,7 @@ fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
                 }
             });
             let link = r.link.clone();
-            let title = link.as_ref().map(|l| format!("Open {}", l.name));
+            let title = row_title(&r);
             view! {
                 <tr
                     class:clickable=link.is_some()
@@ -348,40 +310,11 @@ fn InfoTableView(store: Store, t: InfoTable, id: String) -> impl IntoView {
     }
 }
 
-/// The heading of the bar column (quota used of hard, disk used, …).
-const FILL_HEADER: &str = "Used";
-
-/// How a cell of a details table sorts: times as ages, numeric columns by
-/// value, the bar by its share, the rest as text.
-pub(crate) fn info_key(t: &InfoTable, r: &subduer_types::InfoTableRow, i: usize) -> crate::sort::Key {
-    use crate::sort::Key;
-    if i == t.columns.len() {
-        return Key::opt(r.fill);
-    }
-    let cell = r.cells.get(i).map_or("", String::as_str);
-    if t.times.contains(&i) {
-        Key::age(cell)
-    } else if t.numeric.contains(&i) {
-        Key::quantity(cell)
-    } else {
-        Key::text(cell)
-    }
-}
-
 // ---- Check access ----
 
 /// "May this ServiceAccount do X?", answered by a SubjectAccessReview.
 #[component]
 fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
-    #[derive(Serialize)]
-    struct Args {
-        account_namespace: String,
-        account: String,
-        verb: String,
-        resource: String,
-        namespace: String,
-        name: String,
-    }
     let verb = RwSignal::new("get".to_owned());
     let resource = RwSignal::new(String::new());
     let namespace = RwSignal::new(account_namespace.clone());
@@ -389,10 +322,10 @@ fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
     let busy = RwSignal::new(false);
     let answer = RwSignal::new(None::<Result<subduer_types::AccessCheck, String>>);
     let ask = move || {
-        if resource.with_untracked(|r| r.trim().is_empty()) {
+        if !resource.with_untracked(|r| can_ask(r)) {
             return;
         }
-        let args = Args {
+        let args = AccessArgs {
             account_namespace: account_namespace.clone(),
             account: account.clone(),
             verb: verb.get_untracked(),
@@ -428,26 +361,24 @@ fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
             </label>
         }
     };
-    let verbs = ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "*"];
     view! {
         <div class="access-form">
             <label class="access-field">
                 <span class="muted small">"Verb"</span>
                 <select prop:value=move || verb.get() on:change=move |ev| { verb.set(event_target_value(&ev)); answer.set(None); }>
-                    {verbs.map(|v| view! { <option value=v>{v}</option> }).collect_view()}
+                    {VERBS.map(|v| view! { <option value=v>{v}</option> }).collect_view()}
                 </select>
             </label>
             {field("Resource", resource, "pods, deployments.apps, pods/exec")}
             {field("Namespace", namespace, "empty: all namespaces")}
             {field("Name", name, "any")}
-            <button class="btn small primary" prop:disabled=move || busy.get() || resource.with(|r| r.trim().is_empty()) on:click=ask_click>
+            <button class="btn small primary" prop:disabled=move || busy.get() || !resource.with(|r| can_ask(r)) on:click=ask_click>
                 {move || if busy.get() { "Asking…" } else { "Check" }}
             </button>
         </div>
         {move || answer.get().map(|a| match a {
             Ok(c) => {
-                let (class, text) = if c.allowed { ("badge badge-ready", "Allowed") } else { ("badge badge-warning", "Denied") };
-                let reason = if c.reason.is_empty() && !c.allowed { "No rule allows it.".to_owned() } else { c.reason.clone() };
+                let (class, text, reason) = access_answer(&c);
                 view! { <p class="access-answer"><span class=class>{text}</span>" "<span class="muted">{reason}</span></p> }.into_any()
             }
             Err(e) => view! { <p class="warn">{e}</p> }.into_any(),
@@ -458,103 +389,12 @@ fn CheckAccess(account_namespace: String, account: String) -> impl IntoView {
 
 // ---- Data: view, edit, save ----
 
-/// One entry of the draft while editing.
-#[derive(Debug, Clone, PartialEq)]
-struct Draft {
-    id: u32,
-    key: String,
-    value: String,
-    binary: bool,
-    size: usize,
-}
-
-/// Key names the API accepts in ConfigMaps and Secrets.
-fn valid_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 253
-        && key != "."
-        && key != ".."
-        && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-/// What a save would change (`None`: nothing yet), or why it can't be saved.
-type Pending = Result<Option<(Vec<DataChange>, SaveSummary)>, String>;
-
-fn diff(original: &[(String, Option<String>)], draft: &[Draft]) -> Pending {
-    let mut seen = std::collections::HashSet::new();
-    for d in draft {
-        if !valid_key(&d.key) {
-            return Err(if d.key.is_empty() {
-                "Every key needs a name.".to_owned()
-            } else {
-                format!("“{}” isn't a valid key: use letters, digits, '-', '_' and '.'.", d.key)
-            });
-        }
-        if !seen.insert(d.key.as_str()) {
-            return Err(format!("“{}” is used twice.", d.key));
-        }
-    }
-    let mut changes = Vec::new();
-    let mut summary = SaveSummary::default();
-    for (key, _) in original {
-        if !seen.contains(key.as_str()) {
-            changes.push(DataChange { key: key.clone(), value: None });
-            summary.removed.push(key.clone());
-        }
-    }
-    for d in draft.iter().filter(|d| !d.binary) {
-        match original.iter().find(|(k, _)| *k == d.key) {
-            Some((_, Some(old))) if *old == d.value => {}
-            Some(_) => {
-                changes.push(DataChange { key: d.key.clone(), value: Some(d.value.clone()) });
-                summary.changed.push(d.key.clone());
-            }
-            None => {
-                changes.push(DataChange { key: d.key.clone(), value: Some(d.value.clone()) });
-                summary.added.push(d.key.clone());
-            }
-        }
-    }
-    Ok((!changes.is_empty()).then_some((changes, summary)))
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-struct SaveSummary {
-    added: Vec<String>,
-    changed: Vec<String>,
-    removed: Vec<String>,
-}
-
-/// A ConfigMap's text values as the edit's starting point.
-fn data_values(entries: &[DataEntry]) -> Vec<(String, Option<String>)> {
-    entries.iter().map(|e| (e.key.clone(), e.value.clone())).collect()
-}
-
-fn size_text(bytes: usize) -> String {
-    match bytes {
-        b if b < 1024 => format!("{b} B"),
-        b if b < 1024 * 1024 => format!("{:.1} KiB", b as f64 / 1024.0),
-        b => format!("{:.1} MiB", b as f64 / 1024.0 / 1024.0),
-    }
-}
-
 #[component]
 fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> impl IntoView {
-    #[derive(Serialize)]
-    struct Args {
-        namespace: String,
-        name: String,
-    }
     let secret = data.secret;
     let kind = store.kind.get_untracked();
-    let can_patch = kind.as_ref().is_some_and(|k| {
-        store.cluster.with_untracked(|c| {
-            c.iter()
-                .flat_map(|c| &c.kinds)
-                .any(|i| i.kind == *k && i.verbs.iter().any(|v| v == "patch"))
-        })
-    });
-    let editable = data.read_only.is_none() && can_patch;
+    let can_patch = store.cluster.with_untracked(|c| can_patch(kind.as_ref(), c.as_ref()));
+    let editable = editable(data.read_only.as_deref(), can_patch);
     // The values the edit started from, and the draft. Both are dropped on
     // Cancel, save or selection change, so Secret values don't linger.
     let original = RwSignal::new(Vec::<(String, Option<String>)>::new());
@@ -571,14 +411,7 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
             let entries_now = entries.clone();
             let entries = entries.clone();
             let to_draft = move |values: Vec<(String, Option<String>)>| {
-                let drafts: Vec<Draft> = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let value = values.iter().find(|(k, _)| *k == e.key).and_then(|(_, v)| v.clone());
-                        Draft { id: i as u32, key: e.key.clone(), binary: value.is_none(), value: value.unwrap_or_default(), size: e.size }
-                    })
-                    .collect();
+                let drafts = drafts(&entries, &values);
                 next_id.set(drafts.len() as u32);
                 original.set(values);
                 draft.set(drafts);
@@ -586,7 +419,7 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
             };
             if secret {
                 starting.set(true);
-                let args = Args { namespace: namespace.clone(), name: name.clone() };
+                let args = SecretArgs { namespace: namespace.clone(), name: name.clone() };
                 spawn_local(async move {
                     match invoke::<_, SecretValues>("secret_values", &args).await {
                         Ok(values) => to_draft(values),
@@ -616,9 +449,9 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
     });
     let pending = move || draft.with(|d| original.with(|o| diff(o, d)));
     // Anything typed counts as unsaved, including a draft that can't be saved yet.
-    let what = format!("{} {name}", if secret { "Secret" } else { "ConfigMap" });
+    let what = dirty_label(secret, &name);
     Effect::new(move |_| {
-        let dirty = (store.editing.get() && !matches!(pending(), Ok(None))).then(|| what.clone());
+        let dirty = dirty(store.editing.get(), &pending(), &what);
         if store.dirty.with_untracked(|d| *d != dirty) {
             store.dirty.set(dirty);
         }
@@ -627,14 +460,7 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
     let save = {
         let (namespace, name, kind, rv) = (namespace.clone(), name.clone(), kind.clone(), data.resource_version.clone());
         move |_| {
-            let (Some(kind), Ok(Some((changes, summary)))) = (kind.clone(), pending()) else { return };
-            let save = SaveData {
-                resource_version: rv.clone(),
-                changes,
-                added: summary.added,
-                changed: summary.changed,
-                removed: summary.removed,
-            };
+            let Some((kind, save)) = save_request(kind.clone(), pending(), &rv) else { return };
             crate::workload::request_save(store, kind, namespace.clone(), name.clone(), save);
         }
     };
@@ -653,13 +479,13 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
                         <button class="btn small" on:click=move |_| cancel()>"Cancel"</button>
                         <button
                             class="btn small primary"
-                            prop:disabled=move || !matches!(pending(), Ok(Some(_)))
+                            prop:disabled=move || !can_save(&pending())
                             on:click=save
                         >"Save…"</button>
                     }
                     .into_any()
                 } else if editable {
-                    let label = if secret { "Edit (shows values)" } else { "Edit" };
+                    let label = edit_label(secret);
                     view! {
                         <button class="btn small" prop:disabled=move || starting.get() on:click=begin.clone()>
                             {move || if starting.get() { "Reading…" } else { label }}
@@ -674,12 +500,12 @@ fn DataSection(store: Store, data: DataSet, namespace: String, name: String) -> 
         .into_any()
     };
     let count = data.entries.len();
-    let summary = if count == 0 { "empty".to_owned() } else { format!("{count} {}", if count == 1 { "key" } else { "keys" }) };
+    let summary = data_summary(count);
     let (read_only, warning) = (data.read_only.clone(), data.warning.clone());
     view! {
         <Section store=store id="data" title="Data".to_owned() summary=summary actions=actions>
             {read_only.clone().map(|r| view! { <p class="muted">{r}</p> })}
-            {(!can_patch && read_only.is_none()).then(|| view! { <p class="muted">"Your access doesn't allow changing it."</p> })}
+            {no_access(read_only.as_deref(), can_patch).then(|| view! { <p class="muted">"Your access doesn't allow changing it."</p> })}
             {warning.clone().map(|w| view! { <p class="warn-text">{w}</p> })}
             {move || start_error.get().map(|e| view! { <p class="warn">{e}</p> })}
             {
@@ -718,7 +544,7 @@ fn DataView(store: Store, entries: Vec<DataEntry>, secret: bool, namespace: Stri
                 <div class="data-entry">
                     <div class="data-key">
                         <span class="mono">{e.key.clone()}</span>
-                        <span class="muted small">{size_text(e.size)}{e.binary.then_some(" · binary")}</span>
+                        <span class="muted small">{size_line(e.size, e.binary)}</span>
                     </div>
                     {value}
                 </div>
@@ -735,20 +561,12 @@ fn DataEditor(
     pending: Signal<Pending>,
     secret: bool,
 ) -> impl IntoView {
-    let field = move |id: u32, pick: fn(&Draft) -> String| {
-        move || draft.with(|d| d.iter().find(|x| x.id == id).map(pick).unwrap_or_default())
-    };
-    let set = move |id: u32, update: Box<dyn Fn(&mut Draft)>| {
-        draft.update(|d| {
-            if let Some(x) = d.iter_mut().find(|x| x.id == id) {
-                update(x);
-            }
-        })
-    };
+    let field = move |id: u32, pick: fn(&Draft) -> String| move || draft.with(|d| draft_field(d, id, pick));
+    let set = move |id: u32, update: Box<dyn Fn(&mut Draft)>| draft.update(|d| update_draft(d, id, update));
     let add = move |_| {
         let id = next_id.get_untracked();
         next_id.set(id + 1);
-        draft.update(|d| d.push(Draft { id, key: String::new(), value: String::new(), binary: false, size: 0 }));
+        draft.update(|d| d.push(Draft::new(id)));
     };
     view! {
         {secret.then(|| view! { <p class="muted small">"Values are shown while editing. Cancel or save to hide them again."</p> })}
@@ -757,15 +575,9 @@ fn DataEditor(
             key=|d| d.id
             children=move |d| {
                 let id = d.id;
-                let remove = move |_| draft.update(|list| list.retain(|x| x.id != id));
-                let rows = move || {
-                    let lines = field(id, |x| x.value.clone())().lines().count();
-                    (lines + 1).clamp(2, 16).to_string()
-                };
-                let bad_key = move || {
-                    let k = field(id, |x| x.key.clone())();
-                    !k.is_empty() && !valid_key(&k)
-                };
+                let remove = move |_| draft.update(|list| remove_draft(list, id));
+                let rows = move || value_rows(&field(id, |x| x.value.clone())());
+                let bad_key = move || bad_key(&field(id, |x| x.key.clone())());
                 view! {
                     <div class="data-entry editing">
                         <div class="data-key">
@@ -789,7 +601,7 @@ fn DataEditor(
                             <button class="btn small" title="Remove this key" on:click=remove>"Remove"</button>
                         </div>
                         {if d.binary {
-                            view! { <p class="muted small">{format!("Binary value, {}: kept as is.", size_text(d.size))}</p> }.into_any()
+                            view! { <p class="muted small">{binary_note(d.size)}</p> }.into_any()
                         } else {
                             view! {
                                 <textarea
@@ -811,19 +623,11 @@ fn DataEditor(
         <div class="data-edit-foot">
             <button class="btn small" on:click=add>"Add key"</button>
             <span class="muted small">
-                {move || match pending.get() {
+                {move || match pending.with(pending_text) {
                     Err(e) => view! { <span class="warn-text">{e}</span> }.into_any(),
-                    Ok(None) => "No changes yet.".into_any(),
-                    Ok(Some((_, s))) => {
-                        let n = s.added.len() + s.changed.len() + s.removed.len();
-                        format!("{n} {} to save.", if n == 1 { "change" } else { "changes" }).into_any()
-                    }
+                    Ok(text) => text.into_any(),
                 }}
             </span>
         </div>
     }
 }
-
-#[cfg(test)]
-#[path = "object_detail_tests.rs"]
-mod tests_unit;

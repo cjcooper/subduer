@@ -3,28 +3,17 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{ForwardInfo, ForwardRequest, ForwardSource, PortOption};
+use subduer_types::{ForwardInfo, ForwardSource, PortOption};
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::modal::Modal;
 use crate::app::Store;
+use crate::logic::forward::{self as logic, HEADERS, IdArgs, address};
+pub use crate::logic::forward::ForwardPrompt;
+use crate::modal::Modal;
 use crate::tauri::invoke;
-
-/// What the start dialog is for.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ForwardPrompt {
-    pub namespace: String,
-    pub source: ForwardSource,
-}
 
 pub fn request(store: Store, namespace: String, source: ForwardSource) {
     store.forward_prompt.set(Some(ForwardPrompt { namespace, source }));
-}
-
-#[derive(Serialize)]
-struct IdArgs {
-    id: u64,
 }
 
 fn open_in_browser(store: Store, id: u64) {
@@ -51,10 +40,6 @@ pub(crate) fn copy(text: &str) {
     {
         let _ = write.call1(&clipboard, &text.into());
     }
-}
-
-fn address(f: &ForwardInfo) -> String {
-    format!("127.0.0.1:{}", f.local_port)
 }
 
 /// Fetches the current list (e.g. after a reload); changes then arrive as events.
@@ -85,30 +70,21 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
         busy.set(false);
         let asked = prompt.clone();
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                namespace: String,
-                source: ForwardSource,
-            }
-            let result = invoke::<_, Vec<PortOption>>(
-                "forward_ports",
-                &Args { namespace: prompt.namespace, source: prompt.source },
-            )
-            .await;
+            let result = invoke::<_, Vec<PortOption>>("forward_ports", &logic::ports_args(prompt)).await;
             // Cancelled while loading, maybe reopened for something else.
             if store.forward_prompt.with_untracked(|p| p.as_ref() != Some(&asked)) {
                 return;
             }
-            if let Ok(first) = result.as_ref().map(|o| o.first().map(|p| p.port)) {
+            if let Some((first, port)) = logic::first_choice(&result) {
                 chosen.set(first);
-                local.set(first.map(|p| p.to_string()).unwrap_or_default());
+                local.set(port);
             }
             options.set(Some(result));
         });
     });
 
     let close = move || store.forward_prompt.set(None);
-    let local_port = move || local.with(|l| l.trim().parse::<u16>().ok());
+    let local_port = move || local.with(|l| logic::local_port(l));
     let start = move |_| {
         let (Some(prompt), Some(remote), Some(local_port)) = (store.forward_prompt.get_untracked(), chosen.get_untracked(), local_port())
         else {
@@ -117,12 +93,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args {
-                request: ForwardRequest,
-            }
-            let request = ForwardRequest { namespace: prompt.namespace, source: prompt.source, remote_port: remote, local_port };
-            match invoke::<_, ForwardInfo>("start_forward", &Args { request }).await {
+            match invoke::<_, ForwardInfo>("start_forward", &logic::start_args(prompt, remote, local_port)).await {
                 Ok(info) => started.set(Some(info)),
                 Err(e) => error.set(Some(e)),
             }
@@ -132,7 +103,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
 
     move || {
         store.forward_prompt.get().map(|prompt| {
-            let target = format!("{}/{}", prompt.namespace, prompt.source.label());
+            let target = logic::target(&prompt.namespace, &prompt.source);
             let body = move || match (started.get(), options.get()) {
                 (Some(f), _) => {
                     let (addr, id) = (address(&f), f.id);
@@ -168,12 +139,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                         .into_iter()
                         .map(|p| {
                             let port = p.port;
-                            let label = match (&p.name, &p.detail) {
-                                (Some(n), Some(d)) => format!("{port} · {n} · {d}"),
-                                (Some(n), None) => format!("{port} · {n}"),
-                                (None, Some(d)) => format!("{port} · {d}"),
-                                (None, None) => port.to_string(),
-                            };
+                            let label = logic::port_label(&p);
                             view! {
                                 <label class="port-option">
                                     <input
@@ -207,7 +173,7 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
                             <button prop:disabled=move || busy.get() on:click=move |_| close()>"Cancel"</button>
                             <button
                                 class="primary"
-                                prop:disabled=move || busy.get() || chosen.get().is_none() || local_port().is_none()
+                                prop:disabled=move || local.with(|l| !logic::can_start(busy.get(), chosen.get(), l))
                                 on:click=start
                             >{move || if busy.get() { "Starting…" } else { "Start forwarding" }}</button>
                         </div>
@@ -226,37 +192,19 @@ pub fn ForwardDialog(store: Store) -> impl IntoView {
     }
 }
 
-/// How a forward sorts under column `i`: ports by number, connections by
-/// how many are open, then the total.
-pub(crate) fn forward_key(f: &ForwardInfo, i: usize) -> crate::sort::Key {
-    use crate::sort::Key;
-    match i {
-        0 => Key::text(&format!("{}/{}", f.namespace, f.source.label())),
-        1 => Key::text(&f.context),
-        2 => Key::num(f64::from(f.local_port)),
-        3 => Key::num(f64::from(f.remote_port)),
-        4 => Key::num(f.active as f64 * 1e12 + f.total as f64),
-        _ => Key::text(f.last_error.as_deref().unwrap_or_default()),
-    }
-}
-
 #[component]
 pub fn ForwardsPage(store: Store) -> impl IntoView {
-    const HEADERS: [&str; 6] = ["Target", "Context", "Local", "Remote", "Connections", "Last error"];
     let rows = move || {
         let mut forwards = store.forwards.get();
-        crate::sort::sort(&mut forwards, store.sorts.by("forwards", &HEADERS), forward_key);
+        crate::sort::sort(&mut forwards, store.sorts.by("forwards", &HEADERS), logic::forward_key);
         forwards
             .into_iter()
             .map(|f| {
                 let (id, addr) = (f.id, address(&f));
                 let copy_addr = addr.clone();
-                let target = format!("{}/{}", f.namespace, f.source.label());
-                let remote = match &f.backend {
-                    Some(b) => format!("{} → {b}", f.remote_port),
-                    None => f.remote_port.to_string(),
-                };
-                let connections = format!("{} open · {} total", f.active, f.total);
+                let target = logic::target(&f.namespace, &f.source);
+                let remote = logic::remote(&f);
+                let connections = logic::connections(&f);
                 view! {
                     <tr>
                         <td class="mono">{target}</td>

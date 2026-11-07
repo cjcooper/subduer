@@ -12,41 +12,9 @@ use wasm_bindgen::JsCast;
 
 use crate::app::Store;
 use crate::icons::{ProdIcon, ProviderLogo};
+use crate::logic::clusters::{self as logic, drop_index, goes_with, moved};
 use crate::modal::{Generation, Modal};
 use crate::tauri::{NoArgs, invoke};
-
-/// The names in order after moving `name` to index `to`, or `None` if that
-/// leaves its file's run of rows (or changes nothing).
-pub(crate) fn moved(list: &[ManagedContext], name: &str, to: usize) -> Option<Vec<String>> {
-    let from = list.iter().position(|c| c.name == name)?;
-    let file = &list[from].file;
-    let first = list.iter().position(|c| c.file == *file)?;
-    let last = list.iter().rposition(|c| c.file == *file)?;
-    if to == from || to < first || to > last {
-        return None;
-    }
-    let mut names: Vec<String> = list.iter().map(|c| c.name.clone()).collect();
-    let n = names.remove(from);
-    names.insert(to, n);
-    Some(names)
-}
-
-/// Where a row dropped on row `target` (in its lower half if `after`) ends up.
-pub(crate) fn drop_index(from: usize, target: usize, after: bool) -> usize {
-    let at = if after { target + 1 } else { target };
-    if at > from { at - 1 } else { at }
-}
-
-/// What removing `name` takes with it: its cluster and user, unless another
-/// listed context uses them too.
-pub(crate) fn goes_with(list: &[ManagedContext], name: &str) -> (Option<String>, Option<String>) {
-    let Some(c) = list.iter().find(|c| c.name == name) else { return (None, None) };
-    let alone = |field: fn(&ManagedContext) -> &str| {
-        let value = field(c);
-        (!value.is_empty() && !list.iter().any(|o| o.name != name && field(o) == value)).then(|| value.to_owned())
-    };
-    (alone(|c| &c.cluster), alone(|c| &c.user))
-}
 
 #[component]
 pub fn ManageClustersDialog(store: Store) -> impl IntoView {
@@ -105,7 +73,7 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
         // Shown moved straight away; put back from the file if the write fails.
         list.update(|l| {
             if let Some(Ok(l)) = l {
-                l.contexts.sort_by_key(|c| order.iter().position(|o| *o == c.name));
+                logic::reorder(&mut l.contexts, &order);
             }
         });
         busy.set(true);
@@ -138,7 +106,7 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
                 busy.set(false);
                 confirm.set(None);
                 match result {
-                    Ok(r) => notice.set(Some(removed_text(&r))),
+                    Ok(r) => notice.set(Some(logic::removed_text(&r))),
                     Err(e) => error.set(Some(e)),
                 }
                 load();
@@ -180,12 +148,9 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
         let asking = move || confirm.with(|c| is(c.as_deref()));
         let file = c.file.clone();
         let (up, down, drag, over, start, ask, go) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
-        let same_file = move || {
-            let file = file.clone();
-            dragging.with(|d| d.as_ref().is_some_and(|d| contexts().iter().any(|x| x.name == *d && x.file == file)))
-        };
+        let same_file = move || dragging.with(|d| logic::drag_in_file(&contexts(), d.as_deref(), &file));
         let same_file_drop = same_file.clone();
-        let server = if c.server.is_empty() { "No cluster entry".to_owned() } else { c.server.clone() };
+        let server = logic::server_label(&c.server);
         let (cluster_goes, user_goes) = goes_with(&contexts(), &name);
         view! {
             <li
@@ -201,7 +166,7 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
                     // Over the row's lower half: the moved row goes after it.
                     let after = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()).is_some_and(|row| {
                         let r = row.get_bounding_client_rect();
-                        f64::from(ev.client_y()) > r.top() + r.height() / 2.0
+                        logic::drops_after(f64::from(ev.client_y()), r.top(), r.height())
                     });
                     drop_at.set(Some((over.clone(), after)));
                 }
@@ -247,45 +212,33 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
                 <div class="cluster-actions">
                     <button class="btn small icon prod-toggle" class:on=prod
                         aria-pressed=move || prod().to_string()
-                        aria-label=format!("Production: {name}")
-                        title=move || if prod() { "Production: changes need extra confirmation. Click to unmark." } else { "Not production. Click to mark it as production." }
+                        aria-label=logic::prod_label(&name)
+                        title=move || logic::prod_title(prod())
                         prop:disabled=move || busy.get()
                         on:click=move |_| set_production(key.get_value(), !prod())>
                         <ProdIcon />
                     </button>
-                    <button class="btn small icon" title="Move up" aria-label=format!("Move {name} up")
+                    <button class="btn small icon" title="Move up" aria-label=logic::move_label(&name, true)
                         prop:disabled=move || busy.get() || index == first
                         on:click=move |_| move_to(up.clone(), index.wrapping_sub(1))>"↑"</button>
-                    <button class="btn small icon" title="Move down" aria-label=format!("Move {name} down")
+                    <button class="btn small icon" title="Move down" aria-label=logic::move_label(&name, false)
                         prop:disabled=move || busy.get() || index == last
                         on:click=move |_| move_to(down.clone(), index + 1)>"↓"</button>
                     <button class="btn small" prop:disabled=move || busy.get() || in_use()
-                        title=move || if here() {
-                            "This window is on it: switch to another context first"
-                        } else if elsewhere() {
-                            "Another window is on it: switch that window to another context first"
-                        } else {
-                            ""
-                        }
+                        title=move || logic::remove_title(here(), elsewhere())
                         on:click=move |_| { error.set(None); confirm.set(Some(ask.clone())) }>"Remove"</button>
                 </div>
                 {move || asking().then(|| {
                     let go = go.clone();
-                    let also: Vec<String> = [cluster_goes.clone().map(|c| format!("cluster {c:?}")), user_goes.clone().map(|u| format!("user {u:?}"))]
-                        .into_iter().flatten().collect();
-                    let also = match also.len() {
-                        0 => "Its cluster and user stay: other contexts use them.".to_owned(),
-                        1 => format!("Its {} goes too: nothing else uses it.", also[0]),
-                        _ => format!("Its {} go too: nothing else uses them.", also.join(" and ")),
-                    };
+                    let question = logic::confirm_text(&go, cluster_goes.as_deref(), user_goes.as_deref());
                     view! {
                         <div class="cluster-confirm" role="alert">
-                            <span>{format!("Remove {:?} from the kubeconfig? {also} kubectl and other tools lose it too.", go)}</span>
+                            <span>{question}</span>
                             <span class="cluster-confirm-actions">
                                 <button class="btn small" prop:disabled=move || busy.get() on:click=move |_| confirm.set(None)>"Keep"</button>
                                 // Another window may switch to it meanwhile.
                                 <button class="btn small danger" prop:disabled=move || busy.get() || in_use() on:click=move |_| remove(go.clone())>
-                                    {move || if busy.get() { "Removing…" } else { "Remove" }}
+                                    {move || logic::remove_label(busy.get())}
                                 </button>
                             </span>
                         </div>
@@ -304,11 +257,10 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
                     view! { <p class="muted cluster-empty">"No clusters in your kubeconfig yet. Add one to get started."</p> }.into_any()
                 }
                 Some(Ok(l)) => {
-                    let several = l.files.iter().filter(|f| l.contexts.iter().any(|c| c.file == **f)).count() > 1;
+                    let several = logic::several_files(&l);
                     let mut items = vec![];
                     for (i, c) in l.contexts.iter().enumerate() {
-                        let first = l.contexts.iter().position(|x| x.file == c.file).unwrap_or(i);
-                        let last = l.contexts.iter().rposition(|x| x.file == c.file).unwrap_or(i);
+                        let (first, last) = logic::file_bounds(&l.contexts, i);
                         if several && i == first {
                             items.push(view! { <li class="cluster-file muted small mono">{c.file.clone()}</li> }.into_any());
                         }
@@ -340,15 +292,3 @@ pub fn ManageClustersDialog(store: Store) -> impl IntoView {
         })
     }
 }
-
-fn removed_text(r: &RemovedContext) -> String {
-    let also: Vec<String> = [r.cluster.as_ref().map(|c| format!("cluster {c:?}")), r.user.as_ref().map(|u| format!("user {u:?}"))]
-        .into_iter()
-        .flatten()
-        .collect();
-    if also.is_empty() { format!("Removed {:?}.", r.context) } else { format!("Removed {:?}, with its {}.", r.context, also.join(" and ")) }
-}
-
-#[cfg(test)]
-#[path = "clusters_tests.rs"]
-mod tests;

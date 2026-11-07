@@ -1,43 +1,6 @@
 use super::*;
 use crate::app::tests_unit::{context, store, store_on};
 
-fn listing(path: &str, writable: bool) -> DirListing {
-    DirListing { path: path.into(), writable, entries: vec![], truncated: false, suggestions: vec![] }
-}
-
-#[test]
-fn dest_hint_needs_an_absolute_path() {
-    assert_eq!(dest_hint("tmp/", None, None), "Use an absolute path, e.g. /tmp/");
-    assert_eq!(dest_hint("", None, Some("a.txt")), "Use an absolute path, e.g. /tmp/");
-    assert_eq!(dest_hint("  ", None, None), "Use an absolute path, e.g. /tmp/");
-}
-
-#[test]
-fn dest_hint_warns_about_the_read_only_folder_on_screen() {
-    let ro = listing("/etc", false);
-    let warn = "This folder is read-only for the container user; pick a writable one.";
-    assert_eq!(dest_hint("/etc/", Some(&ro), Some("a.txt")), warn);
-    assert_eq!(dest_hint("/etc/app.conf", Some(&ro), None), warn);
-    // Another folder, or a writable one, is fine.
-    assert_eq!(dest_hint("/tmp/", Some(&ro), None), "The file keeps its name in this folder.");
-    let rw = listing("/etc/", true);
-    assert_eq!(dest_hint("/etc/", Some(&rw), None), "The file keeps its name in this folder.");
-}
-
-#[test]
-fn dest_hint_explains_where_the_file_goes() {
-    assert_eq!(dest_hint(" /tmp/ ", None, Some("report.csv")), "Saved as /tmp/report.csv");
-    assert_eq!(
-        dest_hint("/tmp/out.csv", None, Some("report.csv")),
-        "Saved as /tmp/out.csv, or as /tmp/out.csv/report.csv if /tmp/out.csv is a folder"
-    );
-    assert_eq!(dest_hint("/tmp/", None, None), "The file keeps its name in this folder.");
-    assert_eq!(
-        dest_hint("/tmp/out.csv", None, None),
-        "A folder keeps the file's name; anything else is the new file's path."
-    );
-}
-
 #[test]
 fn request_opens_the_dialog_when_unlocked() {
     let s = store_on(true);

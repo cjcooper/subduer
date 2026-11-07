@@ -4,46 +4,13 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Serialize;
-use subduer_types::{ContextInfo, KindRef, ResourceRow};
+use subduer_types::{KindRef, ResourceRow};
 
-use crate::modal::Modal;
 use crate::app::Store;
+use crate::logic::delete::{self as logic, DeleteArgs};
+pub use crate::logic::delete::DeleteTarget;
+use crate::modal::Modal;
 use crate::tauri::invoke;
-
-/// What the dialog is about to delete, captured when it opens.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeleteTarget {
-    pub context: ContextInfo,
-    pub kind: KindRef,
-    pub row: ResourceRow,
-}
-
-/// Kinds whose deletion takes much more with it.
-fn cascades(kind: &KindRef) -> bool {
-    matches!(
-        (kind.group.as_str(), kind.kind.as_str()),
-        ("", "Namespace" | "Node" | "PersistentVolume") | ("apiextensions.k8s.io", "CustomResourceDefinition")
-    )
-}
-
-fn consequence(kind: &KindRef) -> Option<&'static str> {
-    Some(match (kind.group.as_str(), kind.kind.as_str()) {
-        ("", "Namespace") => "Everything inside the namespace is deleted too.",
-        ("apiextensions.k8s.io", "CustomResourceDefinition") => {
-            "Every object of this custom type is deleted, across all namespaces."
-        }
-        ("", "Node") => "The node is removed from the cluster without being drained first.",
-        ("", "PersistentVolume" | "PersistentVolumeClaim") => {
-            "The stored data may be deleted too, depending on the reclaim policy."
-        }
-        ("apps", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet") | ("batch", "Job" | "CronJob") => {
-            "Its pods are deleted too."
-        }
-        ("", "Pod") => "If a controller owns this pod, it will start a replacement.",
-        _ => return None,
-    })
-}
 
 /// Opens the dialog, or the unlock prompt first if the context is read-only;
 /// the dialog then follows once the context is unlocked.
@@ -64,24 +31,14 @@ pub fn request_delete(store: Store, kind: KindRef, row: ResourceRow) {
 pub fn DeleteButton(store: Store, row: ResourceRow) -> impl IntoView {
     let kind = move || {
         let kind = store.kind.get()?;
-        let allowed = store.cluster.with(|c| {
-            c.iter()
-                .flat_map(|c| &c.kinds)
-                .any(|k| k.kind == kind && k.verbs.iter().any(|v| v == "delete"))
-        });
+        let allowed = store.cluster.with(|c| c.as_ref().is_some_and(|c| logic::allows(&c.kinds, &kind, "delete")));
         allowed.then_some(kind)
     };
     move || {
         kind().map(|kind| {
             let row = row.clone();
             let locked = move || store.current_context().is_some_and(|c| !c.unlocked);
-            let title = move || {
-                if locked() {
-                    "Delete… (asks to allow changes first: the context is read-only)"
-                } else {
-                    "Delete…"
-                }
-            };
+            let title = move || logic::button_title(locked());
             view! {
                 <button
                     class="btn small danger-outline"
@@ -108,10 +65,10 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
     move || {
         store.delete_prompt.get().map(|target| {
             let DeleteTarget { context, kind, row } = target.clone();
-            let must_type = context.prod_like || cascades(&kind);
+            let must_type = logic::must_type(&target);
             let ok = {
                 let name = row.name.clone();
-                move || !busy.get() && (!must_type || typed.get().trim() == name)
+                move || logic::can_confirm(busy.get(), must_type, &typed.get(), &name)
             };
             let confirm = {
                 let target = target.clone();
@@ -120,19 +77,7 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
                     busy.set(true);
                     error.set(None);
                     spawn_local(async move {
-                        #[derive(Serialize)]
-                        struct Args {
-                            context: String,
-                            kind: KindRef,
-                            namespace: Option<String>,
-                            name: String,
-                        }
-                        let args = Args {
-                            context: target.context.name.clone(),
-                            kind: target.kind.clone(),
-                            namespace: target.row.namespace.clone(),
-                            name: target.row.name.clone(),
-                        };
+                        let args = DeleteArgs::new(&target);
                         match invoke::<_, ()>("delete_resource", &args).await {
                             Ok(()) => {
                                 if store.selected.with_untracked(|s| s.as_ref().is_some_and(|s| s.id == target.row.id)) {
@@ -154,13 +99,13 @@ pub fn DeleteDialog(store: Store) -> impl IntoView {
             };
             view! {
                 <Modal on_cancel=move |()| close() busy=busy prod=context.prod_like>
-                        <h2>{format!("Delete {}?", kind.kind)}</h2>
+                        <h2>{logic::heading(&kind)}</h2>
                         <p>
                             <strong class="mono">{row.name.clone()}</strong>
                             {location}
                             " on context "<strong>{context.name.clone()}</strong>" will be deleted."
                         </p>
-                        {consequence(&kind).map(|c| view! { <p class="warn-text">{c}</p> })}
+                        {logic::consequence(&kind).map(|c| view! { <p class="warn-text">{c}</p> })}
                         {context.prod_like.then(|| view! {
                             <p>"This context looks like "<strong>"PRODUCTION"</strong>"."</p>
                         })}
