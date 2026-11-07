@@ -89,7 +89,7 @@ SCENARIOS = [
     S("pod/details-dark", "stub.js", "pod=unlimited", scheme=DARK, has=["Details", "YAML"]),
     # ---- Navigation ----
     # Section headings are uppercase on screen only (CSS); the text is title case.
-    S("nav/sidebar", "nav.js", "open=all", has=["Workloads 7", "Config 9", "Network 5", "Storage 3", "Port Forwards", "Cluster"]),
+    S("nav/sidebar", "nav.js", "open=all", has=["Workloads", "Config", "Network", "Storage", "Port Forwards", "Cluster"], lacks=["Workloads 7", "Config 9", "Network 5", "Storage 3"]),
     S("nav/forwards", "fwd.js", "page=forwards", has=["Port Forwards"]),
     S("sort/table-number", "nav.js", "sort=Revision", has=["rows keda,datadog,migrate,canary,corporate-wallet"]),
     S("sort/table-number-desc", "nav.js", "sort=Revision&clicks=2", has=["rows corporate-wallet,canary,migrate,datadog,keda"]),

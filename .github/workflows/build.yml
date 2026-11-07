@@ -56,12 +56,18 @@ jobs:
         if: runner.os == 'macOS'
         run: python3 tools/ui-harness/run_e2e.py
 
-      - name: Coverage report
+      # Every measured line must be covered. The only files left out are the
+      # UI's top-level views and wasm glue (ui/src/*.rs; the UI's logic lives
+      # in ui/src/logic/ and is measured like the backend) and src-tauri's
+      # main.rs, which starts the real app. See RUNBOOK "Tests".
+      - name: Coverage gate
         if: runner.os == 'Linux'
         run: |
           cargo install --locked cargo-llvm-cov
           rustup component add llvm-tools-preview
-          cargo llvm-cov --workspace --summary-only
+          cargo llvm-cov --workspace --summary-only \
+            --ignore-filename-regex '(ui/src/[^/]+|src-tauri/src/main)\.rs$' \
+            --fail-under-lines 100
 
       - name: Build bundles
         run: cargo tauri build
