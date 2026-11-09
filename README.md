@@ -67,6 +67,20 @@ The version lives only in `[workspace.package]` in the root `Cargo.toml`; every 
 
 Never export `APPLE_SIGNING_IDENTITY` in your shell profile: `cargo tauri build` signs whenever it is set.
 
+The release dmg is `target/release/bundle/dmg/Subduer_<version>_aarch64.dmg` (Apple Silicon only; the script refuses to run on an Intel Mac), with `Subduer_<version>_aarch64.dmg.sha256` next to it, hashed after stapling.
+
+### Publishing (GitHub release + Homebrew)
+
+The Homebrew cask (`Casks/subduer.rb` in `cjcooper/homebrew-tap`) installs `https://github.com/cjcooper/subduer/releases/download/v<version>/Subduer_<version>_aarch64.dmg`. To publish, on `main`:
+
+```sh
+tools/build-signed.sh                    # bump, sign, notarize, commit + tag
+tools/publish-release.sh --dry-run       # optional: every check, nothing pushed
+tools/publish-release.sh                 # push main + tag, create the GitHub release
+```
+
+`publish-release.sh` needs `gh` logged in. It checks that a clean `main` has the tag `v<version>` in its history, with nothing built into the app changed since (only `tools/`, `README.md`, `RUNBOOK.md` and `.github/` may change); that the dmg has the right name, matches its `.sha256`, and is notarized and stapled; and that it holds an arm64 `Subduer.app` at that version. Then it pushes, creates the release marked latest (the cask's livecheck follows the latest release), downloads the asset again to verify its SHA-256, and prints the `version` / `sha256` for the cask, along with a `brew bump-cask-pr` command. `--clobber` replaces the assets of a release that already exists. A changed dmg means a new `sha256` in the cask.
+
 One-time setup:
 
 1. **Certificate.** In Xcode → Settings → Accounts → (team) → Manage Certificates, add a **Developer ID Application** certificate (or create it at developer.apple.com → Certificates and import it). Only the Account Holder can create one. Check it's in the keychain: `security find-identity -v -p codesigning`. With more than one, set `APPLE_SIGNING_IDENTITY` to the full name.

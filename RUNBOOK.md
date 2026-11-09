@@ -87,6 +87,7 @@ Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 w
 cargo tauri dev                       # run the app (Trunk serves the UI on :1420)
 cargo tauri build                     # this system's bundles in target/release/bundle (see "Building on each system")
 tools/build-signed.sh                 # signed + notarized macOS release: bumps version, commits, tags
+tools/publish-release.sh              # push main + tag, GitHub release with the dmg for the Homebrew cask (README → Publishing)
 cargo test                            # backend tests: core, types and the Tauri commands (~400)
 cargo test -p subduer-ui              # UI logic tests on the host (~120)
 python3 tools/ui-harness/run_e2e.py   # the real UI in headless Chrome, 214 scenarios (~3 min)
