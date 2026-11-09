@@ -67,6 +67,13 @@ The version lives only in `[workspace.package]` in the root `Cargo.toml`; every 
 
 Never export `APPLE_SIGNING_IDENTITY` in your shell profile: `cargo tauri build` signs whenever it is set.
 
+If `cargo tauri build` fails with "Failed to create app Assets.car … Bad file descriptor", stale Xcode asset-catalog helpers are to blame. `tools/build-signed.sh` clears them before building; by hand:
+
+```sh
+killall -9 ibtoold actool AssetCatalogSimulatorAgent IBAgent-macOS 2>/dev/null
+xcrun simctl shutdown all
+```
+
 The release dmg is `target/release/bundle/dmg/Subduer_<version>_aarch64.dmg` (Apple Silicon only; the script refuses to run on an Intel Mac), with `Subduer_<version>_aarch64.dmg.sha256` next to it, hashed after stapling.
 
 ### Publishing (GitHub release + Homebrew)
