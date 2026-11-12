@@ -67,6 +67,12 @@ The version lives only in `[workspace.package]` in the root `Cargo.toml`; every 
 
 Never export `APPLE_SIGNING_IDENTITY` in your shell profile: `cargo tauri build` signs whenever it is set.
 
+If `cargo tauri build` fails with "Failed to create app Assets.car … Bad file descriptor": Tauri runs `actool` with stdin closed, which makes it fail and leaves Xcode's `ibtoold` daemon broken, so later `actool` runs fail too. `tools/build-signed.sh` works around it with an `actool` wrapper that supplies `/dev/null` as stdin. For a plain build, use the wrapper the script leaves in `target/actool-shim` and restart the daemon:
+
+```sh
+killall ibtoold; PATH="$PWD/target/actool-shim:$PATH" cargo tauri build
+```
+
 The release dmg is `target/release/bundle/dmg/Subduer_<version>_aarch64.dmg` (Apple Silicon only; the script refuses to run on an Intel Mac), with `Subduer_<version>_aarch64.dmg.sha256` next to it, hashed after stapling.
 
 ### Publishing (GitHub release + Homebrew)

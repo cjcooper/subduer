@@ -159,9 +159,20 @@ if [[ "$bump" != none ]]; then
 fi
 
 # --- build ------------------------------------------------------------------
-# Remove old bundles so the globs below only see this build's output.
+# Tauri runs `actool` (to compile icons/AppIcon.icon into Assets.car) with
+# stdin closed. actool then fails with "Bad file descriptor" and leaves its
+# ibtoold daemon broken, so every later actool run fails too until that daemon
+# exits. Restart any broken daemon and put a wrapper first on PATH that gives
+# actool /dev/null as stdin (Tauri finds actool through PATH).
+killall ibtoold 2>/dev/null || true
+shim_dir="$root/target/actool-shim" # target/ is git-ignored
+mkdir -p "$shim_dir"
+printf '#!/bin/sh\nexec /usr/bin/actool "$@" </dev/null\n' > "$shim_dir/actool"
+chmod +x "$shim_dir/actool"
+
+# Remove old bundles so only this build's output is checked below.
 rm -rf "$bundle_dir/macos" "$bundle_dir/dmg"
-cargo tauri build --bundles app,dmg ${args[@]+"${args[@]}"} # also updates Cargo.lock
+PATH="$shim_dir:$PATH" cargo tauri build --bundles app,dmg ${args[@]+"${args[@]}"} # also updates Cargo.lock
 
 app="$bundle_dir/macos/Subduer.app"
 # The Homebrew cask (cjcooper/homebrew-tap, Casks/subduer.rb) downloads
