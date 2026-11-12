@@ -4,7 +4,7 @@ members = ["crates/types", "crates/core", "src-tauri", "ui"]
 default-members = ["crates/types", "crates/core", "src-tauri"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/cjcooper/k8s-subduer"
