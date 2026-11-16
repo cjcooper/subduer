@@ -22,6 +22,7 @@ pub mod modal;
 pub mod namespace;
 pub mod object_detail;
 pub mod overview;
+pub mod pane;
 pub mod pod_detail;
 pub mod prefs;
 pub mod rightsize;

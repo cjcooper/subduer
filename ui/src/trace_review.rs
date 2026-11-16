@@ -640,6 +640,7 @@ fn ReviewOverview(store: Store, #[prop(into)] namespace: Signal<Option<String>>)
 /// The selected row: suggestion, flags, charts and the day-and-hour grid.
 #[component]
 fn ReviewDetail(store: Store) -> impl IntoView {
+    let width = crate::pane::PaneWidth::load("review");
     let zoom = RwSignal::new(None::<(f64, f64)>);
     let series = RwSignal::new(None::<Result<TraceSeries, String>>);
     let daily = RwSignal::new(None::<TraceDaily>);
@@ -759,7 +760,8 @@ fn ReviewDetail(store: Store) -> impl IntoView {
             </table>
         };
         view! {
-            <aside class="review-detail">
+            <crate::pane::PaneResizer pane=width label="workload details" />
+            <aside class="review-detail" style=move || width.style()>
                 <div class="modal-head">
                     <div>
                         <h2>{row.key.name.clone()}</h2>

@@ -246,6 +246,7 @@ ui             Leptos CSR app
   pod_detail.rs  Pod Details tab (collapsible sections, bullet bars, env + secret reveal, events)
   workload_detail.rs  Deployment/StatefulSet/Job/CronJob Details tab, reusing pod_detail's sections, charts, env and events
   columns.rs     resizable columns (localStorage)
+  pane.rs        PaneResizer: divider between a table and its detail pane (widths per pane in localStorage `layout.paneWidths`)
   prefs.rs       localStorage helpers (sidebar section order)
   tauri.rs       invoke/listen bindings to window.__TAURI__
 ```
@@ -325,6 +326,7 @@ ui             Leptos CSR app
   - `events.k8s.io/Event` is hidden as a duplicate of `core/Event`.
 - **Tables:**
   - Typed columns (`ColumnKind`), resizable and saved per kind; double-click a header edge to reset.
+  - The detail pane beside a table (the resource detail panel, and a trace review's workload detail) is resizable: drag the divider or focus it and use ←/→; double-click resets. Widths are saved per pane (`detail`, `review`), kept between 320px and what leaves the table 240px; when the window narrows, the pane gives way first.
   - Badges for status-like columns.
   - Pod **Init** and **Ready** columns use per-container icons: ✓ running, ◐ starting, ■ stopped, ✕ failed. Shape and colour both carry the state, which keeps it readable for colour-blind users.
 - **Pod status** follows kubectl's rules, with one change: exit 0 combined with `OOMKilled` shows as **`Completed (OOM)`** in amber. This came from a real UAT migration job where a child process was OOM-killed but the job succeeded.

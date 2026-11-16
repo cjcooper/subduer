@@ -1548,6 +1548,7 @@ const TEXT_FIELD: &str = "textarea, [contenteditable]:not([contenteditable=false
 
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
+    let width = crate::pane::PaneWidth::load("detail");
     let close_now = move || {
         guard(store, move || {
             store.selected.set(None);
@@ -1587,7 +1588,8 @@ fn DetailPanel(store: Store) -> impl IntoView {
         {move || store.selected.get().map(|row| {
             let has_details = selected_has_details(store);
             view! {
-                <aside class="detail">
+                <crate::pane::PaneResizer pane=width label="details" />
+                <aside class="detail" style=move || width.style()>
                     <div class="detail-header">
                         <div>
                             <div class="detail-title">{row.name.clone()}</div>

@@ -20,6 +20,7 @@ mod logs;
 mod modal;
 mod namespace;
 mod overview;
+mod pane;
 mod pod_detail;
 mod prefs;
 mod rightsize;
