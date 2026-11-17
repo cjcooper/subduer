@@ -219,7 +219,7 @@ async fn load(client: &Client, kind: &KindRef, namespace: &str, name: &str) -> R
         }
         _ => {
             let deployment = Api::<Deployment>::namespaced(client.clone(), namespace).get(name).await?;
-            let selector = selector_string(&deployment.spec.as_ref().map(|s| s.selector.clone()).unwrap_or_default());
+            let selector = selector_string(&deployment.spec.selector);
             let replica_sets = Api::<ReplicaSet>::namespaced(client.clone(), namespace)
                 .list(&ListParams::default().labels(&selector))
                 .await?
@@ -233,7 +233,7 @@ async fn load(client: &Client, kind: &KindRef, namespace: &str, name: &str) -> R
 }
 
 fn deployment_workload(d: Deployment, replica_sets: Vec<ReplicaSet>) -> Workload {
-    let spec = d.spec.clone().unwrap_or_default();
+    let spec = d.spec.clone();
     let status = d.status.clone().unwrap_or_default();
     let revision = d.annotations().get("deployment.kubernetes.io/revision").cloned();
     let replicas = ReplicaCounts {
@@ -302,7 +302,7 @@ fn deployment_workload(d: Deployment, replica_sets: Vec<ReplicaSet>) -> Workload
 }
 
 fn statefulset(sts: StatefulSet) -> Workload {
-    let spec = sts.spec.clone().unwrap_or_default();
+    let spec = sts.spec.clone();
     let status = sts.status.clone().unwrap_or_default();
     let replicas = ReplicaCounts {
         desired: spec.replicas.unwrap_or(1),
