@@ -76,7 +76,7 @@ A desktop app for browsing and controlling Kubernetes clusters: macOS first, and
 | Rust via **rustup** (not Homebrew `rust`) | macOS: `brew install rustup`. The package is keg-only, so put `/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin` first on `PATH`, then run `rustup default stable`. Homebrew's formula no longer ships `rustup-init`. Arch: `sudo pacman -S rustup`, then `rustup default stable`. Other Linux and Windows: the installer from rustup.rs. |
 | System build packages | macOS: Xcode Command Line Tools. Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`. Linux (Arch): `sudo pacman -S --needed webkit2gtk-4.1 gtk3 librsvg libsoup3 base-devel patchelf file` (Arch packages ship their headers, so there are no `-dev` packages). Windows: Visual Studio Build Tools ("Desktop development with C++"); WebView2 ships with Windows 10/11. No OpenSSL anywhere: TLS is rustls with ring. |
 | WASM target | `rustup target add wasm32-unknown-unknown` |
-| Tools | `cargo install --locked trunk@0.21.14 tauri-cli@2.12.1` |
+| Tools | `cargo install --locked trunk@0.22.1 tauri-cli@2.12.5` |
 | Icon tools (optional) | `rsvg-convert` (Homebrew `librsvg`) |
 
 Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 with the `latest` feature (v1.36). Run `cargo info <crate>@<major>` to see newer releases.
