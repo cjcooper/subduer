@@ -60,6 +60,19 @@
   const sum = (key) => { const m = new Map(); hist.containers.forEach((c) => c.usage[key].forEach(([t, v]) => m.set(t, (m.get(t) || 0) + v))); return [...m.entries()].sort((a, b) => a[0] - b[0]); };
   const history = { source: hist.source, start, end, step: 15, pod: { cpu: sum('cpu'), memory: sum('memory') }, containers: hist.containers };
   const details = { name: 'acme-' + which, namespace: 'apps', status: 'Running', node: 'ip-10-0-1-5.ec2.internal', pod_ip: '10.0.1.9', host_ip: '10.0.1.5', qos_class: 'Burstable', service_account: 'default', owner: 'ReplicaSet/acme-7d9f', restart_policy: 'Always', priority_class: null, created: '2026-10-01T10:00:00Z', labels: [['app', 'acme']], cpu: p.cpu, memory: p.memory, metrics_available: true, containers: p.containers, events: [] };
+  const imageMeta = {
+    reference: 'ghcr.io/acme/api@sha256:' + 'a'.repeat(64), digest: 'sha256:' + 'b'.repeat(64), index_digest: 'sha256:' + 'a'.repeat(64),
+    id: 'sha256:' + 'c'.repeat(64), platform: 'linux/arm64/v8', created: '2026-11-01T10:00:00Z', author: null, docker_version: null,
+    size: 3 * 1024 * 1024, entrypoint: ['/docker-entrypoint.sh'], cmd: ['nginx', '-g', 'daemon off;'], working_dir: '/app', user: null,
+    env: ['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin', 'NGINX_VERSION=1.27.3'], exposed_ports: ['80/tcp'], volumes: [], stop_signal: 'SIGQUIT',
+    labels: [['maintainer', 'ACME ops'], ['org.opencontainers.image.source', 'https://github.com/acme/api']],
+    history: [
+      { created_by: 'ADD file:abc in /', created: '2026-10-01T00:00:00Z', size: 2048, comment: null },
+      { created_by: 'CMD ["bash"]', created: '2026-10-01T00:00:01Z', size: null, comment: null },
+      { created_by: 'RUN /bin/sh -c apt-get update && apt-get install -y nginx # buildkit', created: '2026-11-01T10:00:00Z', size: 3143680, comment: 'buildkit.dockerfile.v0' },
+    ],
+    credentials: 'pull secret regcred',
+  };
   const table = { watch_id: 1, columns: [{ header: 'Name', kind: 'Name' }, { header: 'Namespace', kind: 'Namespace' }], rows: [{ id: 'apps/acme-' + which, name: 'acme-' + which, namespace: 'apps', cells: ['acme-' + which, 'apps'] }], error: null };
   const replies = {
     
@@ -94,6 +107,14 @@
         document.title = 'start_capture ' + JSON.stringify(args.request);
         if (params.get('capfail')) throw 'pods "acme-limited" is forbidden: cannot patch resource "pods/ephemeralcontainers"';
         return 'capture-1';
+      }
+      if (cmd === 'image_metadata') {
+        window.__imageCalls = (window.__imageCalls || 0) + 1;
+        document.title = 'image_metadata calls=' + window.__imageCalls + ' ' + JSON.stringify(args);
+        if (params.get('image') === 'fail' && window.__imageCalls === 1) {
+          throw 'ghcr.io refused to show acme/api with each of: no credentials. Add an image pull secret to the pod, or sign this machine in (docker login, or aws sso login for ECR).';
+        }
+        return imageMeta;
       }
       if (cmd === 'download_file') return { saved_to: '/Users/me/Downloads/' + args.path.split('/').pop(), bytes: 48213 };
       if (cmd === 'upload_file') {
@@ -137,6 +158,13 @@
   // opengroup=init|ephemeral: opens that container group.
   const group = { init: 'Init containers', ephemeral: 'Ephemeral containers' }[params.get('opengroup')];
   if (group) setTimeout(() => [...document.querySelectorAll('.dsection-title')].find((b) => b.textContent.includes(group))?.click(), 2600);
+  // Image metadata: openimage=1 opens the first container's section; imagesteps=1 also its Build steps;
+  // reopen=1 closes and reopens it; retry=1 clicks Try again (image=fail fails the first read).
+  const title = (text) => [...document.querySelectorAll('.dsection-title')].find((b) => b.textContent.startsWith(text));
+  if (params.get('openimage')) setTimeout(() => title('Image metadata')?.click(), 2600);
+  if (params.get('imagesteps')) setTimeout(() => title('Build steps')?.click(), 3200);
+  if (params.get('reopen')) { setTimeout(() => title('Image metadata')?.click(), 3200); setTimeout(() => title('Image metadata')?.click(), 3500); }
+  if (params.get('retry')) setTimeout(() => [...document.querySelectorAll('.dsection-body button')].find((b) => b.textContent === 'Try again')?.click(), 3200);
   if (params.get('del')) setTimeout(() => document.querySelector('.danger-outline')?.click(), 2600);
   if (params.get('del') === '2') setTimeout(() => document.querySelector('.modal .danger')?.click(), 3000);
   if (params.get('download')) {

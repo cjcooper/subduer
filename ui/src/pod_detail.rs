@@ -127,7 +127,9 @@ pub(crate) fn Section(
     store: Store,
     #[prop(into)] id: String,
     title: String,
-    summary: String,
+    /// Plain text, or a signal for a summary that changes while shown.
+    #[prop(into)]
+    summary: Signal<String>,
     #[prop(optional)] icon: Option<AnyView>,
     #[prop(optional)] nested: bool,
     /// Starts closed until opened.
@@ -293,6 +295,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
     let (upload_ns, upload_pod, upload_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let (download_ns, download_pod, download_container) = (namespace.clone(), pod.clone(), c.name.clone());
     let forward_ns = namespace.clone();
+    let image_args = crate::logic::image::ImageArgs { namespace: namespace.clone(), pod: pod.clone(), container: c.name.clone() };
     let forward_source = subduer_types::ForwardSource::Pod { pod: pod.clone() };
     let actions = view! {
         <div class="dsection-actions">
@@ -354,6 +357,7 @@ fn ContainerSection(store: Store, c: ContainerDetails, pod: String, namespace: S
                 {(!info.ports.is_empty()).then(|| view! { <dt>"Ports"</dt><dd>{info.ports.join(", ")}</dd> })}
                 <SpecRows spec=info.spec.clone() />
             </dl>
+            <crate::image::ImageSection store=store args=image_args.clone() />
             // Ephemeral containers have no environment of their own to show.
             {(!info.ephemeral).then(|| {
                 let (env, ns) = (info.env.clone(), namespace.clone());

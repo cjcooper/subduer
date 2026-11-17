@@ -26,7 +26,7 @@ python3 -m http.server 8765 &
 
 | Stub | Shows | Query parameters |
 |---|---|---|
-| `stub.js` | A pod's Details tab, delete, upload, download | `pod=limited\|unlimited`, `hang=<command>` (that call never returns), `slow=<command>` (it answers after 1.5 s), `again=<ms>` (reopen the Download or Upload dialog), `hover=0..1`, `del=1\|2`, `ctx=prod`, `locked=1`, `upload=choose\|send`, `exists=1`, `browse=1`, `download=pick\|done` |
+| `stub.js` | A pod's Details tab, delete, upload, download | `pod=limited\|unlimited`, `hang=<command>` (that call never returns), `slow=<command>` (it answers after 1.5 s), `again=<ms>` (reopen the Download or Upload dialog), `hover=0..1`, `del=1\|2`, `ctx=prod`, `locked=1`, `upload=choose\|send`, `exists=1`, `browse=1`, `download=pick\|done`, `openimage=1` (opens the first container's Image metadata; the `image_metadata` call count and args land in the title), `imagesteps=1`, `reopen=1`, `image=fail` (the first read fails), `retry=1` |
 | `nav.js` | Sidebar with many kinds, Helm releases | `open=all\|some\|cr`, `sort=<heading>&clicks=<n>` (clicks a Release heading; the rows' order lands in the title) |
 | `fwd.js` | Port Forwards page and start dialog | `page=forwards\|dialog`, `hang=<command>` (that call never returns), `late=1` (a second Service, grafana, whose ports come at once while prometheus's take 1.5 s; the dialog is reopened for grafana) |
 | `logstub.js` | A logs window | `logs=<label>`, `merged=1`, `filter=<text>`, `target=1` (the target starts the filter at `Reconciling`) |

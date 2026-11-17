@@ -46,7 +46,10 @@ pub struct RegistryEnv {
     pub aws_profile: Option<String>,
     /// Registries reached over plain HTTP (tests).
     pub plain_http: Vec<String>,
+    /// How long one registry attempt waits.
     pub timeout: Duration,
+    /// How long a credential helper or the AWS CLI waits.
+    pub tool_timeout: Duration,
 }
 
 impl RegistryEnv {
@@ -55,7 +58,7 @@ impl RegistryEnv {
             .map(PathBuf::from)
             .or_else(|| std::env::home_dir().map(|h| h.join(".docker")))
             .map(|dir| dir.join("config.json"));
-        Self { docker_config, tools_dir: PathBuf::new(), aws_profile, plain_http: vec![], timeout: FETCH_TIMEOUT }
+        Self { docker_config, tools_dir: PathBuf::new(), aws_profile, plain_http: vec![], timeout: FETCH_TIMEOUT, tool_timeout: TOOL_TIMEOUT }
     }
 }
 
@@ -268,18 +271,20 @@ async fn run_tool(env: &RegistryEnv, program: &str, args: &[&str], input: Option
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let run = async {
-        let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => format!("{program} isn't installed or isn't on PATH"),
-            _ => format!("couldn't run {program}: {e}"),
-        })?;
+        let mut child = cmd.spawn()?;
         let mut stdin = child.stdin.take();
         if let (Some(stdin), Some(input)) = (stdin.as_mut(), input) {
             let _ = stdin.write_all(input.as_bytes()).await;
         }
         drop(stdin);
-        child.wait_with_output().await.map_err(|e| format!("{program}: {e}"))
+        child.wait_with_output().await
     };
-    let out = tokio::time::timeout(TOOL_TIMEOUT, run).await.map_err(|_| format!("{program} didn't finish within {}s", TOOL_TIMEOUT.as_secs()))??;
+    let out = match tokio::time::timeout(env.tool_timeout, run).await {
+        Err(_) => return Err(format!("{program} didn't finish within {}s", env.tool_timeout.as_secs())),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(format!("{program} isn't installed or isn't on PATH")),
+        Ok(Err(e)) => return Err(format!("couldn't run {program}: {e}")),
+        Ok(Ok(out)) => out,
+    };
     tracing::info!(%program, ok = out.status.success(), "registry credentials");
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())

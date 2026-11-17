@@ -161,6 +161,9 @@ pub(crate) struct Store {
     /// Secret values the user chose to reveal for the selected pod, by
     /// (secret, key). Cleared whenever the selection changes.
     pub(crate) revealed: RwSignal<HashMap<(String, String), Result<String, String>>>,
+    /// Image metadata read for the selected pod's containers, by container.
+    /// Cleared with `revealed`.
+    pub(crate) images: RwSignal<HashMap<crate::logic::image::ImageArgs, crate::logic::image::Loaded>>,
     /// The running trace, kept current by backend events and polling.
     pub(crate) trace: RwSignal<Option<subduer_types::TraceStatus>>,
     /// The trace dialog is open, and the start form's choices.
@@ -276,6 +279,7 @@ impl Store {
             history_loading: RwSignal::new(false),
             detail_collapsed: RwSignal::new(HashSet::new()),
             revealed: RwSignal::new(HashMap::new()),
+            images: RwSignal::new(HashMap::new()),
             trace: RwSignal::new(None),
             trace_open: RwSignal::new(false),
             trace_draft: RwSignal::new(None),
@@ -358,6 +362,7 @@ impl Store {
         self.overview_failures.set(0);
         self.table.set(None);
         self.selected.set(None);
+        self.images.set(HashMap::new());
         self.context.set(Some(context.clone()));
         let result = invoke::<_, ClusterInfo>("connect", &Args { context: &context }).await;
         // Another context was picked while this one was still connecting
@@ -1453,6 +1458,7 @@ pub(crate) fn select_row(store: Store, row: ResourceRow) {
     store.editing.set(false);
     store.pod_history.set(None);
     store.revealed.set(HashMap::new());
+    store.images.set(HashMap::new());
     store.selected.set(Some(row));
     if selected_has_details(store) {
         store.detail_tab.set(DetailTab::Details);
@@ -1553,6 +1559,7 @@ fn DetailPanel(store: Store) -> impl IntoView {
         guard(store, move || {
             store.selected.set(None);
             store.revealed.set(HashMap::new());
+            store.images.set(HashMap::new());
         })
     };
     let close = move |_| close_now();

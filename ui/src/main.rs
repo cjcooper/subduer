@@ -15,6 +15,7 @@ mod exec;
 mod find;
 mod forward;
 mod icons;
+mod image;
 mod logic;
 mod logs;
 mod modal;

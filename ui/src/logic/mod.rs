@@ -17,6 +17,7 @@ pub mod exec;
 pub mod find;
 pub mod forward;
 pub mod icons;
+pub mod image;
 pub mod logs;
 pub mod modal;
 pub mod namespace;

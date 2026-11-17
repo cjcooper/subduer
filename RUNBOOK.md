@@ -308,6 +308,7 @@ ui             Leptos CSR app
 | `upload_file` | Raw binary body + `x-upload` header (URL-encoded JSON `UploadTarget`); gated, context re-checked |
 | `download_file` / `reveal_download` | Save a container file into ~/Downloads (numbered if taken); show it in Finder |
 | `secret_value` | One Secret value, on explicit click |
+| `image_metadata` | A container's image config and build history, read from its registry (read-only; see Pod Details tab) |
 
 ### How things fit together
 
@@ -334,6 +335,7 @@ ui             Leptos CSR app
 - **Cluster page:** KPI tiles; memory (the headline number) and CPU, each with used, requested and limit meters; pods by status as a stacked bar; requests by namespace (top 8 plus Other); and a nodes table. Chart colours follow the dataviz skill palette (series blue plus the fixed status palette).
 - **Node page:** the same table as the Cluster page, with selectable rows that open YAML.
 - **Pod Details tab:** collapsible sections for resources (last-hour line charts with request and limit lines), pod info, each container (resources, state, ports, environment) and events. The collapsed state persists. Secret values are masked until **Show**, forgotten when the selection changes, and never logged.
+  - **Image metadata** (`crates/core/src/image.rs`, `ui/src/image.rs`): a closed section in each container. Opening it reads, once per selection, the image's config and history from its registry (`oci-client`, ring TLS like kube): the digest the container runs (its `imageID`), for the node's platform from a multi-platform index. Only manifests and the config blob, never layers. Shows platform, size, image ID and digests, entrypoint, command, working dir, user ("root (not set)"), ports, volumes, stop signal, labels, the image's own environment and the build steps with layer sizes. Credentials, tried in turn: the pod's image pull secrets, `~/.docker/config.json` (`auths`, `credHelpers`, `credsStore`), `aws ecr get-login-password` for ECR, anonymous. Helpers and the AWS CLI get the context's `AWS_PROFILE` (from its exec) and `AWS_EC2_METADATA_DISABLED=true` (without them `docker-credential-ecr-login` took 11 s to fail). The error names each credential the registry refused. Checked on UAT (2026-11-17) with `examples/image.rs`: private ECR (via ecr-login, ~2 s), public.ecr.aws, ghcr.io and gcr.io.
 - **Deployment/StatefulSet Details tab** (`crates/core/src/workload.rs`, `ui/src/workload_detail.rs`): opens by default, like pods, and refreshes every 15 s. Sections:
   - **Resources:** last-hour charts summed over the pods. Request and limit lines are the sum over live pods (limits only if every long-running container has one).
   - **Deployment/StatefulSet:** a status badge (Available/Ready, Rolling out, Degraded, Failed, Paused, Scaled to 0), replicas (desired, ready, up to date, available), strategy, revision, last restart, selector and so on, with a nested Conditions section. StatefulSets also show pod management, service, volume claims and claim retention.
