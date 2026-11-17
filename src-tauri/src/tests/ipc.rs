@@ -80,6 +80,7 @@ fn every_async_command_checks_its_arguments_over_ipc() {
         ("create_namespace", json!({"context": CTX})),
         ("close_discarding", json!({})),
         ("secret_value", json!({"namespace": "shop", "secret": "db"})),
+        ("image_metadata", json!({"namespace": "shop", "pod": "api-1"})),
         ("open_logs", json!({})),
         ("open_exec", json!({})),
         ("start_capture", json!({})),

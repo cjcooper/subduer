@@ -19,6 +19,7 @@ pub mod forward;
 pub mod helm;
 pub mod keda;
 pub mod history;
+pub mod image;
 pub mod logs;
 pub mod namespace;
 pub mod network;

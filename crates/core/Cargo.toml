@@ -27,6 +27,8 @@ tower = { version = "0.5", features = ["util"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [features]
 # Exposes `subduer_core::testing` (a fake Kubernetes API server) to other
@@ -39,3 +41,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1"
+sha2 = "0.10"

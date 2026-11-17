@@ -154,6 +154,7 @@ async fn reads_need_a_connection() {
     assert_eq!(commands::object_details(s(), deployment(), Some("shop".into()), "api".into()).await.unwrap_err(), not);
     assert_eq!(commands::secret_values(s(), "shop".into(), "db".into()).await.unwrap_err(), not);
     assert_eq!(commands::secret_value(s(), "shop".into(), "db".into(), "pw".into()).await.unwrap_err(), not);
+    assert_eq!(commands::image_metadata(s(), "shop".into(), "api-1".into(), "app".into()).await.unwrap_err(), not);
     let check = commands::check_access(s(), "shop".into(), "api".into(), "get".into(), "pods".into(), String::new(), String::new());
     assert_eq!(check.await.unwrap_err(), not);
     assert_eq!(crate::forward::forward_ports(s(), "shop".into(), ForwardSource::Pod { pod: "api-1".into() }).await.unwrap_err(), not);
@@ -338,6 +339,9 @@ async fn reads_come_back_from_the_api() {
     assert_eq!(commands::secret_value(s(), "shop".into(), "db".into(), "pw".into()).await.unwrap(), "hunter2");
     let values = commands::secret_values(s(), "shop".into(), "db".into()).await.unwrap();
     assert_eq!(values, vec![("pw".to_owned(), Some("hunter2".to_owned()))]);
+    // The pod is read before the registry; a container it lacks stops there.
+    let image = commands::image_metadata(s(), "shop".into(), "api-1".into(), "nope".into()).await.unwrap_err();
+    assert_eq!(image, "not found: container nope in pod api-1");
     let check = commands::check_access(s(), "shop".into(), "api".into(), "get".into(), "pods".into(), "shop".into(), String::new())
         .await
         .unwrap();

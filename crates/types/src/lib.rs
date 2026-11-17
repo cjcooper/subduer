@@ -448,6 +448,60 @@ pub struct ContainerDetails {
     pub spec: Vec<(String, String)>,
 }
 
+/// What a container's image says about itself, as `docker inspect` and
+/// `docker history` show it: its config and layers, read from the registry
+/// for the digest the container runs (the `image_metadata` command).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageMetadata {
+    /// What was looked up, e.g. `docker.io/library/nginx@sha256:…`: the
+    /// container's image pinned to the digest it runs, or its tag when it
+    /// hasn't started.
+    pub reference: String,
+    /// The image manifest's digest, for the node's platform.
+    pub digest: String,
+    /// The multi-platform index's digest, when the reference names one.
+    pub index_digest: Option<String>,
+    /// The config's digest: the image ID `docker images` shows.
+    pub id: String,
+    /// e.g. `linux/arm64/v8`.
+    pub platform: String,
+    pub created: Option<String>,
+    pub author: Option<String>,
+    /// The Docker version that built it, when Docker did.
+    pub docker_version: Option<String>,
+    /// The layers' compressed size: what a node downloads.
+    pub size: u64,
+    pub entrypoint: Vec<String>,
+    pub cmd: Vec<String>,
+    pub working_dir: Option<String>,
+    pub user: Option<String>,
+    /// `NAME=value`, as built into the image (the pod may override them).
+    pub env: Vec<String>,
+    /// e.g. `8080/tcp`.
+    pub exposed_ports: Vec<String>,
+    pub volumes: Vec<String>,
+    pub stop_signal: Option<String>,
+    /// Sorted by key; OCI annotations (`org.opencontainers.image.*`) among them.
+    pub labels: Vec<(String, String)>,
+    /// Build steps, oldest first, as `docker history` lists them newest first.
+    pub history: Vec<ImageLayer>,
+    /// Which credentials the registry accepted, e.g. `pull secret regcred`.
+    pub credentials: String,
+}
+
+/// One build step of an image.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageLayer {
+    /// The step, e.g. `RUN /bin/sh -c apt-get update`, or the layer's digest
+    /// when the image keeps no history.
+    pub created_by: String,
+    pub created: Option<String>,
+    /// The layer's compressed size; `None` for steps that add no layer
+    /// (`ENV`, `CMD`, …).
+    pub size: Option<u64>,
+    pub comment: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventSummary {
     pub type_: String,
