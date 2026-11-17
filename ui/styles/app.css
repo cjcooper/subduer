@@ -535,6 +535,13 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .secret-value { background: var(--warn-bg); border-radius: 3px; padding: 0 3px; }
 .warn-text { color: var(--warn-text); }
 
+/* Image metadata */
+.image-error { margin: 6px 0; }
+.image-history .layer-size {
+  width: 76px; padding-right: 12px !important; text-align: right; white-space: nowrap;
+  color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
 /* Events */
 .event { padding: 8px 0; border-top: 1px solid var(--border); }
 .event:first-child { border-top: none; }

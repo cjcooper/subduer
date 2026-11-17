@@ -51,6 +51,19 @@ SCENARIOS = [
     # No charts or environment for ephemeral containers: the app's containers have two each.
     S("pod/container-groups-ephemeral-plain", "stub.js", "pod=groups&opengroup=ephemeral", has=["re:(Environment.*){2}"], lacks=["re:(Environment.*){3}"]),
     S("pod/container-groups-dark", "stub.js", "pod=groups&opengroup=ephemeral", scheme=DARK, has=["Ephemeral containers"]),
+    # Image metadata: closed until opened, read once from the registry, then shown.
+    S("image/closed", "stub.js", "pod=limited", has=["Image metadata", "read from the registry when opened"], lacks=["image_metadata", "Read with"]),
+    S("image/open", "stub.js", "pod=limited&openimage=1",
+      has=['image_metadata calls=1 {"namespace":"apps","pod":"acme-limited","container":"api"}', "linux/arm64/v8 · 3.0 MiB · built 2026-11-01",
+           "ghcr.io/acme/api@sha256:", "Index digest", '["/docker-entrypoint.sh"]', '["nginx", "-g", "daemon off;"]', "root (not set)",
+           "80/tcp", "SIGQUIT", "pull secret regcred", "org.opencontainers.image.source", "https://github.com/acme/api",
+           "Environment in the image", "2 variables", "Build steps", "3 steps · 2 layers"],
+      lacks=["NGINX_VERSION", "apt-get install", "Author", "Volumes"]),
+    S("image/steps", "stub.js", "pod=limited&openimage=1&imagesteps=1", has=["ADD file:abc in /", "2.0 KiB", "3.0 MiB", "apt-get install -y nginx", "buildkit.dockerfile.v0", 'CMD ["bash"]']),
+    S("image/read-once", "stub.js", "pod=limited&openimage=1&reopen=1", has=["image_metadata calls=1", "pull secret regcred"]),
+    S("image/error", "stub.js", "pod=limited&openimage=1&image=fail", has=["couldn't read", "ghcr.io refused to show acme/api", "aws sso login", "Try again"], lacks=["Read with"]),
+    S("image/retry", "stub.js", "pod=limited&openimage=1&image=fail&retry=1", has=["image_metadata calls=2", "pull secret regcred"], lacks=["Try again"]),
+    S("image/dark", "stub.js", "pod=limited&openimage=1&imagesteps=1", scheme=DARK, has=["Build steps", "2.0 KiB"]),
     # Capture traffic…: the dialog sends the request; Start needs an image and changes allowed.
     S("capture/dialog", "stub.js", "pod=limited&cap=1",
       has=["Capture traffic", "re:All traffic \\(TCP\\).*Inbound to port 8080 \\(http\\).*Custom filter.*TLS handshakes only", "5 min", "stays listed in the pod"],

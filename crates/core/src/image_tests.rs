@@ -18,7 +18,7 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 fn env() -> RegistryEnv {
-    RegistryEnv { docker_config: None, tools_dir: PathBuf::new(), aws_profile: None, plain_http: vec![], timeout: Duration::from_secs(10) }
+    RegistryEnv { docker_config: None, tools_dir: PathBuf::new(), aws_profile: None, plain_http: vec![], timeout: Duration::from_secs(10), tool_timeout: Duration::from_secs(10) }
 }
 
 // ---- references and containers ----
@@ -466,7 +466,7 @@ fn pick_platform_matches_os_and_arch() {
 fn system_env_reads_the_docker_config_from_home() {
     let env = RegistryEnv::system(Some("uat".into()));
     assert!(env.docker_config.unwrap().ends_with("config.json"));
-    assert_eq!((env.aws_profile.as_deref(), env.tools_dir, env.timeout), (Some("uat"), PathBuf::new(), FETCH_TIMEOUT));
+    assert_eq!((env.aws_profile.as_deref(), env.tools_dir, env.timeout, env.tool_timeout), (Some("uat"), PathBuf::new(), FETCH_TIMEOUT, TOOL_TIMEOUT));
     assert!(env.plain_http.is_empty());
     let labels: Vec<String> = [Source::Ecr { region: "r".into() }, Source::Anonymous, Source::Helper { helper: "h".into(), server: "s".into() }]
         .iter()
@@ -529,6 +529,9 @@ async fn failing_tools_are_reported_and_skipped() {
     assert_eq!(ecr.auth(&env).await, Err("Token has expired and refresh failed".into()));
     write("exit 3", 0o755);
     assert_eq!(ecr.auth(&env).await, Err("aws failed (exit status: 3)".into()));
+    write("sleep 5", 0o755);
+    let quick = RegistryEnv { tool_timeout: Duration::from_millis(200), ..env.clone() };
+    assert_eq!(ecr.auth(&quick).await, Err("aws didn't finish within 0s".into()));
     write("", 0o644);
     assert!(ecr.auth(&env).await.unwrap_err().starts_with("couldn't run aws: "));
     assert_eq!(Source::Ecr { region: "x".into() }.auth(&RegistryEnv { tools_dir: dir.join("none"), ..env.clone() }).await,
