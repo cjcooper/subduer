@@ -3,10 +3,10 @@
 use std::sync::atomic::Ordering;
 
 use subduer_core::types::{
-    ClusterInfo, ClusterOverview, ContextList, DataChange, KindRef, ObjectDetails, PodDetails, PodHistory, Replicas,
-    SecretValues, WorkloadDetails, events,
+    ClusterInfo, ClusterOverview, ContextList, DataChange, ImageMetadata, KindRef, ObjectDetails, PodDetails, PodHistory,
+    Replicas, SecretValues, WorkloadDetails, events,
 };
-use subduer_core::{actions, cluster, config, contexts, overview, pod_details, watch, workload};
+use subduer_core::{actions, cluster, config, contexts, image, overview, pod_details, watch, workload};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{Session, Win, WindowState};
@@ -608,6 +608,20 @@ pub async fn secret_value(state: Win, namespace: String, secret: String, key: St
     let client = connected_client(&state).await?;
     tracing::info!(%namespace, %secret, %key, "secret value revealed");
     pod_details::secret_value(&client, &namespace, &secret, &key).await.map_err(err)
+}
+
+/// A container's image config and history, read from its registry (read-only).
+/// For ECR, the AWS CLI signs in with the profile the context itself uses.
+#[tauri::command]
+pub async fn image_metadata(state: Win, namespace: String, pod: String, container: String) -> CmdResult<ImageMetadata> {
+    let (client, context) = {
+        let session = state.session.read().await;
+        let session = session.as_ref().ok_or("not connected to a cluster")?;
+        (session.client.clone(), session.context.clone())
+    };
+    let profile = contexts::load_kubeconfig().ok().and_then(|k| image::aws_profile(&k, &context));
+    let env = image::RegistryEnv::system(profile);
+    image::image_metadata(&client, &namespace, &pod, &container, &env).await.map_err(user)
 }
 
 pub(crate) async fn connected_client(state: &WindowState) -> CmdResult<subduer_core::kube::Client> {

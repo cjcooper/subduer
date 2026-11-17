@@ -324,6 +324,7 @@ fn handlers<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             upload::download_file,
             upload::reveal_download,
             commands::secret_value,
+            commands::image_metadata,
             commands::set_unsaved,
             commands::set_app_theme,
             accent::system_accent,
