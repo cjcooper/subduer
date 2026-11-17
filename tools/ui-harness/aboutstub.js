@@ -17,7 +17,7 @@
     'Permission is hereby granted, free of charge, to any person obtaining a copy', 'of this software.', '',
     rule, 'Apache License 2.0', '', 'Used by:', '  k8s-openapi 0.28.0 (https://github.com/Arnavion/k8s-openapi)', '',
     '                                 Apache License', '                           Version 2.0, January 2004', '',
-    rule, 'Vendored JavaScript: xterm', '', 'xterm.js (@xterm/xterm 5.5.0):', 'Copyright (c) 2017-2019, The xterm.js authors', '',
+    rule, 'Vendored JavaScript: xterm', '', 'xterm.js (@xterm/xterm 6.0.0):', 'Copyright (c) 2017-2019, The xterm.js authors', '',
   ].join('\n');
   const sent = [];
   window.__TAURI__ = {
