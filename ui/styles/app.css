@@ -551,6 +551,8 @@ table.env { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .warn-text { color: var(--warn-text); }
 
 /* Image metadata */
+/* Image metadata's contents hang from its chevron (14px, centred at 7px). */
+.image-body { margin: 2px 0 4px 6px; padding: 0 0 4px 16px; border-left: 2px solid var(--border); }
 .image-error { margin: 6px 0; }
 .image-history .layer-size {
   width: 76px; padding-right: 12px !important; text-align: right; white-space: nowrap;

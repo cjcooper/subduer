@@ -36,7 +36,8 @@ pub(crate) fn ImageSection(store: Store, args: ImageArgs) -> impl IntoView {
     let container = args.container.clone();
     view! {
         <Section store=store id=id title="Image metadata".to_owned() summary=summary nested=true closed=true>
-            {
+            // Indented under a guide from the chevron: its sections are its own.
+            <div class="image-body">{
                 let (state, args, container) = (state.clone(), args.clone(), container.clone());
                 move || match state() {
                     None | Some(None) => view! { <p class="muted">"Reading from the registry…"</p> }.into_any(),
@@ -53,7 +54,7 @@ pub(crate) fn ImageSection(store: Store, args: ImageArgs) -> impl IntoView {
                     }
                     Some(Some(Ok(m))) => view! { <ImageDetails store=store m=m container=container.clone() /> }.into_any(),
                 }
-            }
+            }</div>
         </Section>
     }
 }
