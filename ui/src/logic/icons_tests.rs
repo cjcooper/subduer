@@ -151,6 +151,8 @@ fn group_and_category_icons() {
         (Category::Aws, CLOUD),
         (Category::GoogleCloud, CLOUD),
         (Category::Azure, CLOUD),
+        (Category::Keda, SCALE),
+        (Category::ExternalSecrets, SECRET_IN),
         (Category::Config, SLIDERS),
         (Category::Network, GLOBE),
         (Category::Storage, DATABASE),

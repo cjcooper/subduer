@@ -73,6 +73,10 @@ pub enum Category {
     GoogleCloud,
     /// Custom resources from AKS and Azure (Azure Service Operator, …).
     Azure,
+    /// KEDA autoscaling and eventing resources.
+    Keda,
+    /// External Secrets Operator resources and its generators.
+    ExternalSecrets,
     /// Kinds added to the cluster (CRDs and aggregated APIs).
     CustomResources,
     /// Built-in kinds that don't fit a section above.
@@ -81,7 +85,7 @@ pub enum Category {
 
 impl Category {
     /// Sidebar sections in default order (excludes `TopLevel`).
-    pub const SECTIONS: [Category; 12] = [
+    pub const SECTIONS: [Category; 14] = [
         Self::Workloads,
         Self::Config,
         Self::Network,
@@ -92,6 +96,8 @@ impl Category {
         Self::Aws,
         Self::GoogleCloud,
         Self::Azure,
+        Self::Keda,
+        Self::ExternalSecrets,
         Self::CustomResources,
         Self::Other,
     ];
@@ -104,6 +110,8 @@ impl Category {
             Self::Aws => "AWS",
             Self::GoogleCloud => "Google Cloud",
             Self::Azure => "Azure",
+            Self::Keda => "KEDA",
+            Self::ExternalSecrets => "External Secrets",
             Self::Config => "Config",
             Self::Network => "Network",
             Self::Storage => "Storage",
@@ -131,9 +139,22 @@ impl Category {
         }
     }
 
+    /// The section for a custom resource's API group when it isn't plain
+    /// Custom Resources: a cloud provider's, KEDA's or External Secrets'.
+    pub fn section_for_group(group: &str) -> Option<Category> {
+        match group {
+            "keda.sh" | "eventing.keda.sh" => Some(Self::Keda),
+            "external-secrets.io" | "generators.external-secrets.io" => Some(Self::ExternalSecrets),
+            _ => Self::cloud_for_group(group),
+        }
+    }
+
     /// Sections whose kinds are listed under API group sub-headings.
     pub fn groups_by_api_group(self) -> bool {
-        matches!(self, Self::CustomResources | Self::Aws | Self::GoogleCloud | Self::Azure)
+        matches!(
+            self,
+            Self::CustomResources | Self::Aws | Self::GoogleCloud | Self::Azure | Self::Keda | Self::ExternalSecrets
+        )
     }
 }
 

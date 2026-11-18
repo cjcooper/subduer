@@ -202,6 +202,8 @@ pub(crate) fn category_paths(category: Category) -> &'static str {
         Category::Workloads => CUBE,
         Category::Helm => HELM,
         Category::Aws | Category::GoogleCloud | Category::Azure => CLOUD,
+        Category::Keda => SCALE,
+        Category::ExternalSecrets => SECRET_IN,
         Category::Config => SLIDERS,
         Category::Network => GLOBE,
         Category::Storage => DATABASE,

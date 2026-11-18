@@ -28,11 +28,11 @@ fn section_order_slots_in_missing_sections() {
     // that comes after it by default; with none, at the end.
     assert_eq!(
         section_order_from("Other,Storage,Workloads"),
-        [Config, Network, Namespaces, AccessControl, Helm, Aws, GoogleCloud, Azure, CustomResources, Other, Storage, Workloads]
+        [Config, Network, Namespaces, AccessControl, Helm, Aws, GoogleCloud, Azure, Keda, ExternalSecrets, CustomResources, Other, Storage, Workloads]
     );
     assert_eq!(
         section_order_from("Helm,Workloads"),
-        [Config, Network, Storage, Namespaces, AccessControl, Helm, Workloads, Aws, GoogleCloud, Azure, CustomResources, Other]
+        [Config, Network, Storage, Namespaces, AccessControl, Helm, Workloads, Aws, GoogleCloud, Azure, Keda, ExternalSecrets, CustomResources, Other]
     );
 }
 

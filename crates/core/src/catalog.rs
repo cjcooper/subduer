@@ -119,7 +119,7 @@ pub fn classify(kind: &KindRef, crd_names: &HashSet<String>) -> (Category, usize
     let key = kind.key();
     let crd_name = format!("{}.{}", kind.plural, kind.group);
     if crd_names.contains(&crd_name) || !BUILTIN_GROUPS.contains(&kind.group.as_str()) {
-        let category = Category::cloud_for_group(&kind.group).unwrap_or(Category::CustomResources);
+        let category = Category::section_for_group(&kind.group).unwrap_or(Category::CustomResources);
         return (category, usize::MAX);
     }
     SECTIONS
@@ -159,7 +159,6 @@ mod tests {
     #[test]
     fn custom_resources() {
         let none = HashSet::new();
-        assert_eq!(classify(&kind("keda.sh", "ScaledObject"), &none).0, Category::CustomResources);
         assert_eq!(classify(&kind("metrics.k8s.io", "PodMetrics"), &none).0, Category::CustomResources);
         // The CRD list is honoured regardless of group.
         let gateway = kind("gateway.networking.k8s.io", "Gateway");
@@ -183,7 +182,20 @@ mod tests {
         // Look-alikes stay generic.
         assert_eq!(section("notk8s.aws.example.com"), Category::CustomResources);
         assert_eq!(section("myazure.com"), Category::CustomResources);
-        assert_eq!(section("keda.sh"), Category::CustomResources);
+        assert_eq!(section("example.com"), Category::CustomResources);
+    }
+
+    #[test]
+    fn keda_and_external_secrets_get_their_own_sections() {
+        let none = HashSet::new();
+        let section = |group: &str| classify(&kind(group, "Thing"), &none).0;
+        assert_eq!(section("keda.sh"), Category::Keda);
+        assert_eq!(section("eventing.keda.sh"), Category::Keda);
+        assert_eq!(section("external-secrets.io"), Category::ExternalSecrets);
+        assert_eq!(section("generators.external-secrets.io"), Category::ExternalSecrets);
+        // Also when listed as CRDs.
+        let crds = HashSet::from(["scaledobjects.keda.sh".to_owned()]);
+        assert_eq!(classify(&kind("keda.sh", "ScaledObject"), &crds).0, Category::Keda);
     }
 }
 

@@ -322,7 +322,7 @@ ui             Leptos CSR app
 - **Contexts and safety:** the context picker marks prod-like contexts with ⚠. The lock toggle uses an in-app modal; prod contexts require typing the name. JS `prompt` and `confirm` are avoided because WKWebView may not support them.
 - **Sidebar:**
   - **Cluster** page, **Node** and **Event** at the top level.
-  - Collapsible sections: Workloads, Config, Network, Storage, Namespaces, Access Control, Helm, AWS, Google Cloud, Azure, Custom Resources, and Other. The cloud sections and Custom Resources are grouped by API group. Empty sections are hidden, so a cloud section appears only when the cluster has that provider's kinds.
+  - Collapsible sections: Workloads, Config, Network, Storage, Namespaces, Access Control, Helm, AWS, Google Cloud, Azure, KEDA, External Secrets, Custom Resources, and Other. The cloud sections, KEDA (`keda.sh`, `eventing.keda.sh`), External Secrets (`external-secrets.io`, `generators.external-secrets.io`) and Custom Resources are grouped by API group. Empty sections are hidden, so a cloud, KEDA or External Secrets section appears only when the cluster has those kinds.
   - Sections start closed and can be reordered by dragging. The order persists, and new sections slot into their default position.
   - `events.k8s.io/Event` is hidden as a duplicate of `core/Event`.
 - **Tables:**

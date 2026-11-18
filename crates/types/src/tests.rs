@@ -31,7 +31,7 @@ fn categories_have_labels_in_sidebar_order() {
         labels,
         [
             "Workloads", "Config", "Network", "Storage", "Namespaces", "Access Control", "Helm", "AWS",
-            "Google Cloud", "Azure", "Custom Resources", "Other"
+            "Google Cloud", "Azure", "KEDA", "External Secrets", "Custom Resources", "Other"
         ]
     );
     // Top level isn't a section, but has a label too.
@@ -40,7 +40,19 @@ fn categories_have_labels_in_sidebar_order() {
     assert!(Category::Aws.groups_by_api_group());
     assert!(Category::GoogleCloud.groups_by_api_group());
     assert!(Category::Azure.groups_by_api_group());
+    assert!(Category::Keda.groups_by_api_group());
+    assert!(Category::ExternalSecrets.groups_by_api_group());
     assert!(!Category::Workloads.groups_by_api_group());
+}
+
+#[test]
+fn project_groups_get_their_own_sections() {
+    assert_eq!(Category::section_for_group("keda.sh"), Some(Category::Keda));
+    assert_eq!(Category::section_for_group("eventing.keda.sh"), Some(Category::Keda));
+    assert_eq!(Category::section_for_group("external-secrets.io"), Some(Category::ExternalSecrets));
+    assert_eq!(Category::section_for_group("generators.external-secrets.io"), Some(Category::ExternalSecrets));
+    assert_eq!(Category::section_for_group("elbv2.k8s.aws"), Some(Category::Aws));
+    assert_eq!(Category::section_for_group("example.com"), None);
 }
 
 #[test]
