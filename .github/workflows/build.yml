@@ -27,7 +27,7 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Linux build packages
         if: runner.os == 'Linux'
@@ -42,7 +42,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Trunk and the Tauri CLI
-        run: cargo install --locked trunk@0.21.14 tauri-cli@2.12.1
+        run: cargo install --locked trunk@0.22.1 tauri-cli@2.12.5
 
       - name: Test
         run: cargo test
@@ -75,7 +75,7 @@ jobs:
           # AppImage tooling runs without FUSE on CI runners.
           APPIMAGE_EXTRACT_AND_RUN: 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: subduer-${{ matrix.name }}
           retention-days: 14

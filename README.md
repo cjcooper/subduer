@@ -15,7 +15,7 @@ Rust throughout: Tauri v2 shell, `kube-rs` backend, Leptos (WASM) UI.
 ## Prerequisites
 
 - Rust from rustup (not Homebrew `rust`) with `wasm32-unknown-unknown`
-- `cargo install --locked trunk@0.21.14 tauri-cli@2.12.1`
+- `cargo install --locked trunk@0.22.1 tauri-cli@2.12.5`
 - The system's webview build packages (Tauri's prerequisites):
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
   - Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`

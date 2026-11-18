@@ -76,7 +76,7 @@ A desktop app for browsing and controlling Kubernetes clusters: macOS first, and
 | Rust via **rustup** (not Homebrew `rust`) | macOS: `brew install rustup`. The package is keg-only, so put `/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin` first on `PATH`, then run `rustup default stable`. Homebrew's formula no longer ships `rustup-init`. Arch: `sudo pacman -S rustup`, then `rustup default stable`. Other Linux and Windows: the installer from rustup.rs. |
 | System build packages | macOS: Xcode Command Line Tools. Linux (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf file`. Linux (Arch): `sudo pacman -S --needed webkit2gtk-4.1 gtk3 librsvg libsoup3 base-devel patchelf file` (Arch packages ship their headers, so there are no `-dev` packages). Windows: Visual Studio Build Tools ("Desktop development with C++"); WebView2 ships with Windows 10/11. No OpenSSL anywhere: TLS is rustls with ring. |
 | WASM target | `rustup target add wasm32-unknown-unknown` |
-| Tools | `cargo install --locked trunk@0.21.14 tauri-cli@2.12.1` |
+| Tools | `cargo install --locked trunk@0.22.1 tauri-cli@2.12.5` |
 | Icon tools (optional) | `rsvg-convert` (Homebrew `librsvg`) |
 
 Versions in use: Rust 1.99, tauri 2.12, leptos 0.8, kube 4.2, k8s-openapi 0.28 with the `latest` feature (v1.36). Run `cargo info <crate>@<major>` to see newer releases.
@@ -501,7 +501,7 @@ ui             Leptos CSR app
   - When the shell process exits (`exit`, Ctrl-D, even with a non-zero code: status `Success` or reason `NonZeroExitCode`), the backend closes the window. Any other ending (no shell, dropped connection, gate) leaves the window open with the message and Reconnect. Checked on UAT for `exit`, `false; exit` and a distroless image.
   - The command is `/bin/sh -c 'exec bash, else sh'`. Distroless images report "This image has no shell".
   - Output is base64 in `ExecOutput::Data` (chunks can split UTF-8). Input goes one invoke per keystroke chunk; resizes go through the fit add-on.
-  - Terminal: xterm.js 5.5.0 and addon-fit 0.10.0, vendored in `ui/vendor/xterm` (integrity-checked, MIT; see its README) and loaded as plain scripts in `index.html`. The light theme darkens the ANSI palette.
+  - Terminal: xterm.js 6.0.0 and addon-fit 0.11.0, vendored in `ui/vendor/xterm` (integrity-checked, MIT; see its README) and loaded as plain scripts in `index.html`. The light theme darkens the ANSI palette.
   - Tested on UAT with `examples/exec_check.rs`, which echoes, runs `uname` and exits, and refuses prod-like contexts. The datadog cluster-agent got a bash session; keda-operator is distroless.
 - **Port-forwarding** (`crates/core/src/forward.rs`, `src-tauri/src/forward.rs`, `ui/src/forward.rs`):
   - Forward buttons on running pod containers that declare ports, and on Service detail panels. The dialog lists TCP ports and takes a local port (default the same, 0 for any).
@@ -549,7 +549,7 @@ ui             Leptos CSR app
 - **`dragDropEnabled: false`** in `tauri.conf.json`, so HTML5 drag and drop works for section reordering. The app doesn't need file drops.
 - **About panel** (`src-tauri/src/menu.rs`): Tauri's default menu, but the About item is rebuilt with an embedded icon (`icons/128x128@2x.png`, needs tauri's `image-png` feature) and "An it-problems application." credits. Without the explicit icon, unbundled runs (`cargo tauri dev`) show a generic icon. `bundle.publisher`/`copyright` in `tauri.conf.json` name it-problems.
 - **YAML editing** (`crates/core/src/edit.rs`, `ui/src/editor.rs`):
-  - Ace (`ace-builds` 1.44.0, BSD) is vendored in `ui/vendor/ace/` (source maps removed; integrity hash in its README) and copied to `dist/ace/` by Trunk, so the app works offline and loads nothing from the network. Monaco was too big; CodeMirror 6 needs a bundler.
+  - Ace (`ace-builds` 1.45.2, BSD) is vendored in `ui/vendor/ace/` (source maps removed; integrity hash in its README) and copied to `dist/ace/` by Trunk, so the app works offline and loads nothing from the network. Monaco was too big; CodeMirror 6 needs a bundler.
   - Saving replaces the whole object (PUT) rather than patching, so removing a field removes it. The YAML keeps `metadata.resourceVersion`, so a change made meanwhile gets a 409, shown as "changed by someone else… Reload".
   - The edit must keep its apiVersion, kind, name and namespace; renaming would mean creating a new object.
   - Save always dry-runs first, so the confirmation diff only appears for an edit the server accepts. The diff is computed in the UI (line LCS, unchanged runs folded).
