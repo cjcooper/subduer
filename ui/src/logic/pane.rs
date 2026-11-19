@@ -1,14 +1,38 @@
-//! User-set widths of the detail panes beside the tables, per pane, and their
-//! saved form.
+//! User-set widths of resizable panes (the sidebar and the detail panes beside
+//! the tables), per pane, and their saved form.
 
 use std::collections::HashMap;
 
-/// Narrowest a pane can be dragged.
-pub(crate) const MIN_PANE: f64 = 320.0;
 /// Room always left for the table beside the pane.
 pub(crate) const MIN_TABLE: f64 = 240.0;
 /// How far one arrow-key press moves the divider.
 pub(crate) const KEY_STEP: f64 = 16.0;
+
+/// Which side of its divider a pane is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    /// Left of the divider (the sidebar): the divider is its right edge.
+    Left,
+    /// Right of the divider (a detail pane): the divider is its left edge.
+    Right,
+}
+
+/// A resizable pane: where it is kept, which side of its divider it's on,
+/// and how narrow and wide it can be dragged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Pane {
+    pub(crate) name: &'static str,
+    pub(crate) side: Side,
+    pub(crate) min: f64,
+    pub(crate) max: f64,
+}
+
+/// The navigation sidebar.
+pub(crate) const SIDEBAR: Pane = Pane { name: "sidebar", side: Side::Left, min: 180.0, max: 480.0 };
+/// The resource detail panel.
+pub(crate) const DETAIL: Pane = Pane { name: "detail", side: Side::Right, min: 320.0, max: f64::INFINITY };
+/// The Traces page's workload detail.
+pub(crate) const REVIEW: Pane = Pane { name: "review", side: Side::Right, min: 320.0, max: f64::INFINITY };
 
 /// `pane -> width in px`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,32 +72,45 @@ impl PaneWidths {
     }
 }
 
-/// The width while dragging. The divider is on the pane's left edge, so moving
-/// the pointer left widens the pane.
-pub(crate) fn dragged_width(start_width: f64, start_x: f64, x: f64) -> f64 {
-    start_width - (x - start_x)
-}
-
-/// A width kept between [`MIN_PANE`] and what leaves [`MIN_TABLE`] for the
-/// table, where `room` is the pane's and table's widths together. When there
-/// isn't room for both minimums, the pane keeps its minimum.
-pub(crate) fn clamp_width(width: f64, room: f64) -> f64 {
-    width.clamp(MIN_PANE, (room - MIN_TABLE).max(MIN_PANE))
-}
-
-/// How an arrow key changes the width: Left widens, Right narrows.
-pub(crate) fn key_change(key: &str) -> Option<f64> {
-    match key {
-        "ArrowLeft" => Some(KEY_STEP),
-        "ArrowRight" => Some(-KEY_STEP),
-        _ => None,
+/// The width while dragging: the pane grows as the divider moves away from
+/// it (left for a pane on the right, right for one on the left).
+pub(crate) fn dragged_width(side: Side, start_width: f64, start_x: f64, x: f64) -> f64 {
+    match side {
+        Side::Left => start_width + (x - start_x),
+        Side::Right => start_width - (x - start_x),
     }
 }
 
+/// A width kept within the pane's limits and leaving [`MIN_TABLE`] for the
+/// table, where `room` is the pane's and table's widths together. When there
+/// isn't room for both minimums, the pane keeps its minimum.
+pub(crate) fn clamp_width(pane: Pane, width: f64, room: f64) -> f64 {
+    width.clamp(pane.min, (room - MIN_TABLE).min(pane.max).max(pane.min))
+}
+
+/// How an arrow key changes the width: it moves the divider that way.
+pub(crate) fn key_change(side: Side, key: &str) -> Option<f64> {
+    let step = match key {
+        "ArrowLeft" => -KEY_STEP,
+        "ArrowRight" => KEY_STEP,
+        _ => return None,
+    };
+    Some(match side {
+        Side::Left => step,
+        Side::Right => -step,
+    })
+}
+
 /// The pane's `style`: its width once set; otherwise the stylesheet's default.
-/// The table beside it still wins when the window gets narrower.
-pub(crate) fn pane_style(width: Option<f64>) -> String {
-    width.map(|w| format!("width: {w:.0}px; max-width: none; flex-shrink: 1")).unwrap_or_default()
+/// A detail pane gives way to the table beside it when the window gets
+/// narrower; the sidebar keeps its width.
+pub(crate) fn pane_style(side: Side, width: Option<f64>) -> String {
+    width
+        .map(|w| match side {
+            Side::Left => format!("width: {w:.0}px"),
+            Side::Right => format!("width: {w:.0}px; max-width: none; flex-shrink: 1"),
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

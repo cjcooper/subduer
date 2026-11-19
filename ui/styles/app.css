@@ -335,7 +335,7 @@ table.resources { width: 100%; border-collapse: collapse; }
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
 }
 
-/* Divider between a table and its detail pane (pane.rs): a zero-width flex
+/* Divider between a pane (sidebar or detail) and the table beside it (pane.rs): a zero-width flex
    item whose grab area straddles the pane's border. */
 .pane-resizer { position: relative; flex: 0 0 0; width: 0; z-index: 3; outline: none; }
 .pane-resizer::before {

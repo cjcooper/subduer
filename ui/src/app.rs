@@ -906,6 +906,7 @@ fn UnlockDialog(store: Store) -> impl IntoView {
 
 #[component]
 fn Sidebar(store: Store) -> impl IntoView {
+    let width = crate::pane::PaneWidth::load(crate::logic::pane::SIDEBAR);
     let in_category = move |category: Category| {
         store.kind_filter.with(|filter| store.cluster.with(|c| logic::kinds_in(c.as_ref(), category, filter)))
     };
@@ -920,7 +921,7 @@ fn Sidebar(store: Store) -> impl IntoView {
     };
 
     view! {
-        <nav class="sidebar">
+        <nav class="sidebar" style=move || width.style()>
             <input
                 class="search"
                 type="search"
@@ -1026,6 +1027,7 @@ fn Sidebar(store: Store) -> impl IntoView {
                 }).collect_view()}
             </div>
         </nav>
+        <crate::pane::PaneResizer pane=width label="navigation" />
     }
 }
 
@@ -1554,7 +1556,7 @@ const TEXT_FIELD: &str = "textarea, [contenteditable]:not([contenteditable=false
 
 #[component]
 fn DetailPanel(store: Store) -> impl IntoView {
-    let width = crate::pane::PaneWidth::load("detail");
+    let width = crate::pane::PaneWidth::load(crate::logic::pane::DETAIL);
     let close_now = move || {
         guard(store, move || {
             store.selected.set(None);
