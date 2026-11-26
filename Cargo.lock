@@ -5026,7 +5026,6 @@ name = "subduer"
 version = "0.1.10"
 dependencies = [
  "jiff",
- "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "percent-encoding",

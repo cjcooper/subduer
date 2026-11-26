@@ -6,8 +6,9 @@
   AppIcon.icon/   Icon Composer document for macOS 26+, which shows the light or
                   dark version (and the clear and tinted ones) as the system asks
   icon-festive.svg, icon-festive-dark.svg
-                  the holiday versions (festive.rs): the Dock shows them on macOS
-                  while the app runs, and the About window too
+                  the holiday versions, for the About window on macOS
+  festive/        the macOS bundle's icon (tauri.macos.conf.json): the holiday
+                  AppIcon.icon for macOS 26+ and icon.icns before it
 
 Regenerate the icons with:
   python3 src-tauri/icons/make_icon.py src-tauri/icons
@@ -18,6 +19,10 @@ Regenerate the icons with:
   rsvg-convert -w 256 -h 256 src-tauri/icons/icon-dark.svg -o src-tauri/icons/dark-256x256.png
   rsvg-convert -w 512 -h 512 src-tauri/icons/icon-festive.svg -o src-tauri/icons/festive-512.png
   rsvg-convert -w 512 -h 512 src-tauri/icons/icon-festive-dark.svg -o src-tauri/icons/festive-dark-512.png
+  mkdir -p /tmp/festive.iconset && for s in 16 32 128 256 512; do
+    rsvg-convert -w $s -h $s src-tauri/icons/icon-festive.svg -o /tmp/festive.iconset/icon_${s}x${s}.png
+    rsvg-convert -w $((s*2)) -h $((s*2)) src-tauri/icons/icon-festive.svg -o /tmp/festive.iconset/icon_${s}x${s}@2x.png
+  done && iconutil -c icns /tmp/festive.iconset -o src-tauri/icons/festive/icon.icns
 
 Preview the macOS versions with Icon Composer's ictool (Xcode 26+), e.g.:
   "$(xcode-select -p)/../Applications/Icon Composer.app/Contents/Executables/ictool" \\
@@ -146,17 +151,21 @@ def srgb(hex_color):
     r, g, b = (int(hex_color[i:i+2], 16)/255 for i in (1, 3, 5))
     return f"srgb:{r:.5f},{g:.5f},{b:.5f},1.00000"
 
-def icon_composer(out):
-    """AppIcon.icon: the system draws the tile and the glass; we give it the
-    tile colours and two layers per version."""
+def icon_composer(out, palettes=PALETTES, extra=()):
+    """AppIcon.icon in `out`: the system draws the tile and the glass; we give
+    it the tile colours and a layer group per shape, front first, each with a
+    light and a dark version. `extra` adds (name, layer, front) groups."""
+    layers = [(name, layer, front) for name, layer, front in extra if front]
+    layers += [("helm", helm, True), ("dial", dial, False)]
+    layers += [(name, layer, front) for name, layer, front in extra if not front]
     assets = os.path.join(out, "AppIcon.icon", "Assets")
     os.makedirs(assets, exist_ok=True)
-    for mode, p in PALETTES.items():
-        for name, layer in (("dial", dial), ("helm", helm)):
+    for mode, p in palettes.items():
+        for name, layer, _ in layers:
             with open(os.path.join(assets, f"{name}-{mode}.svg"), "w") as f:
                 f.write(svg(layer(p)))
     def gradient(mode):
-        return {"linear-gradient": [srgb(c) for c in PALETTES[mode]["bg"]], "orientation": {"start": {"x": 0.5, "y": 0}, "stop": {"x": 0.5, "y": 1}}}
+        return {"linear-gradient": [srgb(c) for c in palettes[mode]["bg"]], "orientation": {"start": {"x": 0.5, "y": 0}, "stop": {"x": 0.5, "y": 1}}}
     def group(name):
         return {"layers": [{
                     "name": name,
@@ -173,7 +182,7 @@ def icon_composer(out):
             {"value": gradient("light")},
             {"appearance": "dark", "value": gradient("dark")},
         ],
-        "groups": [group("helm"), group("dial")],   # front first
+        "groups": [group(name) for name, _, _ in layers],   # front first
         "supported-platforms": {"squares": ["macOS"]},
     }
     with open(os.path.join(out, "AppIcon.icon", "icon.json"), "w") as f:
@@ -186,6 +195,8 @@ with open(os.path.join(out, "icon.svg"), "w") as f:
 with open(os.path.join(out, "icon-dark.svg"), "w") as f:
     f.write(flat(PALETTES["dark"]))
 icon_composer(out)
+# The macOS bundle's icon (tauri.macos.conf.json): the holiday version.
+icon_composer(os.path.join(out, "festive"), FESTIVE, extra=[("hat", hat, True), ("snow", snow, False)])
 with open(os.path.join(out, "icon-festive.svg"), "w") as f:
     f.write(flat(FESTIVE["light"], festive=True))
 with open(os.path.join(out, "icon-festive-dark.svg"), "w") as f:
