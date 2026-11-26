@@ -7,6 +7,7 @@ mod commands;
 mod desktop_entry;
 mod editor;
 mod exec;
+mod festive;
 mod forward;
 mod kubeconfig_watch;
 mod logs;
@@ -263,13 +264,15 @@ pub fn start<R: Runtime>(builder: tauri::Builder<R>, context: tauri::Context<R>)
         .run(on_run_event);
 }
 
-/// The menu, production marks, the first main window and the kubeconfig watch.
+/// The menu, production marks, the first main window, the holiday Dock icon
+/// and the kubeconfig watch.
 fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
     menu::install(app.handle())?;
     if let Ok(dir) = app.path().app_config_dir() {
         *app.state::<AppState>().prod.lock().unwrap() = ProdMarks::load(&dir.join("production.json"));
     }
     open_main_window(app.handle(), MAIN_LABEL)?;
+    festive::dock_icon(app.get_webview_window(MAIN_LABEL).and_then(|w| w.theme().ok()));
     tauri::async_runtime::spawn(kubeconfig_watch::run(app.handle().clone()));
     Ok(())
 }
@@ -328,6 +331,7 @@ fn handlers<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             commands::set_unsaved,
             commands::set_app_theme,
             accent::system_accent,
+            festive::festive,
             vibrancy::set_transparency,
             about::about_info,
             about::close_about,
@@ -443,7 +447,10 @@ fn hold_close<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
 fn window_event<R: Runtime>(app: &AppHandle<R>, label: &str, event: &WindowEvent) {
     match event {
         WindowEvent::Destroyed => closed(app, label),
-        WindowEvent::ThemeChanged(theme) => app_icon::theme_changed(app, label, *theme),
+        WindowEvent::ThemeChanged(theme) => {
+            app_icon::theme_changed(app, label, *theme);
+            festive::dock_icon(Some(*theme));
+        }
         _ => {}
     }
 }
