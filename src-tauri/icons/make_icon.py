@@ -7,7 +7,7 @@
                   dark version (and the clear and tinted ones) as the system asks
   icon-festive.svg, icon-festive-dark.svg
                   the holiday versions (festive.rs): the Dock shows them on macOS
-                  in December, and the About window too
+                  while the app runs, and the About window too
 
 Regenerate the icons with:
   python3 src-tauri/icons/make_icon.py src-tauri/icons

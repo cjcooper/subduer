@@ -1,36 +1,30 @@
-//! A little holiday flair on macOS, from December 1 to January 6: the Dock
-//! shows a festive icon (a Santa hat on a green and red helm) while the app
-//! runs, and the UI adds a hat to its name and lights along the top bar.
-//! The bundle's own icon stays as it is; other systems see no change.
+//! A little holiday flair on macOS: the Dock shows a festive icon (a Santa
+//! hat on a green and red helm) while the app runs, and the UI adds a hat to
+//! its name and lights along the top bar. The bundle's own icon stays as it
+//! is; other systems see no change.
 //!
-//! `SUBDUER_FESTIVE=1` turns it on outside the season and `=0` off inside it.
+//! `SUBDUER_FESTIVE=0` turns it off.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
-use jiff::civil::Date;
 use tauri::Theme;
 
 const LIGHT: &[u8] = include_bytes!("../icons/festive-512.png");
 const DARK: &[u8] = include_bytes!("../icons/festive-dark-512.png");
 
-/// Whether `date` falls in the holiday season: December, and on to Twelfth Night.
-fn in_season(date: Date) -> bool {
-    date.month() == 12 || (date.month() == 1 && date.day() <= 6)
-}
-
-/// `SUBDUER_FESTIVE` as on (`1`, `true`, `on`) or off (anything else); `None` unset.
+/// `SUBDUER_FESTIVE` as on (`1`, `true`, `on`, `yes`) or off (anything else); `None` unset.
 fn forced(value: Option<&str>) -> Option<bool> {
     value.map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
 }
 
-/// On macOS, whether it's the season (or the environment says so).
-fn decide(macos: bool, forced: Option<bool>, today: impl FnOnce() -> Date) -> bool {
-    macos && forced.unwrap_or_else(|| in_season(today()))
+/// On macOS, unless the environment turns it off.
+fn decide(macos: bool, forced: Option<bool>) -> bool {
+    macos && forced.unwrap_or(true)
 }
 
-/// Whether the app dresses up today.
+/// Whether the app dresses up.
 pub fn active() -> bool {
     let env = std::env::var("SUBDUER_FESTIVE").ok();
-    decide(cfg!(target_os = "macos"), forced(env.as_deref()), || jiff::Zoned::now().date())
+    decide(cfg!(target_os = "macos"), forced(env.as_deref()))
 }
 
 /// For the UI: whether to add its holiday touches.
@@ -47,7 +41,7 @@ fn icon(theme: Option<Theme>) -> &'static [u8] {
     }
 }
 
-/// In season, shows the festive icon in the Dock for `theme`, the main
+/// Where active, shows the festive icon in the Dock for `theme`, the main
 /// window's appearance. Called at start and whenever that appearance changes.
 pub fn dock_icon(theme: Option<Theme>) {
     if active() {
@@ -78,18 +72,6 @@ fn set_dock_icon(_png: &[u8]) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jiff::civil::date;
-
-    #[test]
-    fn the_season_runs_from_december_to_twelfth_night() {
-        assert!(!in_season(date(2026, 11, 30)));
-        assert!(in_season(date(2026, 12, 1)));
-        assert!(in_season(date(2026, 12, 25)));
-        assert!(in_season(date(2026, 12, 31)));
-        assert!(in_season(date(2027, 1, 6)));
-        assert!(!in_season(date(2027, 1, 7)));
-        assert!(!in_season(date(2027, 7, 4)));
-    }
 
     #[test]
     fn the_environment_overrides_the_calendar() {
@@ -101,15 +83,12 @@ mod tests {
     }
 
     #[test]
-    fn macos_only() {
-        let christmas = || date(2026, 12, 25);
-        let summer = || date(2026, 7, 1);
-        assert!(decide(true, None, christmas));
-        assert!(!decide(true, None, summer));
-        assert!(decide(true, Some(true), summer));
-        assert!(!decide(true, Some(false), christmas));
-        assert!(!decide(false, None, christmas));
-        assert!(!decide(false, Some(true), christmas));
+    fn macos_only_unless_turned_off() {
+        assert!(decide(true, None));
+        assert!(decide(true, Some(true)));
+        assert!(!decide(true, Some(false)));
+        assert!(!decide(false, None));
+        assert!(!decide(false, Some(true)));
     }
 
     #[test]

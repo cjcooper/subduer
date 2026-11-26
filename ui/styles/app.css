@@ -173,7 +173,7 @@ button, input, select { font: inherit; color: inherit; }
   padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; letter-spacing: 0.02em; }
-/* Holiday touches (festive.rs: macOS, December 1 to January 6): a Santa hat
+/* Holiday touches (festive.rs: macOS): a Santa hat
    on the name and a string of lights along the bottom of the top bar. */
 :root[data-festive] .topbar { position: relative; }
 :root[data-festive] .brand { position: relative; }
@@ -1129,7 +1129,7 @@ table.figures .num { text-align: right; }
 }
 :root[data-theme="dark"] .about-icon.light { display: none; }
 :root[data-theme="dark"] .about-icon.dark { display: inline-block; }
-/* In season, the holiday icon instead (still light or dark). */
+/* With the holiday flair, the holiday icon instead (still light or dark). */
 :root:not([data-festive]) .about-icon.festive, :root[data-festive] .about-icon:not(.festive) { display: none; }
 .about-app a { color: var(--accent); text-decoration: none; cursor: pointer; }
 .about-app a:hover { text-decoration: underline; }

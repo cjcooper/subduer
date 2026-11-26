@@ -123,7 +123,7 @@ fn AboutTab(
     });
     view! {
         <div class="about-main">
-            // The CSS shows the one that matches the appearance (and the season).
+            // The CSS shows the one that matches the appearance (and the holiday flair).
             <img class="about-icon light" src="128x128@2x.png" alt="" />
             <img class="about-icon dark" src="dark-256x256.png" alt="" />
             <img class="about-icon light festive" src="festive-512.png" alt="" />
