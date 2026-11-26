@@ -123,9 +123,11 @@ fn AboutTab(
     });
     view! {
         <div class="about-main">
-            // The CSS shows the one that matches the appearance.
+            // The CSS shows the one that matches the appearance (and the season).
             <img class="about-icon light" src="128x128@2x.png" alt="" />
             <img class="about-icon dark" src="dark-256x256.png" alt="" />
+            <img class="about-icon light festive" src="festive-512.png" alt="" />
+            <img class="about-icon dark festive" src="festive-dark-512.png" alt="" />
             <h1>{info.name.clone()}</h1>
             <p class="muted">{logic::version_text(&info.version)}</p>
             <p>{description}</p>

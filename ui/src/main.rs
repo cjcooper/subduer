@@ -42,6 +42,8 @@ fn main() {
     prefs::follow_theme();
     // …and the system accent colour.
     prefs::follow_accent();
+    // …and, on macOS in December, a little holiday flair.
+    prefs::follow_festive();
     // The same page serves logs, edit, shell, capture and About windows: `?logs=`, `?edit=`, `?exec=`, `?capture=<label>`, `?about`.
     if about::from_url() {
         leptos::mount::mount_to_body(about::AboutApp);

@@ -129,6 +129,17 @@ fn apply_accent(accent: Option<&str>) {
     };
 }
 
+/// `data-festive` on the root element turns on the stylesheet's holiday
+/// touches; the backend says when (macOS, in December). Outside the app, none.
+pub fn follow_festive() {
+    wasm_bindgen_futures::spawn_local(async {
+        let on = crate::tauri::invoke::<_, bool>("festive", &crate::tauri::NoArgs {}).await.unwrap_or(false);
+        if let Some(root) = leptos::prelude::document().document_element() {
+            let _ = if on { root.set_attribute("data-festive", "") } else { root.remove_attribute("data-festive") };
+        }
+    });
+}
+
 pub fn desktop() -> Desktop {
     let agent = leptos::prelude::window().navigator().user_agent().unwrap_or_default();
     logic::desktop_from(&agent)
