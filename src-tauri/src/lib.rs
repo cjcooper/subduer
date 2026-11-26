@@ -264,15 +264,13 @@ pub fn start<R: Runtime>(builder: tauri::Builder<R>, context: tauri::Context<R>)
         .run(on_run_event);
 }
 
-/// The menu, production marks, the first main window, the holiday Dock icon
-/// and the kubeconfig watch.
+/// The menu, production marks, the first main window and the kubeconfig watch.
 fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
     menu::install(app.handle())?;
     if let Ok(dir) = app.path().app_config_dir() {
         *app.state::<AppState>().prod.lock().unwrap() = ProdMarks::load(&dir.join("production.json"));
     }
     open_main_window(app.handle(), MAIN_LABEL)?;
-    festive::dock_icon(app.get_webview_window(MAIN_LABEL).and_then(|w| w.theme().ok()));
     tauri::async_runtime::spawn(kubeconfig_watch::run(app.handle().clone()));
     Ok(())
 }
@@ -395,6 +393,9 @@ pub(crate) fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
             api.prevent_close();
         }
         RunEvent::WindowEvent { label, event, .. } => window_event(app, &label, &event),
+        // Not in `setup`: dev builds set the Dock icon themselves after it,
+        // just before this event.
+        RunEvent::Ready => festive::dock_icon(app.get_webview_window(MAIN_LABEL).and_then(|w| w.theme().ok())),
         // Quitting that can't be held (macOS: the Dock's Quit, logging out):
         // still close the trace's file, with its last pull.
         RunEvent::Exit => {
