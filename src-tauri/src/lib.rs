@@ -393,9 +393,6 @@ pub(crate) fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
             api.prevent_close();
         }
         RunEvent::WindowEvent { label, event, .. } => window_event(app, &label, &event),
-        // Not in `setup`: dev builds set the Dock icon themselves after it,
-        // just before this event.
-        RunEvent::Ready => festive::dock_icon(app.get_webview_window(MAIN_LABEL).and_then(|w| w.theme().ok())),
         // Quitting that can't be held (macOS: the Dock's Quit, logging out):
         // still close the trace's file, with its last pull.
         RunEvent::Exit => {
@@ -448,10 +445,7 @@ fn hold_close<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
 fn window_event<R: Runtime>(app: &AppHandle<R>, label: &str, event: &WindowEvent) {
     match event {
         WindowEvent::Destroyed => closed(app, label),
-        WindowEvent::ThemeChanged(theme) => {
-            app_icon::theme_changed(app, label, *theme);
-            festive::dock_icon(Some(*theme));
-        }
+        WindowEvent::ThemeChanged(theme) => app_icon::theme_changed(app, label, *theme),
         _ => {}
     }
 }
