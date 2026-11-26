@@ -5023,7 +5023,7 @@ dependencies = [
 
 [[package]]
 name = "subduer"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "jiff",
  "objc2",
@@ -5045,7 +5045,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5073,7 +5073,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-types"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -5081,7 +5081,7 @@ dependencies = [
 
 [[package]]
 name = "subduer-ui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
